@@ -1,0 +1,5 @@
+# 行尾统一：文本文件按 LF 存储、按 LF 检出，避免不同机器 autocrlf 造成的整文件改写。
+* text=auto eol=lf
+
+*.cmd text eol=crlf
+*.bat text eol=crlf

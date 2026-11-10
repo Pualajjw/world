@@ -1,0 +1,3 @@
+- insert:
+    - id: world
+      name: '@local/dsh-world'

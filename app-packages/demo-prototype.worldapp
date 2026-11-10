@@ -1,0 +1,10 @@
+{
+  "format": "dsh-world-app/1",
+  "id": "demo-prototype",
+  "name": "聊天原型",
+  "description": "把内置聊天界面作为外部应用打开",
+  "icon": "💬",
+  "color": "#4c86ff",
+  "url": "http://127.0.0.1:53317/",
+  "size": { "w": 82, "h": 78 }
+}

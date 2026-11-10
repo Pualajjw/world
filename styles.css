@@ -1,0 +1,2409 @@
+:root {
+  --world-taskbar-height: 48px;
+  --world-desktop-top: var(--dsh-windows-titlebar-height, 0px);
+  --world-close: #c42b1c;
+  --world-font: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, "Microsoft YaHei UI", sans-serif;
+}
+body {
+  --world-accent: var(--dsw-alias-state-business-primary, #4cc2ff);
+  --world-surface: var(--dsw-alias-bg-base, #202020);
+  --world-surface-1: var(--dsw-alias-bg-layer-1, #252526);
+  --world-surface-2: var(--dsw-alias-bg-layer-2, #333333);
+  --world-surface-3: var(--dsw-alias-bg-layer-3, #3f3f46);
+  --world-ink: var(--dsw-alias-label-primary, #f4f4f5);
+  --world-muted: var(--dsw-alias-label-secondary, rgba(255, 255, 255, .72));
+  --world-subtle: var(--dsw-alias-label-tertiary, rgba(255, 255, 255, .48));
+  --world-line: var(--dsw-alias-border-l2, rgba(255, 255, 255, .085));
+  --world-hover: var(--dsw-alias-interactive-bg-hover, rgba(255, 255, 255, .09));
+  --world-active: var(--dsw-alias-interactive-bg-active, rgba(255, 255, 255, .14));
+  --world-window-bg: var(--world-surface);
+}
+
+.world-wall, .world-icons, .world-window-frame, .world-taskbar, .world-start {
+  box-sizing: border-box;
+  color: var(--world-ink);
+  font-family: var(--world-font);
+  -webkit-tap-highlight-color: transparent;
+}
+.world-wall *, .world-icons *, .world-window-frame *, .world-taskbar *, .world-start * { box-sizing: border-box; }
+.world-wall button, .world-icons button, .world-window-frame button, .world-taskbar button { font: inherit; color: inherit; }
+
+.world-wall {
+  position: fixed;
+  inset: var(--world-desktop-top) 0 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: auto;
+  /* 壁纸色相 / 遮罩 / 光晕 / 地面强度由 wallpaper.js 写成变量，默认值保持原来的极光。 */
+  --wall-tint: var(--world-accent);
+  --wall-dim: 0%;
+  --wall-bloom: 1;
+  --wall-grid: 1;
+  background:
+    radial-gradient(58% 52% at 50% 48%, color-mix(in srgb, var(--wall-tint) 24%, var(--world-surface)) 0%, transparent 72%),
+    radial-gradient(120% 100% at 14% 4%, color-mix(in srgb, var(--wall-tint) 12%, var(--world-surface-1)) 0%, transparent 58%),
+    linear-gradient(165deg, var(--world-surface-2) 0%, var(--world-surface) 54%, var(--world-surface-1) 100%);
+}
+/* 纯色壁纸：整块换成用户选的颜色，其它装饰层照常叠加。 */
+body .world-wall[data-world-wallpaper="solid"] { background: var(--wall-solid, var(--world-surface)); }
+/* 遮罩向主题底色靠拢：深色主题压暗、浅色主题提亮，图标文字始终有对比度。 */
+.world-wall-scrim {
+  position: absolute; inset: 0; pointer-events: none;
+  background: color-mix(in srgb, var(--world-surface) var(--wall-dim, 0%), transparent);
+}
+.world-bloom { position: absolute; left: 47%; top: 46%; width: 0; height: 0; transform: rotate(-8deg); filter: opacity(var(--wall-bloom, 1)); }
+.world-rib {
+  position: absolute; left: -36vmin; top: -7vmin; width: 72vmin; height: 14vmin;
+  border-radius: 50%; mix-blend-mode: screen; filter: blur(11px);
+}
+.world-r1 { transform: rotate(-24deg) scale(1.1); background: linear-gradient(90deg, transparent 4%, color-mix(in srgb, var(--world-accent) 82%, transparent) 44%, transparent 96%); }
+.world-r2 { transform: rotate(37deg) scale(.82); opacity: .95; background: linear-gradient(90deg, transparent 6%, color-mix(in srgb, var(--world-accent) 68%, white) 52%, transparent 94%); }
+.world-r3 { transform: rotate(99deg) scale(.7); opacity: .8; background: linear-gradient(90deg, transparent 3%, color-mix(in srgb, var(--world-accent) 72%, transparent) 48%, transparent 97%); }
+.world-r4 { transform: rotate(-71deg) scale(.95); opacity: .9; background: linear-gradient(90deg, transparent 5%, color-mix(in srgb, var(--world-accent) 65%, white) 46%, transparent 95%); }
+.world-r5 { transform: rotate(11deg) scale(1.42); opacity: .4; background: linear-gradient(90deg, transparent 8%, color-mix(in srgb, var(--world-accent) 46%, white) 62%, transparent 100%); }
+/* 两道光束各自缓慢明暗（周期不同、相位错开）：中央那片光不是你截图里的一张图，
+   而是会在原地慢慢换气的东西。只动 opacity，不碰它们的旋转与缩放。 */
+.world-r2 { animation: world-shaft-drift 13s ease-in-out infinite -3s; }
+.world-r4 { animation: world-shaft-drift 17s ease-in-out infinite -9s; }
+@keyframes world-shaft-drift {
+  0%, 100% { opacity: .8; }
+  50% { opacity: .98; }
+}
+.world-core {
+  position: absolute; left: -9vmin; top: -9vmin; width: 18vmin; height: 18vmin; border-radius: 50%;
+  mix-blend-mode: screen; filter: blur(10px); opacity: .8;
+  background: radial-gradient(circle, color-mix(in srgb, var(--world-accent) 38%, white) 0%, color-mix(in srgb, var(--world-accent) 62%, transparent) 40%, transparent 74%);
+}
+/* 屋子自己会呼吸：不跟着鼠标、不等任何事件，一直在很慢地明暗起伏。
+   幅度小到平时注意不到，但盯着看两秒就知道它不是一张静止的图。
+   注意只能动 opacity / 光核自己的 transform——.world-bloom 的 transform 被视差和 3D 接管了。 */
+.world-wall .world-bloom { animation: world-room-breathe 17s ease-in-out infinite; }
+.world-core { animation: world-core-breathe 11s ease-in-out infinite; }
+@keyframes world-room-breathe {
+  0%, 100% { opacity: .88; }
+  50% { opacity: 1; }
+}
+@keyframes world-core-breathe {
+  0%, 100% { transform: scale(1) translate3d(0, 0, 0); opacity: .74; }
+  50% { transform: scale(1.08) translate3d(0, -1.2vmin, 0); opacity: .94; }
+}
+.world-vignette { position: absolute; inset: 0; background: radial-gradient(78% 64% at 50% 46%, transparent 38%, color-mix(in srgb, var(--world-surface) 38%, transparent) 100%); }
+body[data-world-theme="light"] .world-bloom { opacity: .34; }
+body[data-world-theme="light"] .world-vignette { opacity: .28; }
+
+body[data-world-window="closed"] #root,
+body[data-world-window="min"] #root {
+  position: fixed !important;
+  left: 0 !important; top: 0 !important; width: 100vw !important; height: 100vh !important;
+  z-index: 0 !important;
+}
+body[data-world-window="normal"] #root,
+body[data-world-window="max"] #root {
+  position: fixed !important;
+  left: var(--world-win-x) !important;
+  top: max(var(--world-desktop-top), var(--world-win-y)) !important;
+  width: var(--world-win-w) !important;
+  height: var(--world-win-h) !important;
+  min-width: 0 !important; min-height: 0 !important;
+  box-sizing: border-box !important;
+  overflow: hidden !important;
+  z-index: 4 !important;
+  border-radius: 8px !important;
+  background: var(--world-window-bg);
+  box-shadow: 0 26px 66px rgba(0,0,0,.6);
+}
+body[data-world-window="normal"][data-world-active-kind="vscode"] #root,
+body[data-world-window="max"][data-world-active-kind="vscode"] #root,
+body[data-world-window="normal"][data-world-active-kind="plugin"] #root,
+body[data-world-window="max"][data-world-active-kind="plugin"] #root { z-index: 2 !important; }
+body[data-world-active-kind="vscode"] .world-window-frame,
+body[data-world-active-kind="plugin"] .world-window-frame { z-index: 3 !important; }
+body[data-world-active-kind="plugin"] .world-vscode-window { z-index: 3; }
+/* The host's native caption pseudo-element moves with #root into the simulated
+   window. Its Electron drag region would swallow pointer events from our
+   titlebar, including the three window buttons, so opened content is no-drag. */
+body[data-world-window="normal"] #root,
+body[data-world-window="normal"] #root *,
+body[data-world-window="normal"] #root::before,
+body[data-world-window="normal"] #root *::before,
+body[data-world-window="max"] #root,
+body[data-world-window="max"] #root *,
+body[data-world-window="max"] #root::before,
+body[data-world-window="max"] #root *::before {
+  -webkit-app-region: no-drag !important;
+  app-region: no-drag !important;
+}
+body[data-world-window="normal"] .world-window-frame,
+body[data-world-window="normal"] .world-window-frame *,
+body[data-world-window="max"] .world-window-frame,
+body[data-world-window="max"] .world-window-frame * {
+  -webkit-app-region: no-drag !important;
+  app-region: no-drag !important;
+}
+body[data-world-window="max"] #root {
+  left: 0 !important; top: var(--world-desktop-top) !important; width: 100vw !important;
+  height: calc(100vh - var(--world-taskbar-height) - var(--world-desktop-top)) !important;
+  box-sizing: border-box !important;
+  border-radius: 0 !important;
+}
+
+.world-icons {
+  position: fixed; left: 12px; right: 0; top: calc(var(--world-desktop-top) + 10px); bottom: calc(var(--world-taskbar-height) + 10px);
+  z-index: 3; display: flex; flex-flow: column wrap; align-content: flex-start; gap: 4px;
+  pointer-events: none;
+}
+.world-icons > .world-desktop-icon { pointer-events: auto; }
+.world-desktop-icon {
+  width: 96px; height: 96px; display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 6px 4px 4px; border: 1px solid transparent; border-radius: 4px; background: transparent;
+  cursor: default; user-select: none; touch-action: none;
+}
+.world-desktop-icon.is-dragging { cursor: grabbing; }
+body[data-world-icon-dragging="true"] { cursor: grabbing; }
+.world-desktop-icon:hover .world-glyph { background: color-mix(in srgb, var(--world-ink) 10%, transparent); }
+.world-desktop-icon.selected { border-color: var(--world-accent); background: color-mix(in srgb, var(--world-accent) 22%, transparent); }
+.world-desktop-icon.selected .world-glyph { background: color-mix(in srgb, var(--world-ink) 14%, transparent); }
+.world-glyph { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 11px; }
+.world-desktop-icon:active .world-glyph { transform: scale(.94); }
+.world-icon-label {
+  max-width: 90px; overflow: hidden; color: var(--world-ink); font-size: 12px; line-height: 15px; text-align: center;
+  text-shadow: 0 1px 3px rgba(0,0,0,.75); word-break: normal; overflow-wrap: break-word;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+
+/* 3D 开启时，图标站到地面上：位置与深度缩放由 plane.js 写行内样式，
+   这里只把它变成以脚底为原点的绝对定位贴纸——仍是平面，不透视、不挤出厚度。 */
+.world-icons.is-plane > .world-desktop-icon {
+  position: absolute; margin: 0; transform-origin: 50% 100%; will-change: transform;
+}
+
+.world-window-frame {
+  position: fixed; left: var(--world-win-x, 20vw); top: max(var(--world-desktop-top), var(--world-win-y, 9vh));
+  width: var(--world-win-w, 60vw); height: var(--world-win-h, 68vh); z-index: 5; display: flex; flex-direction: column;
+  overflow: hidden; border: 1px solid rgba(255,255,255,.09); border-radius: 8px;
+  background: transparent; box-shadow: 0 26px 66px rgba(0,0,0,.6), 0 2px 8px rgba(0,0,0,.4);
+  pointer-events: none;
+  transition: opacity .16s ease, transform .16s ease, left .16s ease, top .16s ease,
+    width .16s ease, height .16s ease, border-radius .16s ease, visibility 0s linear .16s;
+}
+body[data-world-adjusting="true"] .world-window-frame { transition: none; }
+.world-window-frame.is-closed { visibility: hidden; opacity: 0; transform: scale(.97); }
+.world-window-frame.is-min { visibility: hidden; opacity: 0; transform: scale(.86) translateY(24vh); }
+.world-window-frame.is-max {
+  left: 0; top: var(--world-desktop-top); width: 100vw; height: calc(100vh - var(--world-taskbar-height) - var(--world-desktop-top));
+  border-color: transparent; border-radius: 0;
+}
+.world-window-frame:not(.is-closed):not(.is-min) { visibility: visible; transition-delay: 0s; }
+.world-titlebar {
+  position: relative; z-index: 1;
+  height: 40px; flex: 0 0 40px; display: flex; align-items: center; justify-content: space-between;
+  background: var(--world-surface-1); border-bottom: 1px solid var(--world-line); color: var(--world-ink); pointer-events: auto;
+  touch-action: none; user-select: none; cursor: default;
+}
+.world-window-frame:not(.is-max) .world-titlebar { cursor: move; }
+.world-title { min-width: 0; height: 100%; flex: 1; display: flex; align-items: center; gap: 10px; padding-left: 14px; }
+.world-title span { overflow: hidden; color: var(--world-ink); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.world-window-controls { height: 100%; flex: 0 0 auto; display: flex; }
+.world-cap {
+  width: 46px; height: 100%; display: grid; place-items: center; border: 0; border-radius: 0;
+  background: transparent; color: var(--world-ink); cursor: default;
+}
+.world-cap:hover { background: rgba(255,255,255,.06); }
+.world-cap.world-close:hover { background: var(--world-close); }
+.world-cap.world-close:active { background: #b32a1c; }
+.world-root-warning {
+  position: absolute; top: 40px; right: 0; bottom: 0; left: 0; display: grid; place-items: center;
+  background: var(--world-window-bg); color: var(--world-muted); font-size: 13px;
+}
+
+.world-resize-handle { position: absolute; z-index: 2; pointer-events: auto; touch-action: none; }
+.world-resize-n { top: 0; right: 8px; left: 8px; height: 8px; cursor: ns-resize; }
+.world-resize-s { right: 8px; bottom: 0; left: 8px; height: 8px; cursor: ns-resize; }
+.world-resize-e { top: 8px; right: 0; bottom: 8px; width: 8px; cursor: ew-resize; }
+.world-resize-w { top: 8px; bottom: 8px; left: 0; width: 8px; cursor: ew-resize; }
+.world-resize-ne, .world-resize-nw, .world-resize-se, .world-resize-sw { z-index: 3; width: 8px; height: 8px; }
+.world-resize-ne { top: 0; right: 0; cursor: nesw-resize; }
+.world-resize-nw { top: 0; left: 0; cursor: nwse-resize; }
+.world-resize-se { right: 0; bottom: 0; cursor: nwse-resize; }
+.world-resize-sw { bottom: 0; left: 0; cursor: nesw-resize; }
+
+.world-taskbar {
+  position: fixed; right: 0; bottom: 0; left: 0; z-index: 100; height: var(--world-taskbar-height);
+  display: flex; align-items: center; border-top: 1px solid var(--world-line);
+  background: color-mix(in srgb, var(--world-surface) 82%, transparent); backdrop-filter: blur(30px) saturate(1.7);
+  -webkit-backdrop-filter: blur(30px) saturate(1.7);
+}
+.world-taskbar-center { position: absolute; left: 50%; display: flex; align-items: center; gap: 2px; transform: translateX(-50%); }
+.world-taskbar-apps { display: flex; align-items: center; gap: 2px; max-width: min(70vw, 720px); margin-left: 8px; padding-left: 8px; border-left: 1px solid rgba(255,255,255,.12); overflow: hidden; }
+.world-taskbar-app {
+  position: relative; height: 40px; min-width: 40px; max-width: 160px; display: flex; align-items: center; gap: 6px;
+  padding: 0 8px; border: 0; border-radius: 4px; background: transparent; color: var(--world-ink);
+  cursor: default; transition: background .12s;
+}
+.world-taskbar-app:hover { background: var(--world-hover); }
+.world-taskbar-app.on { background: var(--world-active); }
+.world-taskbar-app.on::after {
+  content: ""; position: absolute; bottom: 2px; left: 50%; width: 12px; height: 2px; border-radius: 2px;
+  background: var(--world-accent); transform: translateX(-50%);
+}
+.world-taskbar-app.is-min { opacity: .62; }
+/* 最小化的窗口也在运行：给一条短灰线，别让它看着像已经关掉了 */
+.world-taskbar-app.is-min::after {
+  content: ""; position: absolute; bottom: 2px; left: 50%; width: 8px; height: 2px; border-radius: 2px;
+  background: var(--world-subtle); transform: translateX(-50%);
+}
+.world-taskbar-app-icon { width: 20px; height: 20px; display: grid; place-items: center; flex: none; }
+.world-taskbar-app-name { min-width: 0; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.world-start-button {
+  position: relative; width: 40px; height: 40px; display: grid; place-items: center; border: 0; border-radius: 4px;
+  background: transparent; color: var(--world-ink); cursor: default; transition: background .12s;
+}
+.world-start-button:hover { background: var(--world-hover); }
+.world-start-button:active { background: var(--world-active); transform: scale(.96); }
+.world-start-button.on { background: var(--world-active); }
+.world-taskbar-right { height: 100%; display: flex; align-items: center; gap: 2px; margin-left: auto; padding-right: 8px; }
+.world-clock { padding: 2px 10px; border-radius: 4px; color: var(--world-ink); font-size: 12px; line-height: 15px; text-align: right; }
+.world-clock:hover { background: var(--world-hover); }
+.world-date { color: var(--world-muted); }
+.world-version { margin-left: 16px; font-size: 12px; color: var(--world-muted); white-space: nowrap; pointer-events: none; user-select: none; }
+
+.world-taskbar .world-control-button, .world-taskbar .world-depth-toggle {
+  position: relative; width: 40px; height: 40px; flex: none; display: grid; place-items: center;
+  margin: 0; padding: 0; border: 0; border-radius: 4px; background: transparent;
+  color: var(--world-ink); font: inherit; cursor: default; transition: background .12s;
+}
+.world-control-button:hover, .world-depth-toggle:hover { background: var(--world-hover); }
+.world-control-button.on, .world-depth-toggle.on { background: var(--world-active); }
+.world-control-button.on::after, .world-depth-toggle.on::after {
+  content: ""; position: absolute; bottom: 2px; left: 50%; width: 12px; height: 2px; border-radius: 2px;
+  background: var(--world-accent); transform: translateX(-50%);
+}
+.world-control-button:focus-visible, .world-depth-toggle:focus-visible { outline: 1px solid var(--world-accent); outline-offset: -1px; }
+.world-control-overlay {
+  position: fixed; inset: var(--world-desktop-top) 0 var(--world-taskbar-height);
+  z-index: 102; pointer-events: none; background: transparent;
+  color: var(--world-ink); font: 13px/1.5 var(--world-font); box-sizing: border-box;
+}
+.world-assistant-pointer-layer {
+  position: fixed; inset: var(--world-desktop-top) 0 var(--world-taskbar-height); z-index: 1002; overflow: hidden;
+  pointer-events: none;
+}
+.world-assistant-pointer-layer, .world-assistant-pointer-layer * { pointer-events: none !important; user-select: none; }
+.world-assistant-pointer { position: absolute; left: 0; top: 0; width: 28px; height: 28px; color: var(--world-accent); }
+.world-assistant-pointer > svg { display: block; overflow: visible; }
+.world-assistant-pointer-label {
+  position: absolute; left: 20px; top: 20px; padding: 2px 6px; border-radius: 4px; white-space: nowrap;
+  background: rgba(32,32,34,.82); color: #fff; font: 12px var(--world-font);
+}
+/* 0.2.56 · 动作回执：点击 / 输入在落点扩一圈，助手"动手"不再只是指针滑过。 */
+.world-assistant-pulse {
+  position: absolute; width: 26px; height: 26px; margin: -13px 0 0 -13px; border-radius: 50%;
+  border: 2px solid var(--world-accent); box-sizing: border-box; pointer-events: none;
+  animation: world-assistant-pulse .52s ease-out forwards;
+}
+.world-assistant-pulse.is-double { animation-duration: .62s; }
+.world-assistant-pulse.is-context { border-style: dashed; }
+.world-assistant-pulse.is-type {
+  width: 18px; height: 18px; margin: -9px 0 0 -9px; border-width: 1px; border-style: dotted;
+  animation-duration: .42s;
+}
+@keyframes world-assistant-pulse {
+  from { opacity: .85; transform: scale(.4); }
+  to { opacity: 0; transform: scale(1.55); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .world-assistant-pulse { animation: none; opacity: .6; }
+  .world-control-card, .world-control-card::after, .world-control-avatar::after { animation: none; }
+  .world-control-card::after, .world-control-header::after { content: none; }
+  .world-presence-orbit, .world-presence-ping { animation: none; }
+  .world-presence-ping { display: none; }
+  /* 光扫到一半停住会变成"半截灰字"，所以整条效果取消、字恢复本来的颜色。 */
+  .world-control-card.is-working .world-control-activity p {
+    background-image: none; -webkit-text-fill-color: currentColor; color: inherit; animation: none;
+  }
+}
+/* 0.2.57 · 住进来，不是占住：卡片是桌角的一张台子，不是通高的墙。
+   屋子是深蓝夜色，卡片就用同一束光做成玻璃；中间那片光晕留给你。 */
+.world-control-card {
+  position: absolute; right: 18px; bottom: 14px; width: 372px; max-width: calc(100% - 32px);
+  max-height: min(620px, calc(100% - 28px));
+  display: flex; flex-direction: column; gap: 10px; padding: 14px 14px 12px;
+  border-radius: 16px; box-sizing: border-box; pointer-events: auto;
+  /* 屋子是深蓝夜色，卡片就用同一束光做成玻璃；浅色主题下换成一块白玻璃（见下方 light 覆盖）。
+     颜色全走这一组变量，卡片的每个子元素只认变量，不再各自写死。 */
+  --nook-glow: rgba(76,194,255,.20);
+  --nook-bg-top: rgba(10,32,52,.93);
+  --nook-bg-bottom: rgba(5,16,28,.96);
+  --nook-line: rgba(150,210,255,.22);
+  --nook-line-focus: rgba(140,205,255,.34);
+  --nook-ring: rgba(150,215,255,.55);
+  --nook-shadow: 0 26px 50px -24px rgba(0,0,0,.92), inset 0 1px 0 rgba(255,255,255,.055);
+  --nook-ink: #fff;
+  --nook-ink-2: rgba(255,255,255,.8);
+  --nook-ink-3: rgba(255,255,255,.72);
+  --nook-ink-4: rgba(255,255,255,.55);
+  --nook-ink-5: rgba(255,255,255,.46);
+  --nook-btn-line: rgba(255,255,255,.16);
+  --nook-btn-bg: rgba(255,255,255,.05);
+  --nook-btn-ink: rgba(255,255,255,.74);
+  --nook-btn-hover: rgba(255,255,255,.11);
+  --nook-btn-on: rgba(255,255,255,.16);
+  --nook-btn-on-hover: rgba(255,255,255,.24);
+  --nook-paused-ink: #fff;
+  --nook-takeover-line: rgba(150,210,255,.26);
+  --nook-takeover-ink: #e8f4ff;
+  --nook-sweep: rgba(178,233,255,.95);
+  --nook-shimmer-a: rgba(255,255,255,.93);
+  --nook-shimmer-b: #eaf9ff;
+  --nook-shimmer-c: #b6e6ff;
+  --nook-conv-ring: rgba(255,255,255,.05);
+  --nook-conv-inset: rgba(0,0,0,.9);
+  --nook-orb-core: rgba(196,242,255,.95);
+  --nook-orb-mid: rgba(76,194,255,.6);
+  --nook-orb-edge: rgba(22,94,146,.28);
+  --nook-orb-glow: rgba(76,194,255,.5);
+  --nook-orb-ring: rgba(150,215,255,.4);
+  --nook-dot: #d6f4ff;
+  --nook-dot-glow: rgba(150,222,255,.95);
+  --nook-ping: rgba(178,234,255,.75);
+  color: var(--nook-ink);
+  background:
+    radial-gradient(120% 92% at 100% 0%, var(--nook-glow), transparent 60%),
+    linear-gradient(180deg, var(--nook-bg-top) 0%, var(--nook-bg-bottom) 100%);
+  border: 1px solid var(--nook-line);
+  box-shadow: var(--nook-shadow);
+  backdrop-filter: blur(18px) saturate(1.15);
+  animation: world-nook-arrive .3s ease-out both;
+}
+/* 进门那一下只淡入、不改几何：灯亮起来，位置不动（也免得任何测量被 transform 带偏）。 */
+.world-control-card::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  border: 1px solid var(--nook-ring); animation: world-nook-glow 1.1s ease-out both;
+}
+.world-control-card:focus-within { border-color: var(--nook-line-focus); }
+.world-control-card.is-collapsed { max-height: none; }
+.world-control-card.is-collapsed > :is(.world-control-activity, .world-assistant-conversation, .world-control-hint) { display: none; }
+body:has(.world-control-card.is-collapsed) > [data-world-assistant-dialog="true"] { display: none !important; }
+@keyframes world-nook-arrive { from { opacity: 0; } to { opacity: 1; } }
+@keyframes world-nook-glow { from { opacity: .9; } to { opacity: 0; } }
+.world-control-header { display: flex; align-items: flex-start; gap: 8px; flex: none; }
+.world-control-header .world-control-copy { flex: 1; }
+.world-control-header .world-workbench-setup-actions { flex: none; gap: 6px; }
+/* 家里的按钮不该像工具栏：安静、贴边、悬停才亮，只有"换你来"留一点灯。 */
+.world-control-header .world-workbench-setup-actions button {
+  height: 24px; padding: 0 9px; font-size: 12px; border-radius: 6px;
+  border-color: var(--nook-btn-line); background: var(--nook-btn-bg); color: var(--nook-btn-ink);
+}
+.world-control-header .world-workbench-setup-actions button:hover { background: var(--nook-btn-hover); color: var(--nook-ink); }
+.world-control-header .world-workbench-setup-actions button[data-world-takeover] {
+  border-color: var(--nook-takeover-line); color: var(--nook-takeover-ink);
+}
+.world-control-header .world-workbench-setup-actions button.is-paused {
+  border-color: var(--world-accent); color: var(--nook-paused-ink); background: var(--nook-btn-on);
+}
+.world-control-header .world-workbench-setup-actions button.is-paused:hover { background: var(--nook-btn-on-hover); }
+/* 在场：一个会呼吸的光点，而不是一张机器人脸。 */
+.world-control-avatar { position: relative; display: grid; place-items: center; width: 32px; height: 32px; flex: none; }
+.world-control-avatar::before {
+  content: ""; width: 30px; height: 30px; border-radius: 50%;
+  background: radial-gradient(circle at 38% 32%, var(--nook-orb-core), var(--nook-orb-mid) 40%, var(--nook-orb-edge) 70%, transparent 76%);
+  box-shadow: 0 0 16px var(--nook-orb-glow);
+}
+.world-control-avatar::after {
+  content: ""; position: absolute; inset: 1px; border-radius: 50%;
+  border: 1px solid var(--nook-orb-ring); animation: world-presence-breathe 4.2s ease-in-out infinite;
+}
+@keyframes world-presence-breathe {
+  0%, 100% { transform: scale(.84); opacity: .28; }
+  50% { transform: scale(1.04); opacity: .72; }
+}
+/* 等模型的时候屋里不能一动不动。三件事各说一句话：
+   ① 光点自己有颗卫星在慢慢绕（在不在动 = 还活着）；
+   ② 干活时才从光点向外打一圈声呐（正在等回复，不是卡住）；
+   ③ 状态文字上有一道缓慢扫过的光（信号还在流）。 */
+.world-presence-orbit {
+  position: absolute; inset: 0; border-radius: 50%; pointer-events: none;
+  animation: world-presence-orbit 18s linear infinite;
+}
+.world-presence-orbit::before {
+  content: ""; position: absolute; left: 50%; top: -2px; width: 4px; height: 4px; margin-left: -2px;
+  border-radius: 50%; background: var(--nook-dot); box-shadow: 0 0 7px var(--nook-dot-glow);
+  opacity: .75;
+}
+@keyframes world-presence-orbit { to { transform: rotate(360deg); } }
+/* 干活的时候绕得快一些、亮一些：转速本身就是"忙不忙"的读数。 */
+.world-control-card.is-working .world-presence-orbit { animation-duration: 4.4s; }
+.world-control-card.is-working .world-presence-orbit::before { opacity: 1; box-shadow: 0 0 10px rgba(178,235,255,1); }
+.world-control-card.is-paused .world-presence-orbit { animation-duration: 34s; }
+.world-control-card.is-paused .world-presence-orbit::before { opacity: .45; }
+/* 声呐从光点边缘起步（不从光晕内部起步，否则被自己的光淹没），
+   扩到 2.3 倍时刚好越过头部下沿，余光就能看见。 */
+.world-presence-ping {
+  position: absolute; inset: 0; border-radius: 50%; pointer-events: none; opacity: 0;
+  border: 1.5px solid var(--nook-ping);
+}
+.world-control-card.is-working .world-presence-ping { animation: world-presence-ping 3.2s ease-out infinite; }
+@keyframes world-presence-ping {
+  0% { transform: scale(1); opacity: .62; }
+  55% { opacity: .18; }
+  100% { transform: scale(2.3); opacity: 0; }
+}
+/* 状态那行字：一道光从左往右慢慢扫过，说明"信号还在流"。
+   只在真干活时出现；空闲 / 暂停 / 出错一律是安静的字，安静本身就是信息。 */
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .world-control-card.is-working .world-control-activity p {
+    background-image: linear-gradient(100deg,
+      var(--nook-shimmer-a) 18%, var(--nook-shimmer-b) 34%, var(--nook-shimmer-c) 40%, var(--nook-shimmer-a) 56%);
+    background-size: 300% 100%;
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+    animation: world-status-shimmer 3.8s linear infinite;
+  }
+}
+@keyframes world-status-shimmer {
+  from { background-position: 150% 0; }
+  to { background-position: -80% 0; }
+}
+/* 头部下面一小段跑过去的光：不盯着字也能用余光看见"它在干活"。
+   用 background-position 而不是 transform 平移 —— 背景按盒子裁切，
+   光永远不会跑到卡片外面（平移一个没被裁切的子元素会漏出去）。 */
+.world-control-header { position: relative; }
+.world-control-header::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -7px; height: 1px;
+  pointer-events: none; opacity: 0; background-repeat: no-repeat; background-size: 38% 100%;
+  background-image: linear-gradient(90deg, transparent, var(--nook-sweep), transparent);
+}
+.world-control-card.is-working .world-control-header::after {
+  opacity: .9; animation: world-edge-sweep 3.4s linear infinite;
+}
+@keyframes world-edge-sweep {
+  from { background-position: 130% 0; }
+  to { background-position: -40% 0; }
+}
+.world-control-copy { min-width: 0; display: flex; flex-direction: column; gap: 8px; overflow-wrap: anywhere; }
+.world-control-header .world-control-copy { gap: 2px; }
+.world-control-copy strong { font: inherit; font-weight: 600; }
+.world-control-header .world-control-copy strong {
+  font-size: 15px; letter-spacing: .3px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.world-control-copy p { margin: 0; white-space: pre-wrap; }
+.world-control-session, .world-control-hint { color: var(--nook-ink-3); }
+.world-control-header .world-control-session { font-size: 12px; color: var(--nook-ink-4); }
+.world-control-session, .world-control-activity p { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.world-control-activity, .world-control-hint { flex: none; }
+.world-control-activity p { color: var(--nook-ink-2); }
+.world-control-hint { font-size: 12px; color: var(--nook-ink-5); }
+/* 会话区是嵌进这张台子里的一块屏：底色必须跟原生对话取同一套主题变量，
+   否则亮色主题下浅字压在深玻璃上（对比度会掉到看不见）。 */
+.world-assistant-conversation {
+  display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 168px; max-height: 46vh;
+  overflow: hidden; border-radius: 10px;
+  background: var(--dsw-alias-bg-base, #151517);
+  box-shadow: 0 0 0 1px var(--nook-conv-ring), 0 10px 24px -18px var(--nook-conv-inset) inset;
+  color: var(--dsw-alias-label-primary, #eef4fa);
+}
+.world-assistant-conversation > [data-slot] { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+/* 没话说的时候，台子不该空出一大片黑；有人说话了再自然长高。 */
+.world-assistant-conversation.is-empty { min-height: 0; }
+.world-control-welcome { margin: 0; padding: 10px 12px 0; color: var(--world-muted); font-size: 12px; line-height: 1.7; }
+/* 会话块的颜色来自宿主别名；别名缺失时按主题各给一套兜底，别在浅色卡片里落回深夜色。 */
+body[data-world-theme="light"] .world-assistant-conversation {
+  background: var(--dsw-alias-bg-base, #ffffff);
+  color: var(--dsw-alias-label-primary, #17233c);
+}
+body[data-world-theme="light"] .world-control-welcome { color: var(--dsw-alias-label-secondary, #5d6a7e); }
+
+/* 浅色主题：同一张台子，换成白天的玻璃。只换这组变量，卡片内部不用再写一遍。 */
+body[data-world-theme="light"] .world-control-card {
+  --nook-glow: rgba(59,110,246,.10);
+  --nook-bg-top: rgba(255,255,255,.95);
+  --nook-bg-bottom: rgba(243,246,251,.97);
+  --nook-line: rgba(23,35,60,.10);
+  --nook-line-focus: rgba(59,110,246,.36);
+  --nook-ring: rgba(59,110,246,.28);
+  --nook-shadow: 0 24px 44px -26px rgba(23,35,60,.38), inset 0 1px 0 rgba(255,255,255,.9);
+  --nook-ink: var(--dsw-alias-label-primary, #17233c);
+  --nook-ink-2: rgba(23,35,60,.8);
+  --nook-ink-3: rgba(23,35,60,.7);
+  --nook-ink-4: rgba(23,35,60,.62);
+  --nook-ink-5: rgba(23,35,60,.52);
+  --nook-btn-line: rgba(23,35,60,.14);
+  --nook-btn-bg: rgba(23,35,60,.045);
+  --nook-btn-ink: rgba(23,35,60,.72);
+  --nook-btn-hover: rgba(23,35,60,.10);
+  --nook-btn-on: rgba(59,110,246,.14);
+  --nook-btn-on-hover: rgba(59,110,246,.2);
+  --nook-paused-ink: var(--dsw-alias-state-business-primary, #2f6bd8);
+  --nook-takeover-line: rgba(59,110,246,.3);
+  --nook-takeover-ink: var(--dsw-alias-state-business-primary, #2f6bd8);
+  --nook-sweep: rgba(59,110,246,.55);
+  --nook-shimmer-a: rgba(23,35,60,.9);
+  --nook-shimmer-b: #17233c;
+  --nook-shimmer-c: #2f6bd8;
+  --nook-conv-ring: rgba(23,35,60,.08);
+  --nook-conv-inset: rgba(23,35,60,.28);
+  --nook-orb-core: #ffffff;
+  --nook-orb-mid: rgba(59,110,246,.55);
+  --nook-orb-edge: rgba(59,110,246,.22);
+  --nook-orb-glow: rgba(59,110,246,.28);
+  --nook-orb-ring: rgba(59,110,246,.35);
+  --nook-dot: #2f6bd8;
+  --nook-dot-glow: rgba(59,110,246,.6);
+  --nook-ping: rgba(59,110,246,.55);
+}
+
+.world-workbench-setup {
+  position: fixed; inset: var(--world-desktop-top) 0 var(--world-taskbar-height); z-index: 1001;
+  display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.45);
+  color: #ccc; font: 13px/20px var(--world-font); box-sizing: border-box;
+}
+.world-workbench-setup-card {
+  width: 560px; max-width: calc(100% - 40px); max-height: calc(100% - 40px); overflow: auto;
+  display: flex; flex-direction: column; gap: 12px; padding: 20px; border-radius: 8px;
+  border: 1px solid #3c3c3c; background: #252526; box-sizing: border-box;
+}
+.world-workbench-setup-card strong { color: #e7e7e7; }
+.world-workbench-setup-card p { margin: 0; }
+.world-workbench-setup-card :is(textarea, input, select) {
+  height: 128px; min-height: 128px; flex: none; resize: none; padding: 12px; border: 1px solid #3c3c3c;
+  border-radius: 4px; background: #1e1e1e; color: #c9c9c9; font: 13px/20px var(--world-font); box-sizing: border-box;
+}
+.world-workbench-setup-card :is(input, select) { height: 32px; min-height: 32px; padding: 0 12px; }
+.world-workbench-setup-card :is(textarea, input, select):focus { border-color: #007fd4; outline: 1px solid #007fd4; outline-offset: -1px; }
+.world-workbench-setup-policy { color: #e7e7e7; }
+.world-workbench-setup-times { display: flex; gap: 12px; }
+.world-workbench-setup-times label { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.world-workbench-setup-times input { flex: 1; min-width: 0; }
+.world-workbench-setup-life { display: flex; align-items: flex-start; gap: 8px; line-height: 1.6; }
+.world-workbench-setup-card .world-workbench-setup-life input { flex: none; width: 16px; height: 16px; min-height: 16px; margin: 2px 0 0; padding: 0; }
+.world-workbench-setup-actions { display: flex; justify-content: flex-end; gap: 12px; }
+.world-workbench-setup-actions button {
+  height: 32px; padding: 0 12px; border: 1px solid #454545; border-radius: 4px; background: #333;
+  color: #ddd; font: inherit; cursor: pointer;
+}
+.world-workbench-setup-actions button:hover { background: #3f3f46; }
+.world-workbench-setup-actions button.is-primary { border-color: #0e639c; background: #0e639c; color: #fff; }
+.world-workbench-setup-actions button.is-primary:hover { background: #1177bb; }
+.world-workbench-setup-actions button:disabled { opacity: .5; cursor: default; }
+
+.world-start {
+  position: fixed; left: 50%; bottom: calc(var(--world-taskbar-height) + 8px); z-index: 101;
+  width: min(600px, 92vw); height: min(380px, 58vh); display: flex; flex-direction: column; overflow: hidden;
+  border: 1px solid var(--world-line);
+  border-radius: 10px; background: color-mix(in srgb, var(--world-surface-1) 92%, transparent); backdrop-filter: blur(40px) saturate(1.6);
+  -webkit-backdrop-filter: blur(40px) saturate(1.6); box-shadow: 0 22px 60px color-mix(in srgb, var(--world-surface) 50%, transparent);
+  opacity: 0; pointer-events: none; transform: translateX(-50%) translateY(14px) scale(.985);
+  transition: opacity .16s, transform .16s;
+}
+.world-start.open { opacity: 1; pointer-events: auto; transform: translateX(-50%) translateY(0) scale(1); }
+
+.world-start-heading { display: flex; align-items: baseline; justify-content: space-between; flex: none; padding: 20px 28px 8px; }
+.world-start-heading strong { font-size: 18px; font-weight: 500; }
+.world-start-heading span { color: var(--world-muted); font-size: 12px; }
+.world-start-search {
+  display: flex; align-items: center; gap: 8px; flex: none; margin: 2px 20px 10px; padding: 0 10px;
+  border: 1px solid var(--world-line); border-radius: 8px;
+  background: color-mix(in srgb, var(--world-ink) 7%, transparent);
+}
+.world-start-search:focus-within { border-color: var(--world-accent); }
+.world-start-search-glyph { flex: none; color: var(--world-muted); }
+.world-start-search-input {
+  flex: 1; min-width: 0; padding: 8px 0; border: 0; background: transparent; color: var(--world-ink);
+  font: inherit; font-size: 13px; outline: none;
+}
+.world-start-search-input::placeholder { color: var(--world-subtle); }
+.world-start-search-clear {
+  flex: none; width: 20px; height: 20px; display: grid; place-items: center; padding: 0;
+  border: 0; border-radius: 50%; background: transparent; color: var(--world-muted);
+  font-size: 15px; line-height: 1; cursor: pointer;
+}
+.world-start-search-clear:hover { background: var(--world-hover); color: var(--world-ink); }
+.world-search-result {
+  width: 100%; display: flex; align-items: center; gap: 10px; margin-top: 4px; padding: 8px 10px;
+  border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--world-ink);
+  text-align: left; cursor: pointer;
+}
+.world-search-result.on { border-color: var(--world-line); background: var(--world-hover); }
+.world-search-result-icon { width: 24px; height: 24px; display: grid; place-items: center; flex: none; }
+/* 日记 / 垃圾箱这些字形原生是 48px，不压住就会盖到右边的字上。 */
+.world-search-result-icon svg { width: 100%; height: 100%; }
+.world-search-result-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.world-search-result-text strong { overflow: hidden; font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.world-search-result-text span { overflow: hidden; color: var(--world-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.world-start-body { min-height: 0; flex: 1; overflow: auto; padding: 0 16px 20px; }
+.world-start-group + .world-start-group { margin-top: 12px; }
+.world-start-group-title { display: flex; align-items: baseline; justify-content: space-between; padding: 8px 0; color: var(--world-muted); font-size: 12px; }
+.world-start-group-title span { color: var(--world-subtle); font-size: 11px; }
+.world-start-empty { padding: 12px; border: 1px dashed var(--world-line); border-radius: 8px; color: var(--world-muted); font-size: 12px; }
+.world-app-card { display: flex; align-items: center; gap: 12px; margin: 0; padding: 12px; border: 1px solid var(--world-line); border-radius: 8px; background: color-mix(in srgb, var(--world-ink) 5%, transparent); }
+.world-plugin-card {
+  width: 100%; display: flex; align-items: center; gap: 12px; margin-top: 6px; padding: 10px 12px;
+  border: 1px solid var(--world-line); border-radius: 8px; background: color-mix(in srgb, var(--world-ink) 5%, transparent);
+  color: var(--world-ink); text-align: left; cursor: pointer;
+}
+.world-plugin-card:hover { background: var(--world-hover); }
+.world-plugin-card:active { background: var(--world-active); }
+.world-plugin-card-icon { width: 30px; height: 30px; display: grid; place-items: center; flex: none; color: var(--world-accent); }
+.world-plugin-card-info { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
+.world-plugin-card-info strong { overflow: hidden; font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.world-plugin-card-info span { color: var(--world-muted); font-size: 11px; }
+.world-plugin-card-action { flex: none; padding: 4px 10px; border: 1px solid rgba(255,255,255,.12); border-radius: 4px; background: rgba(255,255,255,.08); font-size: 11px; }
+.world-app-card-icon { width: 42px; height: 42px; display: grid; place-items: center; flex: none; }
+.world-app-card-info { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
+.world-app-card-info strong { font-size: 13px; font-weight: 500; }
+.world-app-card-info span { color: var(--world-muted); font-size: 11px; }
+.world-app-install, .world-app-uninstall { min-width: 64px; padding: 6px 12px; border: 1px solid rgba(255,255,255,.12); border-radius: 4px; background: rgba(255,255,255,.1); font-size: 12px; cursor: pointer; }
+.world-app-install:hover, .world-app-uninstall:hover { background: rgba(255,255,255,.17); }
+
+.world-vscode-window {
+  position: fixed; left: var(--vscode-x); top: max(var(--world-desktop-top), var(--vscode-y));
+  width: var(--vscode-w); height: var(--vscode-h); min-width: min(720px, 100vw); min-height: min(480px, 100vh);
+  box-sizing: border-box; transition: opacity .14s ease, transform .14s ease, visibility 0s;
+  z-index: 5; display: flex; flex-direction: column; overflow: hidden; color: #cccccc;
+  border: 1px solid var(--dsw-alias-border-l2, #383838); border-radius: 8px; background: var(--dsw-alias-bg-base, #1e1e1e);
+  box-shadow: 0 26px 66px rgba(0,0,0,.65); font: 13px/1.4 "Segoe UI", system-ui, sans-serif;
+}
+body[data-world-active-kind="dsh"] .world-vscode-window { z-index: 3; }
+/* 最大化：位置和尺寸由窗口给的 CSS 变量铺满（桌面顶栏到任务栏之间），这里只清掉圆角和最小尺寸约束 */
+.world-vscode-window.is-max { border-radius: 0; border-color: var(--dsw-alias-border-l2, #2a2a2a); box-shadow: none; min-width: 0; min-height: 0; }
+/* 最小化：淡出 + 轻微下沉，和桌面其它窗口同一套手感；visibility 延后到动画结束才隐藏 */
+.world-vscode-window.is-min {
+  opacity: 0; visibility: hidden; transform: scale(.96) translateY(14px); pointer-events: none;
+  transition: opacity .14s ease, transform .14s ease, visibility 0s linear .14s;
+}
+.world-vscode-window:not(.is-max) .world-vscode-titlebar { cursor: move; }
+/* 多开时一眼看出哪个在前台：非活动窗口的标题文字变灰（VSCode 自己也是这么做的）。
+   带上 data-world-vscode-key 是为了不波及复用这套外观的聊天 / 外部应用窗口 */
+.world-vscode-window[data-world-vscode-key]:not(.is-active) .world-vscode-title span { color: #9a9a9a; }
+/* 窗口本身带 tabIndex 是为了让点标题栏后键盘有落点，不要因此画出一圈焦点框 */
+.world-vscode-window:focus, .world-vscode-window:focus-visible { outline: none; }
+.world-vscode-titlebar { height: 32px; flex: none; display: flex; align-items: center; justify-content: space-between; padding-left: 10px; background: var(--dsw-alias-bg-layer-1, #252526); touch-action: none; user-select: none; }
+.world-vscode-title { min-width: 0; flex: 1; display: flex; align-items: center; gap: 8px; overflow: hidden; font-size: 12px; }
+.world-vscode-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.world-vscode-title-actions { flex: none; display: flex; align-items: center; gap: 2px; padding-right: 2px; }
+.world-vscode-title-btn { width: 30px; height: 22px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #c8c8c8; cursor: pointer; }
+.world-vscode-title-btn:hover { background: rgba(255,255,255,.1); color: #fff; }
+.world-vscode-title-btn:focus-visible { outline: 1px solid #007fd4; outline-offset: -2px; }
+.world-vscode-controls { height: 100%; display: flex; }
+.world-vscode-controls button { width: 44px; border: 0; background: transparent; color: #ccc; font-size: 20px; line-height: 1; cursor: pointer; }
+.world-vscode-controls button:hover { background: #c42b1c; color: #fff; }
+/* VSCode 自己的三个窗口键：只有关闭是红的，最小化/最大化是正常的浅色高亮 */
+.world-vscode-caps button { width: 40px; }
+.world-vscode-caps button:hover { background: rgba(255,255,255,.12); color: #fff; }
+.world-vscode-caps button:active { background: rgba(255,255,255,.18); }
+.world-vscode-caps button:focus-visible { outline: 1px solid #007fd4; outline-offset: -2px; }
+.world-vscode-caps button.world-vscode-close:hover { background: #c42b1c; }
+.world-vscode-caps button.world-vscode-close:active { background: #b32a1c; }
+.world-vscode-body { min-height: 0; flex: 1; display: flex; }
+/* 活动栏：48px 图标竖列，激活项左侧一道白条，和 VSCode 一致 */
+.world-vscode-activity { width: 48px; flex: none; display: flex; flex-direction: column; align-items: stretch; background: #333333; }
+.world-vscode-activity-btn {
+  position: relative; height: 48px; display: grid; place-items: center; padding: 0;
+  border: 0; background: transparent; color: #858585; cursor: pointer;
+  transition: color .12s;
+}
+.world-vscode-activity-btn::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+  background: #fff; opacity: 0; transition: opacity .12s;
+}
+.world-vscode-activity-btn:hover { color: #e7e7e7; }
+.world-vscode-activity-btn.is-active { color: #fff; }
+.world-vscode-activity-btn.is-active::before { opacity: 1; }
+.world-vscode-activity-btn:focus-visible { outline: 1px solid #007fd4; outline-offset: -4px; }
+.world-vscode-activity-icon { display: grid; place-items: center; }
+.world-vscode-activity-icon svg { display: block; }
+/* 有徽标时把图标抬一点，数字才不会压在图形上 */
+.world-vscode-activity-btn:has(.world-vscode-activity-badge) .world-vscode-activity-icon { transform: translateY(-4px); }
+.world-vscode-activity-badge {
+  position: absolute; right: 5px; bottom: 6px; min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 8px; background: #007acc; color: #fff; font-size: 9px; font-style: normal;
+  line-height: 16px; text-align: center; box-shadow: 0 0 0 2px #333;
+}
+.world-vscode-activity-gap { flex: 1; }
+.world-vscode-activity-btn.is-collapse { height: 36px; color: #9a9a9a; }
+.world-vscode-activity-btn.is-collapse:hover { color: #fff; }
+.world-vscode-activity-btn.is-collapse.is-off { color: #6a6a6a; }
+.world-vscode-sidebar {
+  position: relative; min-width: 168px; max-width: 460px; flex: none; display: flex; flex-direction: column;
+  overflow: hidden; border-right: 1px solid #333; background: #252526;
+}
+.world-vscode-sidebar-head { flex: none; height: 30px; display: flex; align-items: center; gap: 6px; padding: 0 4px 0 12px; }
+.world-vscode-sidebar-title {
+  min-width: 0; flex: 1; overflow: hidden; color: #bbbbbb; font-size: 11px; font-weight: 400;
+  letter-spacing: .05em; text-overflow: ellipsis; white-space: nowrap;
+}
+.world-vscode-sidebar-actions { flex: none; display: flex; gap: 1px; }
+.world-vscode-sidebar-act {
+  width: 22px; height: 22px; display: grid; place-items: center; padding: 0;
+  border: 0; border-radius: 4px; background: transparent; color: #c2c2c2; cursor: pointer;
+}
+.world-vscode-sidebar-act:hover { background: rgba(255,255,255,.1); color: #fff; }
+.world-vscode-sidebar-act:focus-visible { outline: 1px solid #007fd4; outline-offset: -1px; }
+.world-vscode-sidebar-resize { position: absolute; top: 0; right: 0; bottom: 0; z-index: 2; width: 6px; cursor: ew-resize; touch-action: none; }
+.world-vscode-sidebar-resize:hover::after,
+.world-vscode-sidebar-resize:active::after { content: ""; position: absolute; top: 0; bottom: 0; right: 0; width: 2px; background: #007acc; }
+.world-vscode-explorer-list { flex: 1; min-height: 0; overflow: auto; padding-bottom: 6px; }
+.world-vscode-search { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.world-vscode-search-box {
+  flex: none; height: 26px; display: flex; align-items: center; gap: 3px; margin: 0 10px 6px;
+  padding: 0 3px 0 6px; border: 1px solid #3c3c3c; border-radius: 3px; background: #3c3c3c;
+  transition: border-color .12s;
+}
+.world-vscode-search-box:focus-within { border-color: #007fd4; }
+.world-vscode-search-glyph { flex: none; display: grid; place-items: center; color: #9d9d9d; }
+.world-vscode-search-input {
+  min-width: 0; flex: 1; height: 100%; padding: 0 2px; border: 0; outline: 0;
+  background: transparent; color: #d4d4d4; font: inherit; font-size: 12px;
+}
+.world-vscode-search-input::placeholder { color: #8b8b8b; }
+.world-vscode-search-flag {
+  flex: none; min-width: 20px; height: 18px; padding: 0 3px; border: 0; border-radius: 3px;
+  background: transparent; color: #9d9d9d; font: inherit; font-size: 11px; line-height: 18px; cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.world-vscode-search-flag:hover { background: rgba(255,255,255,.14); color: #fff; }
+.world-vscode-search-flag.is-on { background: rgba(0,122,204,.55); color: #fff; }
+.world-vscode-search-flag:focus-visible { outline: 1px solid #007fd4; outline-offset: -1px; }
+.world-vscode-search-summary { flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 6px; color: #8b8b8b; font-size: 11px; }
+.world-vscode-search-note { color: #d7ba7d; }
+.world-vscode-search-spin {
+  width: 10px; height: 10px; flex: none; border: 1.5px solid rgba(255,255,255,.24);
+  border-top-color: #007acc; border-radius: 50%; animation: world-vscode-spin .8s linear infinite;
+}
+.world-vscode-search-list { flex: 1; min-height: 0; overflow: auto; padding-bottom: 6px; }
+.world-vscode-search-empty {
+  display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 28px 20px;
+  color: #9a9a9a; font-size: 11px; line-height: 1.7; text-align: center;
+}
+.world-vscode-search-empty svg { color: #4a4a4a; }
+.world-vscode-search-empty small { color: #6f6f6f; font-size: 10px; }
+.world-vscode-search-hint {
+  display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 30px 22px;
+  color: #6f6f6f; font-size: 11px; line-height: 1.7; text-align: center;
+}
+.world-vscode-search-hint svg { color: #4a4a4a; }
+.world-vscode-search-file-head {
+  width: 100%; height: 24px; display: flex; align-items: center; gap: 4px; padding: 0 8px;
+  border: 0; background: transparent; color: #ccc; font: inherit; font-size: 12px;
+  text-align: left; white-space: nowrap; cursor: pointer;
+}
+.world-vscode-search-file-head:hover { background: rgba(255,255,255,.06); }
+.world-vscode-search-file-head.is-open { color: #e6e6e6; }
+.world-vscode-search-file-head:focus-visible { outline: 1px solid #007fd4; outline-offset: -1px; }
+.world-vscode-search-name { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.world-vscode-search-dir { min-width: 0; flex: 1 1 auto; overflow: hidden; color: #7d7d7d; font-size: 11px; text-overflow: ellipsis; }
+.world-vscode-search-count {
+  flex: none; margin-left: auto; height: 15px; min-width: 15px; padding: 0 4px; border-radius: 7px;
+  background: rgba(255,255,255,.12); color: #ddd; font-size: 10px; font-style: normal;
+  line-height: 15px; text-align: center;
+}
+.world-vscode-search-hit {
+  width: 100%; height: 22px; display: flex; align-items: center; gap: 6px; padding: 0 8px 0 24px;
+  border: 0; background: transparent; color: #b4b4b4; font: inherit; font-size: 12px;
+  text-align: left; white-space: nowrap; overflow: hidden; cursor: pointer;
+}
+.world-vscode-search-hit:hover { background: rgba(255,255,255,.07); }
+.world-vscode-search-hit:focus-visible { outline: 1px solid #007fd4; outline-offset: -1px; }
+.world-vscode-search-line { flex: none; min-width: 22px; color: #858585; font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; }
+.world-vscode-search-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.world-vscode-search-text mark { padding: 0; border-radius: 2px; background: rgba(234,92,0,.42); color: #fff; }
+.world-vscode-root, .world-vscode-parent, .world-vscode-file { width: 100%; min-height: 24px; display: flex; align-items: center; gap: 4px; padding: 2px 10px 2px 8px; overflow: hidden; border: 0; background: transparent; color: #ccc; text-align: left; white-space: nowrap; cursor: pointer; }
+.world-vscode-root, .world-vscode-parent, .world-vscode-file { outline: 0; }
+.world-vscode-root:focus-visible, .world-vscode-file:focus-visible { outline: 1px solid #007fd4; outline-offset: -1px; }
+.world-vscode-root { font-size: 11px; font-weight: 600; letter-spacing: .04em; }
+.world-vscode-parent { padding-left: 20px; color: #aaa; }
+.world-vscode-file { font-size: 12px; }
+.world-vscode-file:hover { background: rgba(255,255,255,.06); }
+.world-vscode-file.selected { background: #37373d; color: #fff; }
+.world-vscode-file.selected .world-vscode-file-name { font-weight: 500; }
+/* 折叠箭头在名字前，展开时转 90°；文件没有箭头也占同样宽度，缩进才不会参差 */
+.world-vscode-twist { width: 12px; height: 12px; flex: none; display: block; color: #a9a9a9; transition: transform .12s ease; }
+.world-vscode-twist.is-open { transform: rotate(90deg); }
+.world-vscode-root .world-vscode-twist { color: #ddd; }
+.world-vscode-root > svg:not(.world-vscode-twist) { width: 14px; height: 14px; flex: none; color: #dcb67a; }
+.world-vscode-root-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.world-vscode-file-icon { width: 17px; height: 17px; display: grid; place-items: center; flex: none; color: #9aa0a6; font-size: 10px; }
+.world-vscode-file-icon svg { display: block; }
+.world-vscode-file-icon.is-dir { color: #dcb67a; }
+.world-vscode-file-icon.is-js { color: #e5c07b; }
+.world-vscode-file-icon.is-json { color: #98c379; }
+.world-vscode-file-icon.is-md { color: #61afef; }
+.world-vscode-file-icon.is-file { color: #9aa0a6; }
+.world-vscode-file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.world-vscode-file.is-dir { color: #e6e6e6; }
+.world-vscode-file.is-dir:hover { background: rgba(255,255,255,.06); }
+.world-vscode-tree-note { padding: 3px 10px; color: #858585; font-size: 11px; }
+.world-vscode-root.is-open { color: #fff; }
+.world-vscode-file-note, .world-vscode-error { padding: 8px 16px; color: #aaa; font-size: 11px; overflow-wrap: anywhere; }
+.world-vscode-error { color: #f48771; }
+/* 源代码管理：分支行 → 提交框 → 拉取/推送 → 消息条 → 可滚动的更改列表 */
+.world-vscode-git { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.world-vscode-git-branch { flex: none; height: 28px; display: flex; align-items: center; gap: 5px; padding: 0 4px 0 10px; font-size: 11px; }
+.world-vscode-git-branch-icon { flex: none; display: grid; place-items: center; color: #8c8c8c; }
+.world-vscode-git-branch-name { min-width: 0; flex: 1; overflow: hidden; color: #e6e6e6; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.world-vscode-git-track { flex: none; font-size: 10px; font-variant-numeric: tabular-nums; }
+.world-vscode-git-track.is-ahead { color: #73c991; }
+.world-vscode-git-track.is-behind { color: #e2c08d; }
+.world-vscode-git-refresh { flex: none; width: 20px; height: 20px; display: grid; place-items: center; border: 0; border-radius: 3px; background: transparent; color: #cfcfcf; cursor: pointer; }
+.world-vscode-git-refresh:hover:not(:disabled) { background: rgba(255,255,255,.1); color: #fff; }
+.world-vscode-git-refresh:disabled { opacity: .45; cursor: default; }
+.world-vscode-git-refresh:focus-visible { outline: 1px solid #007fd4; outline-offset: -1px; }
+.world-vscode-git-spin { display: block; }
+.world-vscode-git-spin.is-spinning { animation: world-vscode-spin .9s linear infinite; }
+@keyframes world-vscode-spin { to { transform: rotate(360deg); } }
+.world-vscode-git-compose { flex: none; display: flex; flex-direction: column; gap: 6px; padding: 2px 10px 8px; }
+.world-vscode-git-message {
+  width: 100%; min-height: 46px; box-sizing: border-box; padding: 5px 7px; resize: none;
+  border: 1px solid #3c3c3c; border-radius: 3px; background: #3c3c3c; color: #ddd;
+  font: inherit; font-size: 12px; line-height: 1.45;
+}
+.world-vscode-git-message::placeholder { color: #8b8b8b; }
+.world-vscode-git-message:focus { outline: 1px solid #007fd4; outline-offset: -1px; }
+.world-vscode-git-primary {
+  height: 26px; display: flex; align-items: center; justify-content: center; gap: 5px;
+  border: 0; border-radius: 3px; background: #007acc; color: #fff; font: inherit; font-size: 12px; cursor: pointer;
+  transition: background .12s;
+}
+.world-vscode-git-primary:hover:not(:disabled) { background: #1a8ad4; }
+.world-vscode-git-primary:disabled { background: #3a3a3a; color: #8b8b8b; cursor: default; }
+.world-vscode-git-primary:focus-visible { outline: 1px solid #fff; outline-offset: -2px; }
+.world-vscode-git-actions { flex: none; display: flex; gap: 6px; padding: 0 10px 8px; }
+.world-vscode-git-actions button {
+  flex: 1; height: 24px; display: flex; align-items: center; justify-content: center; gap: 4px;
+  border: 1px solid #3c3c3c; border-radius: 3px; background: #333; color: #ddd;
+  font: inherit; font-size: 11px; cursor: pointer; transition: background .12s;
+}
+.world-vscode-git-actions button:hover:not(:disabled) { background: #3f3f3f; }
+.world-vscode-git-actions button:disabled { border-color: #333; background: #2b2b2b; color: #7a7a7a; cursor: default; }
+.world-vscode-git-actions button:focus-visible { outline: 1px solid #007fd4; outline-offset: -1px; }
+.world-vscode-git-msg {
+  flex: none; margin: 0 10px 8px; padding: 4px 7px; border-radius: 3px;
+  display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+  background: rgba(255,255,255,.05); color: #c8c8c8; font-size: 11px; line-height: 1.45; white-space: pre-line;
+}
+.world-vscode-git-msg.is-error { background: rgba(244,135,113,.14); color: #f0a091; }
+.world-vscode-git-list { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; padding-bottom: 6px; }
+.world-vscode-git-group { padding-top: 2px; }
+.world-vscode-git-group-head { height: 22px; display: flex; align-items: center; gap: 6px; padding: 0 6px 0 10px; color: #bbb; font-size: 11px; }
+.world-vscode-git-count { flex: none; color: #8f8f8f; font-size: 10px; font-style: normal; font-variant-numeric: tabular-nums; }
+.world-vscode-git-group-act {
+  margin-left: auto; width: 18px; height: 18px; display: grid; place-items: center;
+  border: 0; border-radius: 3px; background: transparent; color: #bbb; cursor: pointer; opacity: 0;
+}
+.world-vscode-git-group-head:hover .world-vscode-git-group-act,
+.world-vscode-git-group-act:focus-visible { opacity: 1; }
+.world-vscode-git-group-act:hover { background: rgba(255,255,255,.12); color: #fff; }
+.world-vscode-git-file { position: relative; height: 24px; display: flex; align-items: center; gap: 5px; padding: 0 6px 0 10px; color: #ccc; font-size: 12px; white-space: nowrap; cursor: pointer; }
+.world-vscode-git-file:hover { background: rgba(255,255,255,.07); }
+.world-vscode-git-file:focus-visible { outline: 1px solid #007fd4; outline-offset: -1px; }
+.world-vscode-git-name { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.world-vscode-git-dir { min-width: 0; flex: 1 1 auto; overflow: hidden; color: #7d7d7d; font-size: 11px; text-overflow: ellipsis; }
+.world-vscode-git-state { flex: none; width: 13px; margin-left: auto; font-size: 11px; font-weight: 600; text-align: center; }
+.world-vscode-git-state.is-modified { color: #e2c08d; }
+.world-vscode-git-state.is-added { color: #73c991; }
+.world-vscode-git-state.is-danger { color: #e5534b; }
+.world-vscode-git-state.is-moved { color: #6cb6ff; }
+.world-vscode-git-file:hover .world-vscode-git-state { visibility: hidden; }
+.world-vscode-git-act {
+  position: absolute; top: 3px; right: 5px; width: 18px; height: 18px; display: grid; place-items: center;
+  border: 0; border-radius: 3px; background: transparent; color: #ddd; cursor: pointer;
+  opacity: 0; pointer-events: none;
+}
+.world-vscode-git-file:hover .world-vscode-git-act,
+.world-vscode-git-act:focus-visible { opacity: 1; pointer-events: auto; }
+.world-vscode-git-act:hover { background: rgba(255,255,255,.18); color: #fff; }
+.world-vscode-git-act:disabled { opacity: 0; pointer-events: none; }
+.world-vscode-git-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 24px 16px; color: #8b8b8b; font-size: 11px; line-height: 1.6; text-align: center; }
+.world-vscode-git-empty small { color: #6f6f6f; font-size: 10px; line-height: 1.5; }
+.world-vscode-git-empty.is-clean { color: #73c991; }
+.world-vscode-git-note { flex: none; padding: 6px 10px; color: #8b8b8b; font-size: 11px; line-height: 1.5; }
+.world-vscode-editor { min-width: 0; flex: 1; display: flex; flex-direction: column; background: #1e1e1e; }
+/* 标签栏和其它滚动区一样只用 ::-webkit-scrollbar（见下面统一那段）：写 scrollbar-width 或
+   scrollbar-color 都会让 Chromium 改用原生滚动条，3px 的细条会失效 */
+.world-vscode-tabs { height: 36px; flex: none; display: flex; overflow-x: auto; overflow-y: hidden; background: #252526; }
+.world-vscode-tab {
+  min-width: 130px; max-width: 200px; flex: none; display: flex; align-items: center; gap: 6px;
+  padding: 0 4px 0 10px; border-top: 1px solid transparent; border-right: 1px solid #333;
+  background: #2d2d2d; color: #aaa; cursor: pointer; user-select: none;
+}
+.world-vscode-tab:hover { background: #333; }
+.world-vscode-tab.active { border-top-color: #007acc; background: #1e1e1e; color: #ddd; }
+.world-vscode-tab.preview .world-vscode-tab-name { font-style: italic; }
+.world-vscode-tab:focus-visible { outline: 1px solid #007fd4; outline-offset: -2px; }
+.world-vscode-tab-icon { width: 15px; height: 15px; flex: none; display: grid; place-items: center; color: #9aa0a6; }
+.world-vscode-tab-icon.is-js { color: #e5c07b; }
+.world-vscode-tab-icon.is-json { color: #98c379; }
+.world-vscode-tab-icon.is-md { color: #61afef; }
+.world-vscode-tab-name { min-width: 0; flex: 1; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.world-vscode-tab-dirty { color: #e5c07b; font-size: 9px; font-style: normal; line-height: 1; }
+.world-vscode-tab-close {
+  width: 18px; height: 18px; flex: none; display: grid; place-items: center; padding: 0;
+  border: 0; border-radius: 3px; background: transparent; color: inherit; font-size: 13px; line-height: 1; cursor: pointer;
+  opacity: 0; transition: opacity .12s, background .12s, color .12s;
+}
+.world-vscode-tab:hover .world-vscode-tab-close,
+.world-vscode-tab.active .world-vscode-tab-close,
+.world-vscode-tab-close:focus-visible { opacity: 1; }
+/* 有未保存改动时先显示圆点，鼠标移上来再换成关闭键，避免两个标记挤在一起 */
+.world-vscode-tab.is-dirty .world-vscode-tab-close { opacity: 0; }
+.world-vscode-tab.is-dirty:hover .world-vscode-tab-close { opacity: 1; }
+.world-vscode-tab.is-dirty:hover .world-vscode-tab-dirty { display: none; }
+.world-vscode-tab-close:hover { background: #c42b1c; color: #fff; }
+.world-vscode-tab-close:focus-visible { outline: 1px solid #007fd4; outline-offset: 1px; }
+.world-vscode-editor-content { --vscode-gutter: 52px; position: relative; min-height: 0; flex: 1; display: flex; overflow: hidden; padding: 10px 0; font: 13px/20px Consolas, "Courier New", monospace; }
+/* 当前行底色画在 textarea 的下层（textarea 背景透明），跟着滚动位移 */
+.world-vscode-active-line { position: absolute; left: var(--vscode-gutter); right: 0; top: 10px; z-index: 0; height: 20px; background: rgba(255,255,255,.045); pointer-events: none; }
+/* 焦点在侧栏时位置还在，但别和编辑器抢注意力 */
+.world-vscode-active-line.is-dim { background: rgba(255,255,255,.022); }
+.world-vscode-gutter { position: relative; z-index: 1; flex: none; width: var(--vscode-gutter); overflow: hidden; color: #6e7681; text-align: right; user-select: none; }
+.world-vscode-gutter-rows { will-change: transform; }
+.world-vscode-gutter-row { height: 20px; line-height: 20px; padding-right: 14px; }
+.world-vscode-gutter-row.is-active { color: #c6c6c6; }
+/* 语法高亮画在 textarea 下层：edit 区文字透明、光标与选区仍在原生控件里 */
+.world-vscode-highlight { position: absolute; left: var(--vscode-gutter); right: 0; top: 10px; bottom: 10px; z-index: 0; overflow: hidden; pointer-events: none; }
+.world-vscode-highlight-rows { will-change: transform; }
+.world-vscode-hl-line { height: 20px; line-height: 20px; white-space: pre; tab-size: 2; }
+.world-vscode-tok-kw { color: #569cd6; }
+.world-vscode-tok-ctl { color: #c586c0; }
+.world-vscode-tok-fn { color: #dcdcaa; }
+.world-vscode-tok-type { color: #4ec9b0; }
+.world-vscode-tok-str { color: #ce9178; }
+.world-vscode-tok-num { color: #b5cea8; }
+.world-vscode-tok-cmt { color: #6a9955; }
+.world-vscode-tok-key { color: #9cdcfe; }
+.world-vscode-tok-tag { color: #569cd6; }
+.world-vscode-tok-attr { color: #9cdcfe; }
+.world-vscode-tok-var { color: #4fc1ff; }
+.world-vscode-tok-meta { color: #c586c0; }
+.world-vscode-textarea { position: relative; z-index: 1; min-width: 0; min-height: 100%; flex: 1; resize: none; overflow: auto; padding: 0 12px 0 0; border: 0; outline: 0; background: transparent; color: #d4d4d4; font: inherit; white-space: pre; tab-size: 2; caret-color: #aeafad; }
+.world-vscode-textarea::selection { background: #264f78; color: #fff; }
+.world-vscode-textarea.is-highlight { color: transparent; }
+.world-vscode-textarea.is-highlight::selection { background: rgba(38,79,120,.7); color: transparent; }
+/* 所有滚动区共用一套滚动条：12px 轨道里嵌 6px 圆角拇指，hover 变亮。
+   这里**不写** scrollbar-width / scrollbar-color：那两个标准属性和 ::-webkit-scrollbar 互斥，
+   写了 Chromium 就改用原生滚动条、把下面的细条规则整段忽略，于是同一窗口里有的细有的粗。 */
+.world-vscode-textarea::-webkit-scrollbar, .world-vscode-explorer-list::-webkit-scrollbar,
+.world-vscode-search-list::-webkit-scrollbar, .world-vscode-git-list::-webkit-scrollbar,
+.world-vscode-picker-list::-webkit-scrollbar,
+.world-vscode-tabs::-webkit-scrollbar { width: 12px; height: 12px; }
+.world-vscode-textarea::-webkit-scrollbar-track, .world-vscode-explorer-list::-webkit-scrollbar-track,
+.world-vscode-search-list::-webkit-scrollbar-track, .world-vscode-git-list::-webkit-scrollbar-track,
+.world-vscode-picker-list::-webkit-scrollbar-track,
+.world-vscode-tabs::-webkit-scrollbar-track { background: transparent; }
+.world-vscode-textarea::-webkit-scrollbar-thumb, .world-vscode-explorer-list::-webkit-scrollbar-thumb,
+.world-vscode-search-list::-webkit-scrollbar-thumb, .world-vscode-git-list::-webkit-scrollbar-thumb,
+.world-vscode-picker-list::-webkit-scrollbar-thumb,
+.world-vscode-tabs::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 7px; background: rgba(255,255,255,.16) padding-box; }
+.world-vscode-textarea::-webkit-scrollbar-thumb:hover, .world-vscode-explorer-list::-webkit-scrollbar-thumb:hover,
+.world-vscode-search-list::-webkit-scrollbar-thumb:hover, .world-vscode-git-list::-webkit-scrollbar-thumb:hover,
+.world-vscode-picker-list::-webkit-scrollbar-thumb:hover,
+.world-vscode-tabs::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.28) padding-box; }
+.world-vscode-textarea::-webkit-scrollbar-corner, .world-vscode-explorer-list::-webkit-scrollbar-corner,
+.world-vscode-git-list::-webkit-scrollbar-corner, .world-vscode-picker-list::-webkit-scrollbar-corner,
+.world-vscode-tabs::-webkit-scrollbar-corner { background: transparent; }
+/* 标签栏的横向滚动条只占 3px：36px 高的条里塞 12px 滚动条，标签会被压扁一截 */
+.world-vscode-tabs::-webkit-scrollbar { height: 3px; }
+.world-vscode-tabs::-webkit-scrollbar-thumb { border: 0; border-radius: 2px; background: rgba(255,255,255,.2); }
+.world-vscode-tabs::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.34); }
+.world-vscode-welcome { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: #858585; }
+.world-vscode-welcome strong { color: #ccc; font-size: 22px; font-weight: 400; }
+.world-vscode-welcome > span { max-width: 320px; font-size: 12px; line-height: 1.6; text-align: center; }
+.world-vscode-welcome-path {
+  max-width: 340px; overflow: hidden; padding: 3px 8px; border-radius: 4px; background: rgba(255,255,255,.05);
+  color: #a5a5a5; font-family: Consolas, "Courier New", monospace; font-size: 11px;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.world-vscode-welcome-open {
+  display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 14px;
+  border: 1px solid #0e639c; border-radius: 4px; background: #0e639c; color: #fff;
+  font: inherit; font-size: 12px; cursor: pointer; transition: background .12s;
+}
+.world-vscode-welcome-open:hover { background: #1177bb; }
+.world-vscode-welcome-open:focus-visible { outline: 1px solid #7cc4f5; outline-offset: 2px; }
+.world-vscode-welcome-keys { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 16px; margin-top: 4px; font-size: 11px; color: #7d7d7d; }
+.world-vscode-welcome-keys span { display: flex; align-items: center; gap: 5px; }
+.world-vscode-welcome-keys kbd {
+  min-width: 18px; padding: 1px 5px; border: 1px solid #3c3c3c; border-bottom-width: 2px; border-radius: 4px;
+  background: #2a2a2a; color: #c8c8c8; font: inherit; font-size: 10px; text-align: center;
+}
+.world-vscode-loading { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: #8b8b8b; font-size: 12px; }
+.world-vscode-loading-spin {
+  width: 18px; height: 18px; border: 2px solid rgba(255,255,255,.16);
+  border-top-color: #007acc; border-radius: 50%; animation: world-vscode-spin .8s linear infinite;
+}
+.world-vscode-statusbar { min-height: 24px; flex: none; display: flex; align-items: center; gap: 12px; padding: 0 8px 0 10px; overflow: hidden; background: #007acc; color: #fff; font-size: 11px; white-space: nowrap; }
+.world-vscode-status-root { flex: none; }
+/* 文件夹名太长时截断，状态栏右侧的行列/编码不被挤出去（完整路径在 title 里） */
+.world-vscode-statusbar .world-vscode-status-root {
+  height: 18px; padding: 0 5px; max-width: 168px; overflow: hidden;
+  background: transparent; text-overflow: ellipsis; white-space: nowrap;
+}
+.world-vscode-statusbar .world-vscode-status-root:hover { background: rgba(255,255,255,.16); }
+.world-vscode-status-pos { flex: none; color: rgba(255,255,255,.92); font-variant-numeric: tabular-nums; }
+.world-vscode-status-branch { display: flex; align-items: center; gap: 4px; color: rgba(255,255,255,.92); font-size: 11px; }
+.world-vscode-status-branch span { min-width: 0; max-width: 88px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.world-vscode-status-branch i { font-style: normal; font-size: 10px; font-variant-numeric: tabular-nums; }
+.world-vscode-status-branch i.is-ahead { color: #ccf5d6; }
+.world-vscode-status-branch i.is-behind { color: #ffe6bf; }
+.world-vscode-status-msg { min-width: 0; flex: 1; overflow: hidden; color: rgba(255,255,255,.72); text-overflow: ellipsis; white-space: nowrap; }
+.world-vscode-status-msg.is-active { color: #fff; font-weight: 600; }
+.world-vscode-status-meta { flex: none; color: rgba(255,255,255,.82); }
+.world-vscode-status-error { min-width: 0; flex: 1; overflow: hidden; color: #ffe0dc; text-overflow: ellipsis; white-space: nowrap; }
+.world-vscode-statusbar button {
+  flex: none; height: 18px; padding: 0 8px; border: 0; border-radius: 4px;
+  background: rgba(255,255,255,.16); color: inherit; font: inherit; font-size: 11px; line-height: 1; cursor: pointer;
+  transition: background .12s;
+}
+.world-vscode-statusbar button:hover { background: rgba(255,255,255,.3); }
+.world-vscode-statusbar button:focus-visible { outline: 1px solid #fff; outline-offset: 1px; }
+.world-vscode-statusbar button:disabled { background: rgba(255,255,255,.08); opacity: .6; cursor: default; }
+.world-vscode-statusbar .world-vscode-status-branch { height: 18px; padding: 0 5px; background: transparent; }
+.world-vscode-statusbar .world-vscode-status-branch:hover { background: rgba(255,255,255,.16); }
+/* 打开文件夹：盖在窗口内部的模态层，不打断桌面上的其它窗口 */
+.world-vscode-picker { position: absolute; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(0,0,0,.45); }
+.world-vscode-picker-card {
+  width: min(560px, 100%); max-height: min(520px, 100%); display: flex; flex-direction: column;
+  overflow: hidden; border: 1px solid #3c3c3c; border-radius: 8px; background: #252526;
+  box-shadow: 0 18px 48px rgba(0,0,0,.6);
+}
+.world-vscode-picker-head { flex: none; height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 6px 0 14px; border-bottom: 1px solid #333; }
+.world-vscode-picker-title { flex: 1; color: #e7e7e7; font-size: 12px; }
+.world-vscode-picker-close { width: 28px; height: 24px; border: 0; border-radius: 4px; background: transparent; color: #ccc; font-size: 18px; line-height: 1; cursor: pointer; }
+.world-vscode-picker-close:hover { background: #c42b1c; color: #fff; }
+.world-vscode-picker-path { flex: none; display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid #333; }
+.world-vscode-picker-input {
+  flex: 1; min-width: 0; height: 24px; padding: 0 8px; border: 1px solid #3c3c3c; border-radius: 4px;
+  background: #1e1e1e; color: #c9c9c9; font: 11px/1.5 Consolas, "Courier New", monospace;
+}
+.world-vscode-picker-input:focus { border-color: #007fd4; outline: 1px solid #007fd4; outline-offset: -1px; }
+.world-vscode-picker-up { width: 24px; height: 22px; flex: none; display: grid; place-items: center; border: 0; border-radius: 4px; background: #37373d; color: #ddd; cursor: pointer; }
+.world-vscode-picker-up:hover { background: #45454d; }
+.world-vscode-picker-up:disabled { opacity: .4; cursor: default; }
+.world-vscode-picker-browse {
+  height: 22px; flex: none; padding: 0 10px; border: 0; border-radius: 4px;
+  background: #37373d; color: #ddd; font: inherit; font-size: 11px; cursor: pointer;
+}
+.world-vscode-picker-browse:hover { background: #45454d; }
+.world-vscode-picker-browse:disabled { opacity: .4; cursor: default; }
+.world-vscode-picker-list { flex: 1; min-height: 140px; overflow: auto; padding: 4px 0; }
+.world-vscode-picker-row {
+  width: 100%; height: 26px; display: flex; align-items: center; gap: 8px; padding: 0 14px;
+  border: 0; background: transparent; color: #ccc; font: inherit; font-size: 12px; text-align: left; cursor: pointer;
+}
+.world-vscode-picker-row:hover { background: #2a2d2e; color: #fff; }
+.world-vscode-picker-row:focus-visible { outline: 1px solid #007fd4; outline-offset: -1px; }
+.world-vscode-picker-row svg { flex: none; color: #dcb67a; }
+.world-vscode-picker-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.world-vscode-picker-note { padding: 16px; color: #8b8b8b; font-size: 11px; text-align: center; }
+.world-vscode-picker-foot { flex: none; display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-top: 1px solid #333; }
+.world-vscode-picker-hint { flex: 1; min-width: 0; color: #7d7d7d; font-size: 10px; line-height: 1.4; }
+.world-vscode-picker-actions { flex: none; display: flex; gap: 6px; }
+.world-vscode-picker-actions button {
+  height: 24px; padding: 0 12px; border: 1px solid #454545; border-radius: 4px; background: #333;
+  color: #ddd; font: inherit; font-size: 11px; cursor: pointer;
+}
+.world-vscode-picker-actions button:hover { background: #3f3f46; }
+.world-vscode-picker-actions button.is-primary { border-color: #0e639c; background: #0e639c; color: #fff; }
+.world-vscode-picker-actions button.is-primary:hover { background: #1177bb; }
+.world-vscode-picker-actions button:disabled { opacity: .5; cursor: default; }
+.world-vscode-picker-actions button:focus-visible { outline: 1px solid #007fd4; outline-offset: 1px; }
+.world-vscode-resize { position: absolute; z-index: 3; touch-action: none; }
+.world-vscode-resize-n { top: 0; right: 8px; left: 8px; height: 8px; cursor: ns-resize; }
+.world-vscode-resize-s { right: 8px; bottom: 0; left: 8px; height: 8px; cursor: ns-resize; }
+.world-vscode-resize-e { top: 8px; right: 0; bottom: 8px; width: 8px; cursor: ew-resize; }
+.world-vscode-resize-w { top: 8px; bottom: 8px; left: 0; width: 8px; cursor: ew-resize; }
+.world-vscode-resize-ne, .world-vscode-resize-nw, .world-vscode-resize-se, .world-vscode-resize-sw { z-index: 4; width: 8px; height: 8px; }
+.world-vscode-resize-ne { top: 0; right: 0; cursor: nesw-resize; }
+.world-vscode-resize-nw { top: 0; left: 0; cursor: nwse-resize; }
+.world-vscode-resize-se { right: 0; bottom: 0; cursor: nwse-resize; }
+.world-vscode-resize-sw { bottom: 0; left: 0; cursor: nesw-resize; }
+@media (prefers-reduced-motion: reduce) {
+  .world-vscode-twist, .world-vscode-tab-close, .world-vscode-search-flag,
+  .world-vscode-activity-btn, .world-vscode-tab, .world-vscode-git-primary { transition: none; }
+  .world-vscode-git-spin.is-spinning, .world-vscode-search-spin, .world-vscode-loading-spin { animation: none; }
+}
+
+.world-plugin-window {
+  position: fixed; left: var(--plugin-x); top: max(var(--world-desktop-top), var(--plugin-y));
+  width: var(--plugin-w); height: var(--plugin-h); min-width: min(720px, 100vw); min-height: min(480px, 100vh);
+  display: flex; flex-direction: column; overflow: hidden; box-sizing: border-box;
+  border: 1px solid rgba(255,255,255,.12); border-radius: 8px;
+  background: var(--dsw-alias-bg-base, #202020); color: var(--dsw-alias-label-primary, #fff);
+  box-shadow: 0 26px 66px rgba(0,0,0,.65); font-family: var(--world-font);
+  transition: opacity .16s ease, transform .16s ease, left .16s ease, top .16s ease,
+    width .16s ease, height .16s ease, border-radius .16s ease, visibility 0s linear .16s;
+}
+body[data-world-adjusting="true"] .world-plugin-window { transition: none; }
+.world-plugin-window.is-active { border-color: rgba(76,194,255,.55); }
+.world-plugin-window.is-min { visibility: hidden; opacity: 0; transform: scale(.86) translateY(24vh); pointer-events: none; }
+.world-plugin-window.is-max {
+  left: 0; top: var(--world-desktop-top); width: 100vw;
+  height: calc(100vh - var(--world-taskbar-height) - var(--world-desktop-top));
+  border-color: transparent; border-radius: 0;
+}
+.world-plugin-titlebar {
+  position: relative; z-index: 1; height: 40px; flex: 0 0 40px; display: flex; align-items: center;
+  justify-content: space-between; border-bottom: 1px solid var(--world-line);
+  background: #232323; color: #fff; touch-action: none; user-select: none; cursor: default;
+}
+.world-plugin-window:not(.is-max) .world-plugin-titlebar { cursor: move; }
+.world-plugin-title { min-width: 0; height: 100%; flex: 1; display: flex; align-items: center; gap: 10px; padding-left: 14px; }
+.world-plugin-title > span { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.world-plugin-body {
+  position: relative; min-height: 0; flex: 1; overflow: auto;
+  background: var(--dsw-alias-bg-base, #202020); color: var(--dsw-alias-label-primary, #fff);
+}
+.world-plugin-body > [data-slot] { min-height: 100%; }
+.world-plugin-body > .world-journal { height: 100%; }
+.world-journal, .world-journal * { box-sizing: border-box; }
+.world-journal {
+  position: relative; min-height: 0; min-width: 0; display: flex; overflow: hidden;
+  background: var(--dsw-alias-bg-base, #202020); color: var(--dsw-alias-label-primary, #fff); font: 13px/20px var(--world-font);
+}
+.world-journal-list { width: 240px; flex: 0 0 240px; min-height: 0; display: flex; flex-direction: column; border-right: 1px solid var(--dsw-alias-border-l2, #454545); background: var(--dsw-alias-bg-layer-1, #252526); }
+.world-journal-toolbar { flex: none; padding: 12px; }
+.world-journal-toolbar > strong { flex: 1; font: inherit; font-weight: 600; }
+.world-journal-buttons { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.world-journal-buttons button {
+  height: 32px; padding: 0 12px; border: 1px solid var(--dsw-alias-border-l3, #454545); border-radius: 4px;
+  background: var(--dsw-alias-bg-layer-2, #333); color: inherit; font: inherit; cursor: pointer;
+}
+.world-journal-buttons button:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, #3f3f46); }
+.world-journal-buttons button:disabled { opacity: .5; cursor: default; }
+.world-journal-rows { flex: 1; min-height: 0; overflow: auto; }
+.world-journal-row {
+  width: 100%; min-height: 64px; display: flex; flex-direction: column; align-items: flex-start; padding: 12px;
+  border: 0; border-bottom: 1px solid var(--dsw-alias-border-l1, #454545); background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.world-journal-row > strong { max-width: 100%; font: inherit; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.world-journal-row > span { max-width: 100%; color: var(--dsw-alias-label-secondary, rgba(255,255,255,.72)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.world-journal-row:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.09)); }
+.world-journal-row.is-selected { background: var(--dsw-alias-interactive-bg-active, rgba(255,255,255,.14)); }
+.world-journal-rowwrap { position: relative; }
+.world-journal-rowwrap > .world-journal-row { padding-right: 38px; }
+.world-journal-pin {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 26px; height: 26px; padding: 0;
+  border: 0; border-radius: 4px; background: transparent; color: var(--dsw-alias-label-secondary, rgba(255,255,255,.55));
+  font-size: 15px; line-height: 26px; cursor: pointer; opacity: .55;
+}
+.world-journal-rowwrap.is-pinned .world-journal-pin { color: #e6b450; opacity: 1; }
+.world-journal-pin:hover:not(:disabled) { opacity: 1; background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.09)); }
+.world-journal-pin:disabled { opacity: .35; cursor: default; }
+.world-journal-search { display: flex; gap: 6px; padding: 0 12px 10px; }
+.world-journal-search input {
+  flex: 1; min-width: 0; height: 28px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l3, #454545);
+  border-radius: 4px; background: var(--dsw-specific-input-major, #1e1e1e); color: inherit; font: inherit;
+}
+.world-journal-search .world-journal-search-clear { height: 28px; padding: 0 8px; font-size: 12px; }
+.world-journal-search-clear {
+  border: 1px solid var(--dsw-alias-border-l3, #454545); border-radius: 4px;
+  background: var(--dsw-alias-bg-layer-2, #333); color: inherit; font: inherit; cursor: pointer;
+}
+.world-journal-detail { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 12px; }
+.world-journal-detail > .world-journal-toolbar { padding: 0; }
+.world-journal-detail input, .world-journal-detail textarea {
+  width: 100%; min-width: 0; border: 1px solid var(--dsw-alias-border-l3, #454545); border-radius: 4px;
+  background: var(--dsw-specific-input-major, #1e1e1e); color: inherit; font: inherit;
+}
+.world-journal-detail input { height: 32px; flex: none; padding: 0 12px; }
+.world-journal-detail textarea { flex: 1; min-height: 0; resize: none; padding: 12px; }
+.world-journal-meta, .world-journal-empty { color: var(--dsw-alias-label-secondary, rgba(255,255,255,.72)); }
+.world-journal-empty, .world-journal-notice { margin: 0; padding: 12px; overflow-wrap: anywhere; }
+.world-journal-heading { margin: 0; font: inherit; font-weight: 600; }
+.world-journal-bodytext { margin: 0; flex: 1; min-height: 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.world-journal-pagination { padding: 12px; }
+.world-journal-confirm { position: absolute; inset: 0; z-index: 10; display: grid; place-items: center; background: var(--dsw-alias-bg-mask-1, rgba(0,0,0,.45)); }
+.world-journal-confirm-card { background: var(--dsw-alias-bg-layer-1, #252526); color: inherit; }
+.world-journal-confirm-card strong { color: inherit; }
+.world-journal-confirm-card .world-journal-buttons { justify-content: flex-end; }
+
+/* 待办：与日记共用窗口骨架，只加状态点、筛选与状态切换 */
+.world-tasks .world-journal-list { width: 280px; flex-basis: 280px; }
+.world-task-filters { padding: 0 12px 10px; gap: 6px; }
+.world-task-filters .world-task-filter { padding: 3px 9px; border-radius: 999px; font-size: 12px; line-height: 18px; }
+.world-task-filters .world-task-filter.is-on {
+  background: var(--dsw-alias-interactive-bg-active, rgba(255,255,255,.16));
+  color: var(--dsw-alias-label-primary, #fff);
+}
+.world-task-row > strong { display: flex; align-items: center; gap: 8px; }
+.world-task-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; background: #9aa0a6; }
+.world-task-dot.is-pending { background: #d6a44c; }
+.world-task-dot.is-doing { background: #4f9cf9; }
+.world-task-dot.is-blocked { background: #e05252; }
+.world-task-dot.is-done { background: #51b46d; }
+.world-task-statuses { gap: 6px; }
+.world-task-statuses .world-task-status { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 12px; line-height: 18px; }
+.world-task-statuses .world-task-status.is-on {
+  background: var(--dsw-alias-interactive-bg-active, rgba(255,255,255,.16));
+  color: var(--dsw-alias-label-primary, #fff);
+}
+.world-plugin-placeholder {
+  min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  padding: 24px; color: var(--dsw-alias-label-secondary, rgba(255,255,255,.6)); text-align: center;
+}
+.world-plugin-placeholder strong { color: var(--dsw-alias-label-primary, #fff); font-size: 15px; font-weight: 500; }
+.world-plugin-placeholder span { font-size: 12px; }
+.world-plugin-resize { position: absolute; z-index: 3; touch-action: none; }
+.world-plugin-resize-n { top: 0; right: 8px; left: 8px; height: 8px; cursor: ns-resize; }
+.world-plugin-resize-s { right: 8px; bottom: 0; left: 8px; height: 8px; cursor: ns-resize; }
+.world-plugin-resize-e { top: 8px; right: 0; bottom: 8px; width: 8px; cursor: ew-resize; }
+.world-plugin-resize-w { top: 8px; bottom: 8px; left: 0; width: 8px; cursor: ew-resize; }
+.world-plugin-resize-ne, .world-plugin-resize-nw, .world-plugin-resize-se, .world-plugin-resize-sw { z-index: 4; width: 8px; height: 8px; }
+.world-plugin-resize-ne { top: 0; right: 0; cursor: nesw-resize; }
+.world-plugin-resize-nw { top: 0; left: 0; cursor: nwse-resize; }
+.world-plugin-resize-se { right: 0; bottom: 0; cursor: nwse-resize; }
+.world-plugin-resize-sw { bottom: 0; left: 0; cursor: nesw-resize; }
+
+/* DSH body portals stay above the moved root; modal roots also adopt its viewport. */
+body[data-world-window="normal"] > :not(#root):not([data-world-portal]):not([data-windows-menu]):has([role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [role="tooltip"]),
+body[data-world-window="max"] > :not(#root):not([data-world-portal]):not([data-windows-menu]):has([role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [role="tooltip"]) {
+  z-index: 1000 !important;
+}
+body[data-world-window="normal"] > :not(#root):not([data-world-portal]):not([data-windows-menu]):is([role="menu"], [role="listbox"], [role="tooltip"]),
+body[data-world-window="max"] > :not(#root):not([data-world-portal]):not([data-windows-menu]):is([role="menu"], [role="listbox"], [role="tooltip"]) {
+  z-index: 1000 !important;
+  max-width: max(0px, calc(var(--world-win-w) - 24px)) !important;
+  max-height: max(0px, calc(var(--world-win-h) - 24px)) !important;
+}
+body[data-world-window="normal"] > :not(#root):not([data-world-portal]):not([data-windows-menu]):has([role="menu"], [role="listbox"], [role="tooltip"]) :is([role="menu"], [role="listbox"], [role="tooltip"]),
+body[data-world-window="max"] > :not(#root):not([data-world-portal]):not([data-windows-menu]):has([role="menu"], [role="listbox"], [role="tooltip"]) :is([role="menu"], [role="listbox"], [role="tooltip"]) {
+  max-width: max(0px, calc(var(--world-win-w) - 24px)) !important;
+  max-height: max(0px, calc(var(--world-win-h) - 24px)) !important;
+}
+body[data-world-window="normal"] > :not(#root):not([data-world-portal]):not([data-windows-menu]):has([role="dialog"], [role="alertdialog"]),
+body[data-world-window="max"] > :not(#root):not([data-world-portal]):not([data-windows-menu]):has([role="dialog"], [role="alertdialog"]) {
+  position: fixed !important;
+  inset: auto !important;
+  left: var(--world-win-x) !important;
+  top: max(var(--world-desktop-top), var(--world-win-y)) !important;
+  width: var(--world-win-w) !important;
+  height: var(--world-win-h) !important;
+  box-sizing: border-box !important;
+}
+body[data-world-window="max"] > :not(#root):not([data-world-portal]):not([data-windows-menu]):has([role="dialog"], [role="alertdialog"]) {
+  left: 0 !important;
+  top: var(--world-desktop-top) !important;
+  width: 100vw !important;
+  height: calc(100vh - var(--world-taskbar-height) - var(--world-desktop-top)) !important;
+}
+body[data-world-window="normal"] > :not(#root):not([data-world-portal]):not([data-windows-menu]):has([role="dialog"], [role="alertdialog"]) [role="dialog"],
+body[data-world-window="normal"] > :not(#root):not([data-world-portal]):not([data-windows-menu]):has([role="dialog"], [role="alertdialog"]) [role="alertdialog"] {
+  max-width: max(0px, calc(var(--world-win-w) - 48px)) !important;
+  max-height: max(0px, calc(var(--world-win-h) - 48px)) !important;
+}
+body[data-world-window="max"] > :not(#root):not([data-world-portal]):not([data-windows-menu]):has([role="dialog"], [role="alertdialog"]) [role="dialog"],
+body[data-world-window="max"] > :not(#root):not([data-world-portal]):not([data-windows-menu]):has([role="dialog"], [role="alertdialog"]) [role="alertdialog"] {
+  max-width: max(0px, calc(100vw - 48px)) !important;
+  max-height: max(0px, calc(100vh - var(--world-taskbar-height) - var(--world-desktop-top) - 48px)) !important;
+}
+body[data-world-window="closed"] > :not(#root):not([data-world-portal]):not([data-windows-menu]):has([role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [role="tooltip"]),
+body[data-world-window="min"] > :not(#root):not([data-world-portal]):not([data-windows-menu]):has([role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [role="tooltip"]) {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+/* Portals raised by a plugin window follow that window's rect, not the DSH one.
+   They carry data-world-portal, which removes them from the generic rules above. */
+body > [data-world-dialog]:has([role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [role="tooltip"]),
+body > [data-world-dialog]:is([role="menu"], [role="listbox"], [role="tooltip"]) { z-index: 1000 !important; }
+body > [data-world-dialog]:has([role="dialog"], [role="alertdialog"]) {
+  position: fixed !important;
+  inset: auto !important;
+  left: var(--world-dialog-x) !important;
+  top: max(var(--world-desktop-top), var(--world-dialog-y)) !important;
+  width: var(--world-dialog-w) !important;
+  height: var(--world-dialog-h) !important;
+  box-sizing: border-box !important;
+}
+body > [data-world-dialog] :is([role="dialog"], [role="alertdialog"]) {
+  max-width: max(0px, calc(var(--world-dialog-w) - 48px)) !important;
+  max-height: max(0px, calc(var(--world-dialog-h) - 48px)) !important;
+}
+body > [data-world-dialog]:is([role="menu"], [role="listbox"], [role="tooltip"]),
+body > [data-world-dialog] :is([role="menu"], [role="listbox"], [role="tooltip"]) {
+  max-width: max(0px, calc(var(--world-dialog-w) - 24px)) !important;
+  max-height: max(0px, calc(var(--world-dialog-h) - 24px)) !important;
+}
+
+/* Built-in LAN chat app: reuses the VSCode window chrome, owns its own layer + content area. */
+.world-lanchat-window.is-max { border-radius: 0; }
+.world-lanchat-body { min-height: 0; flex: 1; display: flex; background: var(--world-surface); }
+.world-lanchat-frame { flex: 1; width: 100%; height: 100%; border: 0; background: var(--world-surface); }
+.world-lanchat-loading, .world-lanchat-error {
+  margin: auto; max-width: 430px; padding: 24px; text-align: center; color: var(--world-muted);
+  font: 13px/1.7 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+}
+.world-lanchat-error strong { display: block; margin-bottom: 6px; color: #d9544d; font-size: 14px; }
+.world-lanchat-error span { display: block; }
+.world-lanchat-error button {
+  margin-top: 14px; padding: 6px 14px; border: 1px solid rgba(0,0,0,.14);
+  border-radius: 6px; background: #fff; color: #3b6ef6; font: inherit; cursor: pointer;
+}
+.world-lanchat-window .world-vscode-controls button:hover { background: rgba(255,255,255,.12); color: #fff; }
+.world-lanchat-window .world-vscode-controls button.world-lanchat-close:hover { background: #c42b1c; }
+/* 标题栏上的模型好友数量：数据来自 world-lan-chat/port RPC，不是占位徽标 */
+.world-lanchat-window .world-vscode-title .world-lanchat-botcount {
+  flex: 0 0 auto; padding: 2px 8px; border-radius: 10px; overflow: visible; text-overflow: clip;
+  background: var(--world-active); color: var(--world-ink); font-size: 10px; letter-spacing: .2px;
+}
+body[data-world-active-kind="vscode"] .world-lanchat-window { z-index: 3; }
+body[data-world-active-kind="lanchat"] .world-vscode-window:not(.world-lanchat-window) { z-index: 3; }
+body[data-world-window="normal"][data-world-active-kind="lanchat"] #root,
+body[data-world-window="max"][data-world-active-kind="lanchat"] #root { z-index: 2 !important; }
+body[data-world-active-kind="lanchat"] .world-window-frame { z-index: 3 !important; }
+
+/* 外部 .worldapp 应用：拖放提示、图标右键菜单、窗口内容与层级 */
+.world-external-cards { display: contents; }
+.world-external-body { min-height: 0; flex: 1; display: flex; background: #f7f9fd; }
+.world-external-frame { flex: 1; width: 100%; height: 100%; border: 0; background: #f7f9fd; }
+.world-external-window .world-vscode-controls button:hover { background: rgba(255,255,255,.12); color: #fff; }
+.world-external-window .world-vscode-controls button.world-external-close:hover { background: #c42b1c; }
+body[data-world-active-kind="external"] .world-vscode-window:not(.world-external-window) { z-index: 3; }
+body[data-world-window="normal"][data-world-active-kind="external"] #root,
+body[data-world-window="max"][data-world-active-kind="external"] #root { z-index: 2 !important; }
+body[data-world-active-kind="external"] .world-window-frame { z-index: 3 !important; }
+
+.world-drop-hint {
+  position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; pointer-events: none;
+  background: rgba(4, 20, 38, .55); backdrop-filter: blur(3px);
+}
+.world-drop-hint::before {
+  content: ""; position: absolute; inset: 56px 56px 64px; border: 2px dashed rgba(120, 200, 255, .8); border-radius: 16px;
+}
+.world-drop-card {
+  position: relative; display: grid; gap: 7px; justify-items: center; padding: 26px 40px;
+  border: 1px solid rgba(255,255,255,.18); border-radius: 16px;
+  background: rgba(20, 32, 50, .92); box-shadow: 0 24px 60px rgba(0,0,0,.5); color: #fff;
+}
+.world-drop-card strong { font-size: 17px; font-weight: 600; }
+.world-drop-card span { font-size: 12px; color: rgba(255,255,255,.68); }
+
+.world-context-menu {
+  position: fixed; z-index: 110; width: 190px; padding: 6px; display: grid; gap: 2px;
+  border: 1px solid rgba(255,255,255,.14); border-radius: 10px;
+  background: rgba(30, 32, 36, .96); backdrop-filter: blur(24px) saturate(1.6);
+  box-shadow: 0 18px 44px rgba(0,0,0,.55); color: #f2f4f8;
+  font: 12px/1.5 var(--world-font);
+}
+.world-context-title { padding: 7px 10px 8px; color: rgba(255,255,255,.5); font-size: 11px; border-bottom: 1px solid rgba(255,255,255,.09); margin-bottom: 3px; }
+.world-context-menu button { width: 100%; padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer; }
+.world-context-menu button:hover { background: rgba(255,255,255,.11); }
+.world-context-menu button.is-danger { color: #ff9a92; }
+.world-context-menu button.is-danger:hover { background: rgba(196, 43, 28, .28); }
+.world-context-note { padding: 8px 10px; color: rgba(255,255,255,.42); font-size: 11px; }
+.world-vscode-menu { width: 200px; }
+
+.world-toast {
+  position: fixed; left: 50%; bottom: 64px; transform: translateX(-50%); z-index: 120;
+  padding: 9px 18px; border-radius: 10px; background: rgba(20, 32, 50, .94); color: #fff;
+  font: 12px/1.5 var(--world-font); box-shadow: 0 14px 36px rgba(0,0,0,.45);
+  border: 1px solid rgba(255,255,255,.12);
+}
+
+/* ---------- 3D 景深桌面：透视地面 + 指针视差 + 图标浮起 ---------- */
+/* 地面是一块绕底边旋转 75° 的大平面，网格远处由遮罩淡出成地平线。 */
+.world-floor-wrap {
+  position: absolute; inset: 0; overflow: hidden; pointer-events: none;
+  transform: translate3d(var(--world-par-x, 0px), var(--world-par-y, 0px), 0);
+  transition: transform .5s cubic-bezier(.22, .61, .36, 1);
+  will-change: transform;
+}
+.world-floor-wrap::before {
+  content: ""; position: absolute; left: 50%; bottom: -18vmax; width: 132vmax; height: 76vmax;
+  transform: translateX(-50%); border-radius: 50%;
+  background: radial-gradient(50% 50% at 50% 50%, color-mix(in srgb, var(--wall-tint) 34%, transparent) 0%, color-mix(in srgb, var(--wall-tint) 14%, transparent) 46%, transparent 74%);
+  filter: blur(18px);
+  opacity: var(--wall-grid, 1);
+}
+/* 地平线光带：落在网格远处淡出的位置，给眼睛一个“距离”参照。 */
+.world-floor-wrap::after {
+  content: ""; position: absolute; left: 50%; bottom: 43%; width: 150vmax; height: 9vmax;
+  transform: translateX(-50%); pointer-events: none;
+  background: radial-gradient(50% 50% at 50% 50%, color-mix(in srgb, var(--wall-tint) 30%, transparent) 0%, color-mix(in srgb, var(--wall-tint) 12%, transparent) 48%, transparent 76%);
+  filter: blur(26px);
+  opacity: var(--wall-grid, 1);
+}
+.world-floor {
+  position: absolute; left: 50%; bottom: calc(var(--world-taskbar-height) * -1 - 6px);
+  width: 300vmax; height: 160vmax; transform-origin: 50% 100%;
+  transform: translateX(-50%) perspective(1600px) rotateX(58deg);
+  background-image:
+    linear-gradient(to top, color-mix(in srgb, var(--wall-tint) 22%, transparent) 0%, color-mix(in srgb, var(--wall-tint) 9%, transparent) 55%, transparent 92%),
+    repeating-linear-gradient(90deg, color-mix(in srgb, var(--wall-tint) 34%, transparent) 0 1px, transparent 1px 84px),
+    repeating-linear-gradient(0deg, color-mix(in srgb, var(--wall-tint) 24%, transparent) 0 1px, transparent 1px 84px);
+  -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, .95) 0%, rgba(0, 0, 0, .58) 42%, rgba(0, 0, 0, 0) 92%);
+  mask-image: linear-gradient(to top, rgba(0, 0, 0, .95) 0%, rgba(0, 0, 0, .58) 42%, rgba(0, 0, 0, 0) 92%);
+  opacity: calc(.85 * var(--wall-grid, 1));
+}
+/* 光晕比地面浅一点、慢一点，形成前后两层。 */
+.world-wall .world-bloom {
+  transform: rotate(-8deg) translate3d(calc(var(--world-par-x, 0px) * -.42), calc(var(--world-par-y, 0px) * -.42), 0);
+  transition: transform .6s cubic-bezier(.22, .61, .36, 1);
+}
+
+/* 图标始终是平面：3D 只作用于壁纸层（地面网格、光晕、地面上的角色）。
+   图标不做透视、不挤出厚度、不做 translateZ 位移，命中区域与 label 位置都不变；
+   悬停 / 选中沿用基础规则的浅色高亮，按下只做很小的缩放反馈。 */
+
+/* 活动窗口抬高一档：投影更深、带一圈冷色描边，和桌面拉开距离。 */
+body[data-world-depth="on"][data-world-active-kind="dsh"] .world-window-frame {
+  box-shadow: 0 34px 92px rgba(0, 0, 0, .72), 0 4px 14px rgba(0, 0, 0, .5), 0 0 0 1px rgba(120, 196, 255, .14);
+}
+
+body[data-world-depth="off"] .world-floor-wrap { display: none; }
+body[data-world-depth="off"] .world-walker { display: none; }
+
+/* ── 桌面卡通小机器人：站在透视地面上，走向「鼠标与地面的交点」 ───────────
+   位置由 walker.js 每帧写 transform：脚底（transform-origin）落在鼠标那个点，
+   再按地面深度缩放——所以既有左右走，也有沿地面走近／走远。
+   这里只管姿势：走 = 四肢摆动 + 躯干起伏 + 影子脉动；停 = 站姿 + 轻微呼吸。
+   步频固定（--walker-dur），不再按帧改写：animation-duration 每帧变会让动画相位
+   来回跳，看着就是抖。只在 3D 开启时存在。 */
+.world-walker {
+  position: absolute; left: 0; top: 0;
+  width: 84px; height: 148px; pointer-events: none; z-index: 2;
+  --walker-dur: .62s;
+  transform-origin: 50% 100%;   /* 脚底即地面交点 */
+  will-change: transform;
+}
+/* 不用 transition：翻面时 scaleX 会经过 0 宽度，看起来就是闪一下。 */
+.world-walker-face { display: block; width: 84px; height: 148px; transform-origin: 50% 100%; }
+.world-walker-body { display: block; transform-origin: 50% 100%; overflow: visible; }
+.world-walker-shadow {
+  position: absolute; left: 6px; bottom: 1px; width: 72px; height: 18px; border-radius: 50%;
+  background: radial-gradient(50% 50% at 50% 50%, rgba(0, 0, 0, .66) 0%, rgba(0, 0, 0, .30) 50%, rgba(0, 0, 0, 0) 78%);
+  animation: world-walk-shadow var(--walker-dur, .62s) ease-in-out infinite;
+}
+/* 小碎步：腿 ±15°、臂 ±12°，同侧腿与臂反相（左腿前、左臂后），幅度小所以不会甩到胸口。 */
+.wn-torso { transform-box: view-box; transform-origin: 42px 100px; animation: world-walk-bob var(--walker-dur, .62s) ease-in-out infinite; }
+.wn-head { transform-box: view-box; transform-origin: 42px 46px; animation: world-walk-head var(--walker-dur, .62s) ease-in-out infinite; }
+.wn-leg, .wn-arm, .wn-foot { transform-box: view-box; }
+.wn-leg-a { transform-origin: 51.5px 94px; animation: world-walk-leg-a var(--walker-dur, .62s) ease-in-out infinite; }
+.wn-leg-b { transform-origin: 37.5px 94px; animation: world-walk-leg-b var(--walker-dur, .62s) ease-in-out infinite; }
+.wn-arm-a { transform-origin: 61.5px 62px; animation: world-walk-arm-a var(--walker-dur, .62s) ease-in-out infinite; }
+.wn-arm-b { transform-origin: 27.5px 62px; animation: world-walk-arm-b var(--walker-dur, .62s) ease-in-out infinite; }
+/* 脚绕踝关节反向转，抵消小腿旋转，落地始终水平（不会翘成滑雪板）。 */
+.wn-foot-a { transform-origin: 51.5px 126px; animation: world-walk-foot-a var(--walker-dur, .62s) ease-in-out infinite; }
+.wn-foot-b { transform-origin: 37.5px 126px; animation: world-walk-foot-b var(--walker-dur, .62s) ease-in-out infinite; }
+
+/* 停住：四肢归位、只留很轻的呼吸，不会卡在“抬着一条腿”的怪姿势。 */
+.world-walker[data-walking="off"] .wn-leg,
+.world-walker[data-walking="off"] .wn-arm,
+.world-walker[data-walking="off"] .wn-foot { animation: none; transform: rotate(0deg); }
+/* 静止时后腿略微错开，两条腿不会叠成一只大脚 */
+.world-walker[data-walking="off"] .wn-leg-b { transform: translateX(-3px) rotate(0deg); }
+.world-walker[data-walking="off"] .wn-head { animation: none; transform: rotate(0deg); }
+.world-walker[data-walking="off"] .wn-torso { animation: world-walk-idle 2.8s ease-in-out infinite; }
+.world-walker[data-walking="off"] .world-walker-shadow { animation: none; transform: scaleX(1); opacity: .92; }
+.world-walker[data-grabbing="on"] .world-walker-body { overflow: visible; }
+.world-walker[data-grabbing="on"] .wn-arm-a { animation: none; transform: rotate(-90deg); }
+.world-walker[data-grabbing="on"] .wn-torso { animation: none; transform: none; }
+
+/* ── 按活动相位换姿势 ─────────────────────────────────────────────────────
+   优先级：走路 > 抱住窗口 > 相位姿势。所以相位规则一律带
+   [data-walking="off"][data-grabbing="off"] 两个条件——它只是「站定时怎么待着」，
+   不参与行走，也不抢走那只扶窗的手。
+   相位来自助手活动快照（thinking / executing / responding / waiting / paused / error …），
+   walker.js 只把它写到 data-phase 上，重渲染不会打断下面的物理循环。 */
+.world-walker .wn-head, .world-walker .wn-torso, .world-walker .wn-arm, .world-walker .wn-leg,
+.world-walker .wn-foot { transition: transform .24s cubic-bezier(.22, .61, .36, 1); }
+/* 相位点缀默认不出现，各自带 opacity 关键帧 */
+.world-walker .wn-dot, .world-walker .wn-z, .world-walker .wn-spark path,
+.world-walker .wn-workring { opacity: 0; }
+.world-walker .wn-dot, .world-walker .wn-z { transform-box: fill-box; transform-origin: 50% 50%; }
+
+/* 空闲：不是木头，过一会儿看一眼（周期很长，大部分时间仍旧安静） */
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="idle"] .wn-head {
+  animation: world-pose-glance 7.6s ease-in-out infinite;
+}
+/* 启动：刚醒，抬头，天线慢慢亮 */
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="starting"] .wn-head {
+  animation: world-pose-wake 1.6s ease-in-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="starting"] .wn-lamp {
+  animation: world-pose-lamp-slow 1.2s ease-in-out infinite;
+}
+/* 思考（等模型）：仰头、一只手托到下巴前、身子极轻地起伏，头顶三个点上浮 */
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="thinking"] .wn-head {
+  animation: world-pose-think-head 3.4s ease-in-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="thinking"] .wn-arm-a {
+  animation: world-pose-think-arm 3.4s ease-in-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="thinking"] .wn-torso {
+  animation: world-pose-breathe-soft 3.4s ease-in-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="thinking"] .wn-lamp {
+  animation: world-pose-lamp-slow 2.2s ease-in-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="thinking"] .wn-dot {
+  animation: world-pose-dot 2.1s ease-in-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="thinking"] .wn-dot-b { animation-delay: .55s; }
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="thinking"] .wn-dot-c { animation-delay: 1.1s; }
+/* 执行工具：俯身、双臂轮着敲、脚下工作环亮起来、身侧冒火花 */
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="executing"] .wn-torso {
+  animation: world-pose-type-body .44s ease-in-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="executing"] .wn-head {
+  animation: world-pose-type-head .88s ease-in-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="executing"] .wn-arm-a {
+  animation: world-pose-type-a .44s ease-in-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="executing"] .wn-arm-b {
+  animation: world-pose-type-b .44s ease-in-out infinite;
+  animation-delay: -.22s;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="executing"] .wn-workring {
+  animation: world-pose-ring 1.3s ease-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="executing"] .wn-spark path {
+  animation: world-pose-spark .44s linear infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="executing"] .wn-spark-b { animation-delay: -.15s; }
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="executing"] .wn-spark-c { animation-delay: -.30s; }
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="executing"] .wn-lamp {
+  animation: world-pose-lamp-fast .44s ease-in-out infinite;
+}
+/* 生成回复：边说边点头，另一只手比划，胸口那点亮跟着呼吸 */
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="responding"] .wn-head {
+  animation: world-pose-nod 1.05s ease-in-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="responding"] .wn-arm-a {
+  animation: world-pose-gesture 2.1s ease-in-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="responding"] .wn-core {
+  animation: world-pose-core 1.05s ease-in-out infinite;
+}
+/* 等你说话：举起手招呼，脑袋左右找人 */
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="waiting"] .wn-arm-a {
+  animation: world-pose-hail 1.7s ease-in-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="waiting"] .wn-head {
+  animation: world-pose-look 2.8s ease-in-out infinite;
+}
+/* 先停一下 / 已停下：垂头、手放下、灯压暗，头顶飘 Z。它不装忙。 */
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="paused"] .wn-head,
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="stopped"] .wn-head {
+  animation: world-pose-doze 5.2s ease-in-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="paused"] .wn-torso,
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="stopped"] .wn-torso {
+  animation: world-pose-breathe-soft 5.2s ease-in-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="paused"] .wn-arm,
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="stopped"] .wn-arm {
+  animation: none; transform: rotate(-3deg);
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="paused"] .wn-z,
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="stopped"] .wn-z {
+  animation: world-pose-z 3.2s ease-in-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="paused"] .wn-lamp,
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="stopped"] .wn-lamp,
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="paused"] .wn-core,
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="stopped"] .wn-core { opacity: .34; }
+/* 出错：抖一下、灯转暖，不用文案也知道不对 */
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="error"] .world-walker-body {
+  animation: world-pose-shake 1.5s ease-in-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="error"] .wn-lamp {
+  fill: #ff9d8a; animation: world-pose-lamp-alarm .7s ease-in-out infinite;
+}
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="error"] .wn-eye { fill: #ffb3a2; }
+.world-walker[data-walking="off"][data-grabbing="off"][data-phase="error"] .wn-core { fill: #ff9d8a; }
+
+@keyframes world-walk-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3.2px); }
+}
+@keyframes world-walk-idle {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1.2px); }
+}
+@keyframes world-walk-head {
+  0%, 100% { transform: rotate(-1.8deg); }
+  50% { transform: rotate(1.8deg); }
+}
+@keyframes world-walk-leg-a {
+  0%, 100% { transform: rotate(18deg); }
+  50% { transform: rotate(-18deg); }
+}
+@keyframes world-walk-leg-b {
+  0%, 100% { transform: rotate(-18deg); }
+  50% { transform: rotate(18deg); }
+}
+@keyframes world-walk-arm-a {
+  0%, 100% { transform: rotate(-12deg); }
+  50% { transform: rotate(12deg); }
+}
+@keyframes world-walk-arm-b {
+  0%, 100% { transform: rotate(12deg); }
+  50% { transform: rotate(-12deg); }
+}
+@keyframes world-walk-foot-a {
+  0%, 100% { transform: rotate(-18deg); }
+  50% { transform: rotate(18deg); }
+}
+@keyframes world-walk-foot-b {
+  0%, 100% { transform: rotate(18deg); }
+  50% { transform: rotate(-18deg); }
+}
+@keyframes world-walk-shadow {
+  0%, 100% { transform: scaleX(1); opacity: .92; }
+  50% { transform: scaleX(.9); opacity: .80; }
+}
+
+/* ── 相位姿势关键帧：幅度都小，眼睛在 60px 的角色上看的是「意思」不是「杂技」 */
+/* 空闲时的一次张望：63% 之前完全不动，之后左右各看一眼再回来 */
+@keyframes world-pose-glance {
+  0%, 62%, 100% { transform: rotate(0deg) translateX(0); }
+  70% { transform: rotate(-3.4deg) translateX(-.9px); }
+  78% { transform: rotate(-1.2deg) translateX(-.3px); }
+  86% { transform: rotate(2.6deg) translateX(.8px); }
+  93% { transform: rotate(.6deg) translateX(.2px); }
+}
+/* 刚醒：抬头，幅度比思考小一点，像在确认门口有人 */
+@keyframes world-pose-wake {
+  0%, 100% { transform: rotate(0deg); }
+  40% { transform: rotate(-3.2deg) translateY(-1px); }
+  62% { transform: rotate(-1.4deg) translateY(-.4px); }
+}
+/* 思考：仰头 → 停一会儿 → 点一下头（想通了），再回仰 */
+@keyframes world-pose-think-head {
+  0%, 100% { transform: rotate(-1.5deg); }
+  34% { transform: rotate(-6.5deg) translateY(-1.6px); }
+  58% { transform: rotate(-4deg) translateY(-1px); }
+  74% { transform: rotate(2.6deg) translateY(1px); }
+}
+/* 托下巴：近侧手臂抬到脸前下方，随身体一起极轻地起伏 */
+@keyframes world-pose-think-arm {
+  0%, 100% { transform: rotate(130deg); }
+  34% { transform: rotate(142deg); }
+  58% { transform: rotate(126deg); }
+  74% { transform: rotate(136deg); }
+}
+@keyframes world-pose-breathe-soft {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1.4px); }
+}
+@keyframes world-pose-dot {
+  0% { opacity: 0; transform: translateY(3px) scale(.7); }
+  30% { opacity: .95; }
+  100% { opacity: 0; transform: translateY(-8px) scale(1.05); }
+}
+/* 敲键盘：双臂在身前交替上下，身体压着节拍微沉 */
+@keyframes world-pose-type-a {
+  0%, 100% { transform: rotate(24deg); }
+  50% { transform: rotate(50deg); }
+}
+@keyframes world-pose-type-b {
+  0%, 100% { transform: rotate(44deg); }
+  50% { transform: rotate(18deg); }
+}
+@keyframes world-pose-type-body {
+  0%, 100% { transform: rotate(2.6deg) translateY(0); }
+  50% { transform: rotate(2.6deg) translateY(-1.1px); }
+}
+@keyframes world-pose-type-head {
+  0%, 100% { transform: rotate(1deg) translateY(0); }
+  50% { transform: rotate(2.6deg) translateY(.8px); }
+}
+/* 火花是「闪」不是「呼吸」：一周期闪两次，靠关键帧直接开关（steps() 会把中段吃掉） */
+@keyframes world-pose-spark {
+  0%, 12% { opacity: 0; }
+  14%, 30% { opacity: .9; }
+  32%, 66% { opacity: 0; }
+  68%, 84% { opacity: .9; }
+  86%, 100% { opacity: 0; }
+}
+@keyframes world-pose-ring {
+  0% { opacity: 0; transform: scale(.82); }
+  22% { opacity: .55; }
+  100% { opacity: 0; transform: scale(1.22); }
+}
+/* 点头说话 */
+@keyframes world-pose-nod {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  35% { transform: translateY(2.4px) rotate(4deg); }
+  70% { transform: translateY(-1px) rotate(-1.6deg); }
+}
+/* 说话时的手势：小幅、慢，别和敲键盘混在一起 */
+@keyframes world-pose-gesture {
+  0%, 100% { transform: rotate(8deg); }
+  45% { transform: rotate(30deg); }
+}
+@keyframes world-pose-core {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .45; }
+}
+/* 招手：手举到头侧来回摆，幅度够大才像「过来」 */
+@keyframes world-pose-hail {
+  0%, 100% { transform: rotate(-118deg); }
+  50% { transform: rotate(-152deg); }
+}
+@keyframes world-pose-look {
+  0%, 100% { transform: rotate(0deg) translateX(0); }
+  28% { transform: rotate(-4.4deg) translateX(-1.2px); }
+  52% { transform: rotate(-1deg) translateX(-.3px); }
+  78% { transform: rotate(3.6deg) translateX(1.1px); }
+}
+/* 打盹：垂头，极慢地起伏 */
+@keyframes world-pose-doze {
+  0%, 100% { transform: rotate(14deg) translateY(2.4px); }
+  50% { transform: rotate(7deg) translateY(1.2px); }
+}
+@keyframes world-pose-z {
+  0% { opacity: 0; transform: translate(-1px, 3px) scale(.8); }
+  26% { opacity: .82; }
+  100% { opacity: 0; transform: translate(2px, -6px) scale(1); }
+}
+/* 出错：一周期里抖三下就停（灯继续报警），不连续抽搐 */
+@keyframes world-pose-shake {
+  0%, 100% { transform: translateX(0); }
+  5% { transform: translateX(-2.2px); }
+  10% { transform: translateX(2px); }
+  15% { transform: translateX(-1.4px); }
+  20% { transform: translateX(1px); }
+  26%, 94% { transform: translateX(0); }
+}
+@keyframes world-pose-lamp-slow {
+  0%, 100% { opacity: .55; }
+  50% { opacity: 1; }
+}
+@keyframes world-pose-lamp-fast {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .45; }
+}
+@keyframes world-pose-lamp-alarm {
+  0%, 100% { opacity: .35; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .world-window-frame, .world-start, .world-plugin-window { transition-duration: 0s; }
+  .world-floor { animation: none; }
+  .world-wall .world-bloom, .world-core, .world-r2, .world-r4 { animation: none; }
+  .world-floor-wrap, .world-wall .world-bloom { transition-duration: 0s; }
+  .world-walker-face { transition-duration: 0s; }
+  /* 跟随鼠标是交互响应，保留；摆腿是「正在移动」的唯一反馈，也保留。
+     躯干起伏、头部摆动、影子脉动和状态姿势全部停掉。 */
+  .world-walker .wn-torso, .world-walker .wn-head, .world-walker .world-walker-shadow { animation: none; }
+  .world-walker[data-walking="off"] .wn-torso { animation: none; }
+  .world-walker[data-walking="off"] .wn-leg,
+  .world-walker[data-walking="off"] .wn-arm,
+  .world-walker[data-walking="off"] .wn-foot { animation: none; transform: rotate(0deg); }
+  /* 相位动画一律停：但姿势留着——「在思考」和「在打盹」仍要一眼分得出来，
+     靠静态造型表达，不靠动。!important 是因为相位规则的选择器更具体。 */
+  .world-walker[data-walking="off"][data-grabbing="off"] .wn-head,
+  .world-walker[data-walking="off"][data-grabbing="off"] .wn-torso,
+  .world-walker[data-walking="off"][data-grabbing="off"] .wn-arm,
+  .world-walker[data-walking="off"][data-grabbing="off"] .wn-leg,
+  .world-walker[data-walking="off"][data-grabbing="off"] .wn-foot,
+  .world-walker .wn-dot, .world-walker .wn-z, .world-walker .wn-spark path,
+  .world-walker .wn-workring, .world-walker .wn-core, .world-walker .wn-lamp,
+  .world-walker .world-walker-body { animation: none !important; }
+  .world-walker[data-walking="off"][data-grabbing="off"][data-phase="thinking"] .wn-head { transform: rotate(-6deg) translateY(-1.4px); }
+  .world-walker[data-walking="off"][data-grabbing="off"][data-phase="thinking"] .wn-arm-a { transform: rotate(136deg); }
+  .world-walker[data-walking="off"][data-grabbing="off"][data-phase="executing"] .wn-torso { transform: rotate(2.6deg); }
+  .world-walker[data-walking="off"][data-grabbing="off"][data-phase="executing"] .wn-arm-a { transform: rotate(44deg); }
+  .world-walker[data-walking="off"][data-grabbing="off"][data-phase="executing"] .wn-arm-b { transform: rotate(20deg); }
+  .world-walker[data-walking="off"][data-grabbing="off"][data-phase="waiting"] .wn-arm-a { transform: rotate(-135deg); }
+  .world-walker[data-walking="off"][data-grabbing="off"][data-phase="paused"] .wn-head,
+  .world-walker[data-walking="off"][data-grabbing="off"][data-phase="stopped"] .wn-head { transform: rotate(12deg) translateY(2px); }
+  .world-walker[data-walking="off"][data-grabbing="off"][data-phase="thinking"] .wn-dot { opacity: .8; }
+  .world-walker[data-walking="off"][data-grabbing="off"][data-phase="paused"] .wn-z,
+  .world-walker[data-walking="off"][data-grabbing="off"][data-phase="stopped"] .wn-z { opacity: .55; }
+}
+
+/* ── 内置浏览器 ────────────────────────────────────────────────────────────
+   窗口壳复用 .world-vscode-window；这一整套是固定深色（与窗口标题栏同源），
+   不随 IDE 主题切换，因此颜色直接写字面量。规格见 BROWSER-DESIGN.md §7。 */
+/* 窗口是 portal 直属节点，不在 .world-window-frame 的 box-sizing 覆盖范围内，必须自带 */
+.world-browser-window, .world-browser-window * { box-sizing: border-box; }
+.world-browser-window { color: var(--dsw-alias-label-primary, #cccccc); font: 12px/1.4 var(--world-font); }
+.world-browser-window .world-vscode-controls button { width: 40px; background: transparent; color: #cccccc; font-size: 14px; }
+.world-browser-window .world-vscode-controls button:hover { background: rgba(255,255,255,.12); color: #fff; }
+.world-browser-window .world-vscode-controls button.world-browser-close:hover { background: var(--world-close); color: #fff; }
+.world-browser-window .world-vscode-title { font-size: 12px; }
+.world-browser-window:not(.is-active) .world-vscode-title span { color: #9a9a9a; }
+
+/* 标签栏 36px；活动标签顶部 2px accent，右侧关闭键 hover 才出现 */
+.world-browser-tabs {
+  height: 36px; flex: none; display: flex; align-items: flex-end; gap: 2px; padding: 0 6px;
+  background: var(--dsw-alias-bg-layer-1, #252526); border-bottom: 1px solid var(--dsw-alias-border-l2, #1e1e1e); user-select: none; overflow: hidden;
+}
+.world-browser-tab {
+  min-width: 160px; max-width: 220px; height: 30px; flex: 1 1 160px; display: flex; align-items: center;
+  gap: 6px; padding: 0 8px; border-radius: 6px 6px 0 0; background: var(--dsw-alias-bg-layer-2, #2d2d2d); color: var(--dsw-alias-label-secondary, #b9b9b9);
+  cursor: pointer; position: relative; overflow: hidden;
+}
+.world-browser-tab.on { background: var(--dsw-alias-bg-base, #1e1e1e); color: var(--dsw-alias-label-primary, #f0f0f0); border-top: 2px solid var(--world-accent); padding-top: 0; }
+.world-browser-tab-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.world-browser-tab-close {
+  width: 18px; height: 18px; flex: none; display: grid; place-items: center; padding: 0; border: 0;
+  border-radius: 4px; background: transparent; color: inherit; font-size: 14px; line-height: 1; cursor: pointer;
+  opacity: 0;
+}
+.world-browser-tab:hover .world-browser-tab-close, .world-browser-tab.on .world-browser-tab-close { opacity: .75; }
+.world-browser-tab-close:hover { opacity: 1; background: rgba(255,255,255,.14); }
+.world-browser-tab-add {
+  width: 28px; height: 28px; flex: none; margin-bottom: 1px; padding: 0; border: 0; border-radius: 5px;
+  background: transparent; color: #cccccc; font-size: 18px; line-height: 1; cursor: pointer;
+}
+.world-browser-tab-add:hover { background: rgba(255,255,255,.12); color: #fff; }
+.world-browser-tab-add:disabled { opacity: .35; cursor: not-allowed; }
+
+/* 地址栏 40px：5 枚 28×28 图标键 + 26px 高胶囊输入框 + 2px 加载条 */
+.world-browser-toolbar {
+  height: 40px; flex: none; position: relative; display: flex; align-items: center; gap: 4px; padding: 0 8px;
+  background: var(--dsw-alias-bg-layer-1, #1e1e1e); border-bottom: 1px solid var(--dsw-alias-border-l2, #333333);
+}
+.world-browser-cap {
+  width: 28px; height: 28px; flex: none; display: grid; place-items: center; padding: 0; border: 0;
+  border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary, #c8c8c8); cursor: pointer;
+}
+.world-browser-cap:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.12)); color: var(--dsw-alias-label-primary, #fff); }
+.world-browser-cap:focus-visible, .world-browser-tab-add:focus-visible, .world-browser-address:focus-visible {
+  outline: 1px solid var(--world-accent); outline-offset: -1px;
+}
+.world-browser-cap:disabled { opacity: .32; cursor: default; }
+.world-browser-address {
+  height: 26px; min-width: 0; flex: 1; padding: 0 12px; border: 1px solid transparent; border-radius: 13px;
+  background: var(--dsw-alias-bg-layer-2, #2b2b2b); color: var(--dsw-alias-label-primary, #e6e6e6); font: 12px/24px var(--world-font); outline: none;
+}
+.world-browser-address::placeholder { color: var(--dsw-alias-label-tertiary, #8a8a8a); }
+.world-browser-address:focus { border-color: var(--world-accent); background: var(--dsw-alias-bg-base, #303030); }
+.world-browser-progress { position: absolute; right: 0; bottom: 0; left: 0; height: 2px; overflow: hidden; pointer-events: none; }
+.world-browser-progress.on::after {
+  content: ""; position: absolute; inset: 0; width: 38%; background: var(--world-accent);
+  animation: world-browser-progress 1.1s ease-in-out infinite;
+}
+@keyframes world-browser-progress { from { transform: translateX(-100%); } to { transform: translateX(360%); } }
+
+.world-browser-notice {
+  height: 28px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 10px;
+  background: #4a3a13; color: #ffdca8; font-size: 11px;
+}
+.world-browser-notice span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.world-browser-notice button {
+  width: 18px; height: 18px; flex: none; border: 0; border-radius: 4px;
+  background: transparent; color: inherit; cursor: pointer;
+}
+.world-browser-notice button:hover { background: rgba(255,255,255,.14); }
+
+/* 原生 guest 是独立子视图：所有 viewport 叠在一起，切标签只改 visibility（不销毁 DOM）。
+   容器不做圆角裁切之外的变换，拖窗/缩放时由外层窗口统一改 --vscode-* 变量。 */
+.world-browser-content { min-height: 0; flex: 1; position: relative; overflow: hidden; background: #ffffff; }
+.world-browser-views { position: absolute; inset: 0; z-index: 0; }
+.world-browser-viewport { position: absolute; inset: 0; overflow: hidden; background: #ffffff; }
+.world-browser-frame { display: flex; width: 100%; height: 100%; border: 0; background: #ffffff; }
+.world-browser-home, .world-browser-error {
+  position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 14px; padding: 24px; text-align: center;
+  background: var(--dsw-alias-bg-base, #1e1e1e); color: var(--dsw-alias-label-primary, #e2e2e2);
+}
+.world-browser-home-mark { opacity: .95; }
+.world-browser-home-title { font-size: 18px; font-weight: 500; letter-spacing: .5px; }
+.world-browser-home-form { display: flex; gap: 8px; width: min(560px, 92%); }
+.world-browser-home-form input {
+  height: 34px; min-width: 0; flex: 1; padding: 0 14px; border: 1px solid #3d3d3d; border-radius: 17px;
+  background: var(--dsw-alias-bg-layer-2, #2b2b2b); color: var(--dsw-alias-label-primary, #eee); font: 13px var(--world-font); outline: none;
+}
+.world-browser-home-form input:focus { border-color: var(--world-accent); }
+.world-browser-home-form button {
+  height: 34px; padding: 0 18px; border: 0; border-radius: 17px;
+  background: var(--world-accent); color: var(--dsw-alias-label-primary-foreground, #fff); font: 13px var(--world-font); cursor: pointer;
+}
+.world-browser-home-links { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.world-browser-home-links button {
+  padding: 5px 12px; border: 1px solid var(--dsw-alias-border-l2, #3d3d3d); border-radius: 14px;
+  background: var(--dsw-alias-bg-layer-1, #262626); color: var(--dsw-alias-label-primary, #cfe4f7); font: 12px var(--world-font); cursor: pointer;
+}
+.world-browser-home-links button:hover { border-color: var(--world-accent); }
+.world-browser-home-note { max-width: 520px; margin: 0; color: #8d8d8d; font-size: 11px; line-height: 1.7; }
+.world-browser-error strong { font-size: 16px; font-weight: 500; }
+.world-browser-error code { padding: 2px 8px; border-radius: 4px; background: #3a2323; color: #ffb4a8; font-size: 11px; }
+.world-browser-error span { max-width: 520px; color: #a8a8a8; font-size: 12px; line-height: 1.6; }
+.world-browser-error-actions { display: flex; gap: 10px; margin-top: 4px; }
+.world-browser-error-actions button {
+  padding: 7px 16px; border: 1px solid #4a4a4a; border-radius: 6px;
+  background: #2b2b2b; color: #e6e6e6; font: 12px var(--world-font); cursor: pointer;
+}
+.world-browser-error-actions button:hover { border-color: var(--world-accent); }
+.world-browser-paused {
+  position: absolute; inset: 0; z-index: 3; display: grid; place-items: center;
+  background: var(--dsw-alias-bg-base, #1e1e1e); color: var(--dsw-alias-label-secondary, #8d8d8d); font-size: 12px;
+}
+
+/* 层级：与 lanchat / external 同构。浏览器在前台时其它窗口压到 3；
+   其它应用在前台时浏览器自身压到 3（原生 guest 不参与 DOM 合成，额外由 suspended 隐藏）。 */
+body[data-world-active-kind="browser"] .world-vscode-window:not(.world-browser-window) { z-index: 3; }
+body[data-world-window="normal"][data-world-active-kind="browser"] #root,
+body[data-world-window="max"][data-world-active-kind="browser"] #root { z-index: 2 !important; }
+body[data-world-active-kind="browser"] .world-window-frame { z-index: 3 !important; }
+body[data-world-active-kind="vscode"] .world-browser-window,
+body[data-world-active-kind="lanchat"] .world-browser-window,
+body[data-world-active-kind="external"] .world-browser-window,
+body[data-world-active-kind="plugin"] .world-browser-window { z-index: 3; }
+@media (prefers-reduced-motion: reduce) {
+  .world-browser-progress.on::after { animation: none; width: 100%; }
+}
+
+/* 收纳盒与桌面文件链接 */
+.world-desktop-icon.is-merge-target {
+  border-color: var(--world-accent, #4cc2ff);
+  background: rgba(76, 194, 255, .18);
+  box-shadow: 0 0 0 2px rgba(76, 194, 255, .35);
+}
+.world-context-menu button:disabled { opacity: .45; cursor: default; }
+.world-holder {
+  height: 100%; display: flex; flex-direction: column; gap: 12px; padding: 14px 16px;
+  background: var(--dsw-alias-bg-base, #202020); color: var(--dsw-alias-label-primary, #fff);
+  font: 13px/20px var(--world-font); overflow: auto;
+}
+.world-holder-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.world-holder-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.world-holder-title strong { font-size: 15px; font-weight: 600; }
+.world-holder-title span { margin-left: 8px; color: var(--dsw-alias-label-secondary, rgba(255,255,255,.72)); font-size: 12px; }
+.world-holder-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.world-holder-actions button, .world-holder-remove {
+  height: 30px; padding: 0 11px; border: 1px solid var(--dsw-alias-border-l3, #454545); border-radius: 4px;
+  background: var(--dsw-alias-bg-layer-2, #333); color: inherit; font: inherit; cursor: pointer;
+}
+.world-holder-actions button:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, #3f3f46); }
+.world-holder-actions button:disabled { opacity: .45; cursor: default; }
+.world-holder-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px; align-content: start;
+}
+.world-holder-item { position: relative; min-width: 0; }
+.world-holder-open {
+  width: 100%; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 6px;
+  border: 1px solid transparent; border-radius: 8px; background: transparent; color: inherit; font: inherit; cursor: pointer;
+}
+.world-holder-open:hover { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.12); }
+.world-holder-glyph { width: 48px; height: 48px; display: grid; place-items: center; }
+.world-holder-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.world-holder-kind {
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--dsw-alias-label-secondary, rgba(255,255,255,.6)); font-size: 11px;
+}
+.world-holder-remove {
+  position: absolute; top: 4px; right: 4px; height: 22px; padding: 0 8px; border-radius: 999px;
+  font-size: 11px; opacity: 0; transition: opacity .14s ease;
+}
+.world-holder-item:hover .world-holder-remove, .world-holder-remove:focus-visible { opacity: 1; }
+.world-holder-empty { margin: 0; padding: 24px 4px; color: var(--dsw-alias-label-secondary, rgba(255,255,255,.72)); }
+.world-holder-hint { margin: 0; color: var(--dsw-alias-label-secondary, rgba(255,255,255,.55)); font-size: 12px; line-height: 1.6; }
+
+/* The desktop shell and its built-in apps follow the active DSH appearance tokens. */
+body[data-world-theme="light"] .world-vscode-window {
+  color: var(--dsw-alias-label-primary, #17233c);
+  border-color: var(--dsw-alias-border-l2, #e8edf6);
+  background: var(--dsw-alias-bg-base, #fff);
+}
+body[data-world-theme="light"] .world-vscode-window :is(button, input, textarea):not(.is-highlight) { color: var(--dsw-alias-label-primary, #17233c); }
+body[data-world-theme="light"] .world-vscode-titlebar,
+body[data-world-theme="light"] .world-vscode-sidebar,
+body[data-world-theme="light"] .world-vscode-activity,
+body[data-world-theme="light"] .world-vscode-tabs,
+body[data-world-theme="light"] .world-vscode-picker-card {
+  background: var(--dsw-alias-bg-layer-1, #f7f9fd);
+  border-color: var(--dsw-alias-border-l2, #e8edf6);
+}
+body[data-world-theme="light"] .world-vscode-editor,
+body[data-world-theme="light"] .world-vscode-body,
+body[data-world-theme="light"] .world-vscode-welcome,
+body[data-world-theme="light"] .world-vscode-search,
+body[data-world-theme="light"] .world-vscode-git {
+  background: var(--dsw-alias-bg-base, #fff);
+}
+body[data-world-theme="light"] .world-vscode-activity-btn { color: var(--dsw-alias-label-tertiary, #94a0ad); }
+body[data-world-theme="light"] .world-vscode-activity-btn::before { background: var(--world-accent); }
+body[data-world-theme="light"] .world-vscode-activity-btn:hover,
+body[data-world-theme="light"] .world-vscode-activity-btn.is-active { color: var(--world-accent); }
+body[data-world-theme="light"] .world-vscode-sidebar-title,
+body[data-world-theme="light"] .world-vscode-search-summary,
+body[data-world-theme="light"] .world-vscode-git-group-head,
+body[data-world-theme="light"] .world-vscode-picker-title { color: var(--dsw-alias-label-secondary, #6b7280); }
+body[data-world-theme="light"] .world-vscode-root,
+body[data-world-theme="light"] .world-vscode-parent,
+body[data-world-theme="light"] .world-vscode-file,
+body[data-world-theme="light"] .world-vscode-search-file-head,
+body[data-world-theme="light"] .world-vscode-search-hit,
+body[data-world-theme="light"] .world-vscode-git-file,
+body[data-world-theme="light"] .world-vscode-git-branch-name,
+body[data-world-theme="light"] .world-vscode-welcome strong,
+body[data-world-theme="light"] .world-vscode-textarea:not(.is-highlight),
+body[data-world-theme="light"] .world-vscode-search-input,
+body[data-world-theme="light"] .world-vscode-picker-input { color: var(--dsw-alias-label-primary, #17233c); }
+body[data-world-theme="light"] .world-vscode-file:hover,
+body[data-world-theme="light"] .world-vscode-search-file-head:hover,
+body[data-world-theme="light"] .world-vscode-search-hit:hover,
+body[data-world-theme="light"] .world-vscode-git-file:hover,
+body[data-world-theme="light"] .world-vscode-sidebar-act:hover,
+body[data-world-theme="light"] .world-vscode-picker-row:hover,
+body[data-world-theme="light"] .world-vscode-picker-up:hover,
+body[data-world-theme="light"] .world-vscode-picker-browse:hover { background: var(--dsw-alias-interactive-bg-hover, #eef1fa); }
+body[data-world-theme="light"] .world-vscode-file.selected,
+body[data-world-theme="light"] .world-vscode-tab.active,
+body[data-world-theme="light"] .world-vscode-picker-up,
+body[data-world-theme="light"] .world-vscode-picker-browse { background: var(--dsw-alias-bg-layer-2, #f1f3f5); color: var(--dsw-alias-label-primary, #17233c); }
+body[data-world-theme="light"] .world-vscode-tab { background: var(--dsw-alias-bg-layer-2, #f1f3f5); color: var(--dsw-alias-label-secondary, #6b7280); border-color: var(--dsw-alias-border-l2, #e8edf6); }
+body[data-world-theme="light"] .world-vscode-git-message,
+body[data-world-theme="light"] .world-vscode-search-box,
+body[data-world-theme="light"] .world-vscode-picker-input,
+body[data-world-theme="light"] .world-vscode-picker-actions button { background: var(--dsw-alias-bg-layer-2, #f1f3f5); color: var(--dsw-alias-label-primary, #17233c); border-color: var(--dsw-alias-border-l2, #e8edf6); }
+body[data-world-theme="light"] .world-vscode-title-btn,
+body[data-world-theme="light"] .world-vscode-controls button,
+body[data-world-theme="light"] .world-vscode-sidebar-act { color: var(--dsw-alias-label-secondary, #6b7280); }
+/* 输入框用浅色底，但编辑器 textarea 必须保持透明：语法高亮画在它下层，
+   一旦被不透明底色盖住，代码文字就整片消失。 */
+body[data-world-theme="light"] .world-vscode-window :is(input, textarea, .world-vscode-git-message):not(.world-vscode-textarea) {
+  background: var(--dsw-alias-bg-layer-2, #f1f3f5);
+  border-color: var(--dsw-alias-border-l2, #e8edf6);
+}
+body[data-world-theme="light"] .world-vscode-window :is(input, textarea)::placeholder { color: var(--dsw-alias-label-tertiary, #94a0ad); }
+body[data-world-theme="light"] .world-vscode-tab:not(.active) { background: var(--dsw-alias-bg-layer-2, #f1f3f5); }
+body[data-world-theme="light"] .world-vscode-sidebar-resize:hover::after,
+body[data-world-theme="light"] .world-vscode-sidebar-resize:active::after,
+body[data-world-theme="light"] .world-vscode-search-box:focus-within { border-color: var(--world-accent); }
+body[data-world-theme="light"] .world-vscode-search-empty,
+body[data-world-theme="light"] .world-vscode-search-hint,
+body[data-world-theme="light"] .world-vscode-file-note,
+body[data-world-theme="light"] .world-vscode-tree-note,
+body[data-world-theme="light"] .world-vscode-git-empty,
+body[data-world-theme="light"] .world-vscode-git-note,
+body[data-world-theme="light"] .world-vscode-loading { color: var(--dsw-alias-label-secondary, #6b7280); }
+body[data-world-theme="light"] .world-vscode-picker-head,
+body[data-world-theme="light"] .world-vscode-picker-path,
+body[data-world-theme="light"] .world-vscode-picker-foot { border-color: var(--dsw-alias-border-l2, #e8edf6); }
+body[data-world-theme="light"] .world-vscode-picker-close,
+body[data-world-theme="light"] .world-vscode-picker-hint,
+body[data-world-theme="light"] .world-vscode-git-branch-icon,
+body[data-world-theme="light"] .world-vscode-git-group-act { color: var(--dsw-alias-label-secondary, #6b7280); }
+body[data-world-theme="light"] .world-vscode-title-btn:hover,
+body[data-world-theme="light"] .world-vscode-caps button:hover { background: var(--dsw-alias-interactive-bg-hover, #eef1fa); color: var(--dsw-alias-label-primary, #17233c); }
+body[data-world-theme="light"] .world-vscode-statusbar { background: var(--world-accent); color: var(--dsw-alias-label-primary-foreground, #fff); }
+body[data-world-theme="light"] .world-vscode-statusbar * { color: inherit; }
+/* 状态栏是蓝底，浅色下那条“按钮文字用主色”的通用规则会把字压成深蓝，
+   这里把状态栏里的按钮 / 分支重新拉回白字。 */
+body[data-world-theme="light"] .world-vscode-window .world-vscode-statusbar button,
+body[data-world-theme="light"] .world-vscode-window .world-vscode-statusbar .world-vscode-status-branch {
+  color: var(--dsw-alias-label-primary-foreground, #fff);
+}
+body[data-world-theme="light"] .world-vscode-window .world-vscode-activity-btn { color: var(--dsw-alias-label-tertiary, #94a0ad); }
+body[data-world-theme="light"] .world-vscode-window .world-vscode-activity-btn:hover,
+body[data-world-theme="light"] .world-vscode-window .world-vscode-activity-btn.is-active { color: var(--world-accent); }
+
+body[data-world-theme="light"] .world-browser-window { color: var(--dsw-alias-label-primary, #17233c); }
+body[data-world-theme="light"] .world-browser-tabs,
+body[data-world-theme="light"] .world-browser-toolbar { background: var(--dsw-alias-bg-layer-1, #f7f9fd); border-color: var(--dsw-alias-border-l2, #e8edf6); }
+body[data-world-theme="light"] .world-browser-tab { background: var(--dsw-alias-bg-layer-2, #f1f3f5); color: var(--dsw-alias-label-secondary, #6b7280); }
+body[data-world-theme="light"] .world-browser-tab.on { background: var(--dsw-alias-bg-base, #fff); color: var(--dsw-alias-label-primary, #17233c); }
+body[data-world-theme="light"] .world-browser-address,
+body[data-world-theme="light"] .world-browser-home-form input { background: var(--dsw-alias-bg-base, #fff); color: var(--dsw-alias-label-primary, #17233c); border-color: var(--dsw-alias-border-l2, #e8edf6); }
+body[data-world-theme="light"] .world-browser-address:focus { background: var(--dsw-alias-bg-base, #fff); }
+body[data-world-theme="light"] .world-browser-home,
+body[data-world-theme="light"] .world-browser-error,
+body[data-world-theme="light"] .world-browser-paused { background: var(--dsw-alias-bg-base, #fff); color: var(--dsw-alias-label-primary, #17233c); }
+body[data-world-theme="light"] .world-browser-home-form button { color: var(--dsw-alias-label-primary-foreground, #fff); }
+body[data-world-theme="light"] .world-browser-home-note,
+body[data-world-theme="light"] .world-browser-error span { color: var(--dsw-alias-label-secondary, #6b7280); }
+body[data-world-theme="light"] .world-browser-home-links button { background: var(--dsw-alias-bg-layer-1, #f7f9fd); border-color: var(--dsw-alias-border-l2, #e8edf6); color: var(--dsw-alias-label-primary, #17233c); }
+
+body[data-world-theme="light"] .world-plugin-window,
+body[data-world-theme="light"] .world-plugin-body { background: var(--dsw-alias-bg-base, #fff); color: var(--dsw-alias-label-primary, #17233c); }
+body[data-world-theme="light"] .world-plugin-titlebar,
+body[data-world-theme="light"] .world-lanchat-window .world-vscode-titlebar { background: var(--dsw-alias-bg-layer-1, #f7f9fd); color: var(--dsw-alias-label-primary, #17233c); }
+body[data-world-theme="light"] .world-plugin-window,
+body[data-world-theme="light"] .world-lanchat-window { border-color: var(--dsw-alias-border-l2, #e8edf6); }
+body[data-world-theme="light"] .world-plugin-titlebar .world-cap,
+body[data-world-theme="light"] .world-lanchat-window .world-vscode-controls button { color: var(--dsw-alias-label-secondary, #6b7280); }
+body[data-world-theme="light"] .world-plugin-titlebar .world-cap:hover,
+body[data-world-theme="light"] .world-lanchat-window .world-vscode-controls button:hover { background: var(--dsw-alias-interactive-bg-hover, #eef1fa); color: var(--dsw-alias-label-primary, #17233c); }
+
+/* ───────────────────────── 浅色模式精修 ─────────────────────────
+   上面的浅色块只换了容器底色；这里补上仍按深色写的细节：
+   语法高亮色板、行号 / 当前行 / 滚动条、欢迎页按键、Git 面板，
+   以及 3D 桌面（地面网格、光晕、图标文字投影、任务栏和窗口边）。 */
+
+/* 编辑器：textarea 透明让下层高亮可见，光标和选区改成浅色主题的蓝。 */
+body[data-world-theme="light"] .world-vscode-textarea {
+  background: transparent;
+  color: var(--dsw-alias-label-primary, #17233c);
+  caret-color: #1b4a8a;
+}
+body[data-world-theme="light"] .world-vscode-textarea.is-highlight { color: transparent; }
+body[data-world-theme="light"] .world-vscode-textarea::selection { background: rgba(59, 110, 246, .26); color: inherit; }
+body[data-world-theme="light"] .world-vscode-textarea.is-highlight::selection { background: rgba(59, 110, 246, .26); color: transparent; }
+
+/* VSCode Light+ 的语法色板 */
+body[data-world-theme="light"] .world-vscode-tok-kw { color: #0000ff; }
+body[data-world-theme="light"] .world-vscode-tok-ctl { color: #af00db; }
+body[data-world-theme="light"] .world-vscode-tok-fn { color: #795e26; }
+body[data-world-theme="light"] .world-vscode-tok-type { color: #267f99; }
+body[data-world-theme="light"] .world-vscode-tok-str { color: #a31515; }
+body[data-world-theme="light"] .world-vscode-tok-num { color: #098658; }
+body[data-world-theme="light"] .world-vscode-tok-cmt { color: #008000; }
+body[data-world-theme="light"] .world-vscode-tok-key { color: #0451a5; }
+body[data-world-theme="light"] .world-vscode-tok-tag { color: #800000; }
+body[data-world-theme="light"] .world-vscode-tok-attr { color: #e50000; }
+body[data-world-theme="light"] .world-vscode-tok-var { color: #0070c1; }
+body[data-world-theme="light"] .world-vscode-tok-meta { color: #af00db; }
+
+/* 行号、当前行、标签页与滚动条：深色下靠白色叠加，浅色下要反过来。 */
+body[data-world-theme="light"] .world-vscode-gutter { color: #9aa4b2; }
+body[data-world-theme="light"] .world-vscode-gutter-row.is-active { color: #1d4f91; }
+body[data-world-theme="light"] .world-vscode-active-line { background: rgba(15, 40, 80, .05); }
+body[data-world-theme="light"] .world-vscode-active-line.is-dim { background: rgba(15, 40, 80, .025); }
+body[data-world-theme="light"] .world-vscode-tab:hover { background: var(--dsw-alias-bg-layer-3, #e6eaf0); }
+body[data-world-theme="light"] .world-vscode-tab.active {
+  background: var(--dsw-alias-bg-base, #fff);
+  color: var(--dsw-alias-label-primary, #17233c);
+  border-top-color: var(--world-accent);
+}
+body[data-world-theme="light"] .world-vscode-textarea::-webkit-scrollbar-thumb,
+body[data-world-theme="light"] .world-vscode-explorer-list::-webkit-scrollbar-thumb,
+body[data-world-theme="light"] .world-vscode-search-list::-webkit-scrollbar-thumb,
+body[data-world-theme="light"] .world-vscode-git-list::-webkit-scrollbar-thumb,
+body[data-world-theme="light"] .world-vscode-picker-list::-webkit-scrollbar-thumb { background: rgba(15, 25, 40, .18) padding-box; }
+body[data-world-theme="light"] .world-vscode-textarea::-webkit-scrollbar-thumb:hover,
+body[data-world-theme="light"] .world-vscode-explorer-list::-webkit-scrollbar-thumb:hover,
+body[data-world-theme="light"] .world-vscode-search-list::-webkit-scrollbar-thumb:hover,
+body[data-world-theme="light"] .world-vscode-git-list::-webkit-scrollbar-thumb:hover,
+body[data-world-theme="light"] .world-vscode-picker-list::-webkit-scrollbar-thumb:hover { background: rgba(15, 25, 40, .3) padding-box; }
+body[data-world-theme="light"] .world-vscode-tabs::-webkit-scrollbar-thumb { background: rgba(15, 25, 40, .2); }
+body[data-world-theme="light"] .world-vscode-tabs::-webkit-scrollbar-thumb:hover { background: rgba(15, 25, 40, .34); }
+
+/* 活动栏徽标的白描边、加载转圈、欢迎页按键和路径标签 */
+body[data-world-theme="light"] .world-vscode-activity-badge {
+  background: var(--world-accent);
+  color: var(--dsw-alias-label-primary-foreground, #fff);
+  box-shadow: 0 0 0 2px var(--dsw-alias-bg-layer-1, #f7f9fd);
+}
+body[data-world-theme="light"] .world-vscode-loading-spin {
+  border-color: rgba(15, 25, 40, .16);
+  border-top-color: var(--world-accent);
+}
+body[data-world-theme="light"] .world-vscode-search-spin {
+  border-color: rgba(15, 25, 40, .16);
+  border-top-color: var(--world-accent);
+}
+body[data-world-theme="light"] .world-vscode-welcome-path { background: rgba(15, 25, 40, .06); color: #5b6472; }
+body[data-world-theme="light"] .world-vscode-welcome-keys { color: #7a8494; }
+body[data-world-theme="light"] .world-vscode-welcome-keys kbd {
+  border-color: var(--dsw-alias-border-l2, #e8edf6);
+  background: var(--dsw-alias-bg-base, #fff);
+  color: var(--dsw-alias-label-secondary, #6b7280);
+}
+body[data-world-theme="light"] .world-vscode-search-count { background: rgba(15, 25, 40, .08); color: var(--dsw-alias-label-secondary, #6b7280); }
+body[data-world-theme="light"] .world-vscode-search-empty svg,
+body[data-world-theme="light"] .world-vscode-search-hint svg { color: #c2c8d2; }
+body[data-world-theme="light"] .world-vscode-search-text mark { background: rgba(234, 92, 0, .2); color: inherit; }
+
+/* Git 面板仍有几处深色块 */
+body[data-world-theme="light"] .world-vscode-git-msg { background: rgba(15, 25, 40, .05); color: var(--dsw-alias-label-secondary, #6b7280); }
+body[data-world-theme="light"] .world-vscode-git-msg.is-error { background: rgba(196, 43, 28, .08); color: #b3261e; }
+body[data-world-theme="light"] .world-vscode-git-primary:disabled { background: var(--dsw-alias-bg-layer-2, #f1f3f5); color: var(--dsw-alias-label-tertiary, #94a0ad); }
+body[data-world-theme="light"] .world-vscode-git-actions button {
+  border-color: var(--dsw-alias-border-l2, #e8edf6);
+  background: var(--dsw-alias-bg-layer-1, #f7f9fd);
+  color: var(--dsw-alias-label-primary, #17233c);
+}
+body[data-world-theme="light"] .world-vscode-git-actions button:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, #eef1fa); }
+body[data-world-theme="light"] .world-vscode-git-actions button:disabled { border-color: var(--dsw-alias-border-l2, #e8edf6); background: var(--dsw-alias-bg-layer-2, #f1f3f5); color: var(--dsw-alias-label-tertiary, #94a0ad); }
+
+/* 桌面：浅色下用更干净的冷白底，光晕收弱，避免一大团蓝雾。 */
+body[data-world-theme="light"] .world-wall {
+  background:
+    radial-gradient(58% 52% at 50% 46%, color-mix(in srgb, var(--wall-tint) 12%, #ffffff) 0%, transparent 70%),
+    radial-gradient(120% 100% at 12% 2%, color-mix(in srgb, var(--wall-tint) 9%, #f4f7fd) 0%, transparent 58%),
+    linear-gradient(168deg, #f5f8ff 0%, #eef3fc 52%, #e6edfa 100%);
+}
+/* 纯色要压过下面这条浅色渐变规则（同分则后者生效，所以这里多带一层主题属性）。 */
+body[data-world-theme="light"] .world-wall[data-world-wallpaper="solid"] { background: var(--wall-solid, var(--world-surface)); }
+/* 光晕的明暗由 keyframes 控制，直接写 opacity 会被动画覆盖；
+   改用 blur + 降饱和，把「花瓣」化成一团柔和的光雾。 */
+body[data-world-theme="light"] .world-bloom {
+  filter: blur(26px) saturate(.6) opacity(var(--wall-bloom, 1));
+}
+body[data-world-theme="light"] .world-vignette {
+  background: radial-gradient(78% 64% at 50% 46%, transparent 42%, rgba(90, 120, 170, .10) 100%);
+}
+
+/* 3D 地面：深色那套蓝色光带在浅色背景上几乎看不见，换成更清晰的一层淡蓝网格。 */
+body[data-world-theme="light"] .world-floor-wrap::before {
+  background: radial-gradient(50% 50% at 50% 50%, color-mix(in srgb, var(--wall-tint) 22%, transparent) 0%, color-mix(in srgb, var(--wall-tint) 10%, transparent) 46%, transparent 74%);
+}
+body[data-world-theme="light"] .world-floor-wrap::after {
+  background: radial-gradient(50% 50% at 50% 50%, color-mix(in srgb, var(--wall-tint) 30%, transparent) 0%, color-mix(in srgb, var(--wall-tint) 12%, transparent) 48%, transparent 76%);
+}
+body[data-world-theme="light"] .world-floor {
+  background-image:
+    linear-gradient(to top, color-mix(in srgb, var(--wall-tint) 18%, transparent) 0%, color-mix(in srgb, var(--wall-tint) 7%, transparent) 55%, transparent 92%),
+    repeating-linear-gradient(90deg, color-mix(in srgb, var(--wall-tint) 28%, transparent) 0 1px, transparent 1px 84px),
+    repeating-linear-gradient(0deg, color-mix(in srgb, var(--wall-tint) 22%, transparent) 0 1px, transparent 1px 84px);
+  opacity: calc(.9 * var(--wall-grid, 1));
+}
+body[data-world-theme="light"] .world-icon-label {
+  text-shadow: 0 1px 2px rgba(255, 255, 255, .95), 0 0 6px rgba(255, 255, 255, .7);
+}
+body[data-world-theme="light"] .world-walker-shadow {
+  background: radial-gradient(50% 50% at 50% 50%, rgba(20, 40, 70, .34) 0%, rgba(20, 40, 70, .14) 50%, rgba(20, 40, 70, 0) 78%);
+}
+
+/* 桌面外壳：浅色下窗口描边、投影和任务栏分隔不该继续用暗色。 */
+body[data-world-theme="light"] .world-window-frame {
+  border-color: rgba(22, 46, 84, .12);
+  box-shadow: 0 22px 54px rgba(22, 46, 84, .16), 0 2px 8px rgba(22, 46, 84, .07);
+}
+body[data-world-theme="light"][data-world-depth="on"][data-world-active-kind="dsh"] .world-window-frame {
+  box-shadow: 0 30px 76px rgba(22, 46, 84, .22), 0 2px 10px rgba(22, 46, 84, .08), 0 0 0 1px rgba(64, 130, 220, .14);
+}
+body[data-world-theme="light"] .world-cap:hover { background: rgba(15, 35, 70, .07); }
+body[data-world-theme="light"] .world-taskbar {
+  border-top-color: rgba(22, 46, 84, .1);
+  box-shadow: 0 -8px 24px rgba(22, 46, 84, .05);
+}
+body[data-world-theme="light"] .world-taskbar-apps { border-left-color: rgba(22, 46, 84, .12); }
+body[data-world-theme="light"] .world-toast {
+  background: rgba(255, 255, 255, .97);
+  color: var(--dsw-alias-label-primary, #17233c);
+  border-color: rgba(22, 46, 84, .12);
+  box-shadow: 0 14px 36px rgba(22, 46, 84, .18);
+}
+
+/* 开始菜单里的安装 / 卸载按钮仍是白色半透明，浅色下等于看不见。 */
+body[data-world-theme="light"] .world-app-install,
+body[data-world-theme="light"] .world-app-uninstall,
+body[data-world-theme="light"] .world-plugin-card-action {
+  border-color: rgba(22, 46, 84, .14);
+  background: rgba(22, 46, 84, .06);
+  color: var(--dsw-alias-label-primary, #17233c);
+}
+body[data-world-theme="light"] .world-app-install:hover,
+body[data-world-theme="light"] .world-app-uninstall:hover,
+body[data-world-theme="light"] .world-plugin-card-action:hover { background: rgba(22, 46, 84, .11); }
+
+/* 开始菜单头部的「助手个性化」复用了暗色按钮样式，浅色下会变成一块黑chip。 */
+body[data-world-theme="light"] .world-start-heading .world-workbench-setup-actions button {
+  border-color: rgba(22, 46, 84, .14);
+  background: rgba(22, 46, 84, .06);
+  color: var(--dsw-alias-label-primary, #17233c);
+}
+body[data-world-theme="light"] .world-start-heading .world-workbench-setup-actions button:hover { background: rgba(22, 46, 84, .11); }
+
+/* 工作台设置弹窗也是硬编码深色，浅色下换成浅色卡片。 */
+body[data-world-theme="light"] .world-workbench-setup { color: var(--dsw-alias-label-primary, #17233c); }
+body[data-world-theme="light"] .world-workbench-setup-card {
+  border-color: rgba(22, 46, 84, .12);
+  background: var(--dsw-alias-bg-base, #fff);
+  box-shadow: 0 24px 60px rgba(22, 46, 84, .22);
+}
+body[data-world-theme="light"] .world-workbench-setup-card strong,
+body[data-world-theme="light"] .world-workbench-setup-policy { color: var(--dsw-alias-label-primary, #17233c); }
+body[data-world-theme="light"] .world-workbench-setup-card :is(textarea, input, select) {
+  border-color: var(--dsw-alias-border-l2, #e8edf6);
+  background: var(--dsw-alias-bg-layer-2, #f1f3f5);
+  color: var(--dsw-alias-label-primary, #17233c);
+}
+body[data-world-theme="light"] .world-workbench-setup-actions button {
+  border-color: rgba(22, 46, 84, .16);
+  background: var(--dsw-alias-bg-layer-1, #f7f9fd);
+  color: var(--dsw-alias-label-primary, #17233c);
+}
+body[data-world-theme="light"] .world-workbench-setup-actions button:hover { background: var(--dsw-alias-interactive-bg-hover, #eef1fa); }
+body[data-world-theme="light"] .world-workbench-setup-actions button.is-primary {
+  border-color: transparent;
+  background: var(--world-accent);
+  color: var(--dsw-alias-label-primary-foreground, #fff);
+}
+
+/* 纯色壁纸的明暗由 wallpaper.js 判定；图标文字跟着换成深色或浅色。 */
+body[data-world-wall-tone="light"] .world-icon-label {
+  color: #17233c;
+  text-shadow: 0 1px 2px rgba(255, 255, 255, .95), 0 0 6px rgba(255, 255, 255, .7);
+}
+body[data-world-wall-tone="dark"] .world-icon-label {
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .8);
+}
+
+/* ---------- 桌面背景设置面板（桌面右键打开） ---------- */
+.world-wallpaper-panel {
+  position: fixed; inset: var(--world-desktop-top) 0 var(--world-taskbar-height);
+  z-index: 1004; display: flex; align-items: center; justify-content: center; padding: 24px;
+  background: rgba(8, 20, 36, .38); backdrop-filter: blur(3px);
+  color: var(--world-ink); font-family: var(--world-font);
+}
+.world-wallpaper-card {
+  width: min(600px, 100%); max-height: min(640px, 100%); display: flex; flex-direction: column; overflow: hidden;
+  border: 1px solid var(--world-line); border-radius: 14px;
+  background: color-mix(in srgb, var(--world-surface-1) 94%, transparent);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, .45);
+  backdrop-filter: blur(28px) saturate(1.4);
+  -webkit-backdrop-filter: blur(28px) saturate(1.4);
+}
+.world-wallpaper-head { flex: none; display: flex; align-items: center; gap: 10px; padding: 16px 18px 10px; }
+.world-wallpaper-head strong { flex: 1; font-size: 15px; font-weight: 600; }
+.world-wallpaper-close {
+  width: 30px; height: 26px; display: grid; place-items: center; border: 0; border-radius: 6px;
+  background: transparent; color: var(--world-muted); font-size: 18px; line-height: 1; cursor: pointer;
+}
+.world-wallpaper-close:hover { background: var(--world-hover); color: var(--world-ink); }
+.world-wallpaper-tabs { flex: none; display: flex; gap: 4px; padding: 0 18px 2px; }
+.world-wallpaper-tab {
+  height: 30px; padding: 0 12px; border: 1px solid transparent; border-radius: 8px;
+  background: transparent; color: var(--world-muted); font-size: 12px; cursor: pointer;
+}
+.world-wallpaper-tab:hover { background: var(--world-hover); color: var(--world-ink); }
+.world-wallpaper-tab.on { border-color: var(--world-line); background: var(--world-hover); color: var(--world-ink); }
+.world-wallpaper-body {
+  min-height: 0; flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 16px;
+  padding: 14px 18px 10px;
+}
+.world-wallpaper-section > span {
+  display: block; margin-bottom: 8px; color: var(--world-muted); font-size: 11px; letter-spacing: .04em;
+}
+.world-wallpaper-presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(94px, 1fr)); gap: 8px; }
+.world-wallpaper-preset {
+  display: flex; flex-direction: column; gap: 6px; padding: 7px;
+  border: 1px solid var(--world-line); border-radius: 10px;
+  background: color-mix(in srgb, var(--world-ink) 4%, transparent);
+  color: var(--world-ink); font-size: 11px; text-align: left; cursor: pointer;
+}
+.world-wallpaper-preset:hover { background: var(--world-hover); }
+.world-wallpaper-preset.on { border-color: var(--world-accent); box-shadow: 0 0 0 1px var(--world-accent) inset; }
+.world-wallpaper-swatch { display: block; height: 42px; border-radius: 7px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .08); }
+.world-wallpaper-solid { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.world-wallpaper-solid input[type="color"] {
+  width: 46px; height: 32px; padding: 0; border: 1px solid var(--world-line); border-radius: 6px;
+  background: transparent; cursor: pointer;
+}
+.world-wallpaper-solid code { color: var(--world-muted); font: 12px/1 var(--world-font); letter-spacing: .04em; }
+.world-wallpaper-slider {
+  display: grid; grid-template-columns: 60px minmax(0, 1fr) 42px; align-items: center; gap: 10px;
+  padding: 5px 0; color: var(--world-muted); font-size: 12px;
+}
+.world-wallpaper-slider input { width: 100%; margin: 0; accent-color: var(--world-accent); cursor: pointer; }
+.world-wallpaper-slider b { color: var(--world-ink); font-weight: 500; text-align: right; font-variant-numeric: tabular-nums; }
+.world-wallpaper-note {
+  display: flex; align-items: center; gap: 10px; margin: 0; padding: 9px 12px;
+  border: 1px dashed var(--world-line); border-radius: 8px; color: var(--world-muted); font-size: 12px; line-height: 1.6;
+}
+.world-wallpaper-note span { min-width: 0; flex: 1; }
+.world-wallpaper-note button {
+  flex: none; height: 26px; padding: 0 10px; border: 1px solid var(--world-line); border-radius: 6px;
+  background: color-mix(in srgb, var(--world-ink) 6%, transparent); color: var(--world-ink); font-size: 12px; cursor: pointer;
+}
+.world-wallpaper-note button:hover { background: var(--world-hover); }
+.world-wallpaper-foot { flex: none; display: flex; align-items: center; gap: 8px; padding: 12px 18px 16px; }
+.world-wallpaper-foot .spacer { flex: 1; }
+.world-wallpaper-foot button {
+  height: 30px; padding: 0 14px; border: 1px solid var(--world-line); border-radius: 8px;
+  background: color-mix(in srgb, var(--world-ink) 6%, transparent); color: var(--world-ink); font-size: 12px; cursor: pointer;
+}
+.world-wallpaper-foot button:hover { background: var(--world-hover); }
+.world-wallpaper-foot button.is-primary { border-color: transparent; background: var(--world-accent); color: var(--dsw-alias-label-primary-foreground, #fff); }
