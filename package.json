@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-world",
-  "version": "0.2.76",
+  "version": "0.2.77",
   "private": true,
   "type": "module",
   "description": "Win11 风格 DSH 桌面，内置 VSCode、局域网聊天（含发现诊断与 HTTP 在线兜底）、多标签浏览器、日记、待办、收纳盒和垃圾箱，支持桌面文件拖放与助手桌面截图。",

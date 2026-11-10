@@ -1483,6 +1483,18 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       appId, label, kind,
     })
   }
+  /** 刷新桌面：重读落盘的桌面数据（其它窗口动过也能同步），图标随之重排。 */
+  const refreshDesktop = () => {
+    setContextMenu(null)
+    setSelected(false)
+    setStartOpen(false)
+    setInstalledApps(readInstalledApps())
+    setExternalApps(readExternalApps())
+    setFileLinks(readFileLinks())
+    setHolders(readHolders())
+    setWallpaper(readWallpaper())
+    showNotice('桌面已刷新')
+  }
   const menuOpen = id => {
     setContextMenu(null)
     entryById(id)?.open()
@@ -2015,9 +2027,10 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       'data-world-wallpaper': wallpaperConfig.preset,
       style: wallpaperStyle(wallpaperConfig),
       onClick: () => { setSelected(false); setStartOpen(false) },
+      // 右键先给菜单：个性化（原来那一步）和刷新（重读桌面数据并重排图标）。
       onContextMenu: event => {
-        event.preventDefault()
-        setSelected(false); setStartOpen(false); setContextMenu(null); setWallpaperOpen(true)
+        setSelected(false)
+        openContextMenu(event, null, '桌面', 'wall')
       },
     },
       h('div', { className: 'world-wall-scrim', 'aria-hidden': true }),
@@ -2406,10 +2419,17 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
         h('strong', null, '松开以登记文件'),
         h('span', null, '.worldapp 应用包会安装；其它文件只记录绝对路径，不复制文件'))),
     contextMenu && h('div', {
-      className: 'world-context-menu', style: { left: contextMenu.x, top: contextMenu.y },
+      className: `world-context-menu${contextMenu.kind === 'wall' ? ' is-desktop' : ''}`,
+      style: { left: contextMenu.x, top: contextMenu.y },
       onPointerDown: event => event.stopPropagation(), onContextMenu: event => event.preventDefault(),
     },
-      h('div', { className: 'world-context-title' }, contextMenu.label),
+      contextMenu.kind !== 'wall' && h('div', { className: 'world-context-title' }, contextMenu.label),
+      contextMenu.kind === 'wall'
+        ? h(React.Fragment, null,
+          h('button', { type: 'button', 'data-role': 'personalize',
+            onClick: () => { setContextMenu(null); setWallpaperOpen(true) } }, '个性化'),
+          h('button', { type: 'button', 'data-role': 'refresh', onClick: refreshDesktop }, '刷新'))
+        : h(React.Fragment, null,
       h('button', { type: 'button', 'data-role': 'open', onClick: () => menuOpen(contextMenu.appId) }, '打开'),
       menuEntry?.kind === 'holder' && h('button', { type: 'button', 'data-role': 'rename',
         onClick: () => { setContextMenu(null); setRename({ id: menuEntry.id, name: menuEntry.label }) } }, '重命名'),
@@ -2426,7 +2446,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
         ? h('button', { type: 'button', className: 'is-danger', 'data-role': 'uninstall', onClick: () => menuUninstall(contextMenu.appId) }, '卸载')
         : menuEntry?.kind === 'app'
           ? h('div', { className: 'world-context-note', 'data-role': 'protected' }, menuEntry.id === 'dsh' ? 'DSH 主应用不可卸载' : '内置应用不可卸载')
-          : null),
+          : null)),
     notice && h('div', { className: 'world-toast', role: 'status' }, notice))
   return portal ? createPortal(desktop, portal) : null
 }

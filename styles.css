@@ -1380,24 +1380,52 @@ body[data-world-active-kind="external"] .world-window-frame { z-index: 3 !import
 
 .world-context-menu {
   position: fixed; z-index: 110; width: 190px; padding: 6px; display: grid; gap: 2px;
-  border: 1px solid rgba(255,255,255,.14); border-radius: 10px;
-  background: rgba(30, 32, 36, .96); backdrop-filter: blur(24px) saturate(1.6);
-  box-shadow: 0 18px 44px rgba(0,0,0,.55); color: #f2f4f8;
+  /* 菜单本身也跟主题：深色一块深玻璃，浅色一块白玻璃。 */
+  --menu-bg: rgba(30, 32, 36, .96);
+  --menu-line: rgba(255,255,255,.14);
+  --menu-ink: #f2f4f8;
+  --menu-title: rgba(255,255,255,.5);
+  --menu-title-line: rgba(255,255,255,.09);
+  --menu-hover: rgba(255,255,255,.11);
+  --menu-danger: #ff9a92;
+  --menu-danger-bg: rgba(196, 43, 28, .28);
+  --menu-note: rgba(255,255,255,.42);
+  --menu-shadow: 0 18px 44px rgba(0,0,0,.55);
+  border: 1px solid var(--menu-line); border-radius: 10px;
+  background: var(--menu-bg); backdrop-filter: blur(24px) saturate(1.6);
+  box-shadow: var(--menu-shadow); color: var(--menu-ink);
   font: 12px/1.5 var(--world-font);
 }
-.world-context-title { padding: 7px 10px 8px; color: rgba(255,255,255,.5); font-size: 11px; border-bottom: 1px solid rgba(255,255,255,.09); margin-bottom: 3px; }
+body[data-world-theme="light"] .world-context-menu {
+  --menu-bg: rgba(255,255,255,.97);
+  --menu-line: rgba(23,35,60,.12);
+  --menu-ink: var(--dsw-alias-label-primary, #17233c);
+  --menu-title: rgba(23,35,60,.55);
+  --menu-title-line: rgba(23,35,60,.10);
+  --menu-hover: rgba(23,35,60,.08);
+  --menu-danger: #b4271c;
+  --menu-danger-bg: rgba(196, 43, 28, .12);
+  --menu-note: rgba(23,35,60,.45);
+  --menu-shadow: 0 18px 44px rgba(23,35,60,.22);
+}
+.world-context-title { padding: 7px 10px 8px; color: var(--menu-title); font-size: 11px; border-bottom: 1px solid var(--menu-title-line); margin-bottom: 3px; }
 .world-context-menu button { width: 100%; padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer; }
-.world-context-menu button:hover { background: rgba(255,255,255,.11); }
-.world-context-menu button.is-danger { color: #ff9a92; }
-.world-context-menu button.is-danger:hover { background: rgba(196, 43, 28, .28); }
-.world-context-note { padding: 8px 10px; color: rgba(255,255,255,.42); font-size: 11px; }
+.world-context-menu button:hover { background: var(--menu-hover); }
+.world-context-menu button.is-danger { color: var(--menu-danger); }
+.world-context-menu button.is-danger:hover { background: var(--menu-danger-bg); }
+.world-context-note { padding: 8px 10px; color: var(--menu-note); font-size: 11px; }
 .world-vscode-menu { width: 200px; }
 
 .world-toast {
   position: fixed; left: 50%; bottom: 64px; transform: translateX(-50%); z-index: 120;
-  padding: 9px 18px; border-radius: 10px; background: rgba(20, 32, 50, .94); color: #fff;
-  font: 12px/1.5 var(--world-font); box-shadow: 0 14px 36px rgba(0,0,0,.45);
-  border: 1px solid rgba(255,255,255,.12);
+  padding: 9px 18px; border-radius: 10px;
+  background: var(--toast-bg, rgba(20, 32, 50, .94)); color: var(--toast-ink, #fff);
+  font: 12px/1.5 var(--world-font); box-shadow: var(--toast-shadow, 0 14px 36px rgba(0,0,0,.45));
+  border: 1px solid var(--toast-line, rgba(255,255,255,.12));
+}
+body[data-world-theme="light"] .world-toast {
+  --toast-bg: rgba(255,255,255,.97); --toast-ink: var(--dsw-alias-label-primary, #17233c);
+  --toast-line: rgba(23,35,60,.12); --toast-shadow: 0 14px 36px rgba(23,35,60,.2);
 }
 
 /* ---------- 3D 景深桌面：透视地面 + 指针视差 + 图标浮起 ---------- */

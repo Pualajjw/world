@@ -117,6 +117,22 @@ try {
     return { top: rect.top, height: rect.height }
   }), { top: 752, height: 48 })
   assert.equal(await page.locator('.world-wall').evaluate(element => element.getBoundingClientRect().top), 40)
+
+  // 桌面右键先给菜单：个性化（打开背景面板）和刷新（重读桌面数据并重排图标）。
+  await page.locator('.world-wall').click({ button: 'right', position: { x: 700, y: 320 } })
+  const desktopMenu = page.locator('.world-context-menu.is-desktop')
+  await desktopMenu.waitFor()
+  assert.deepEqual(await desktopMenu.locator('button').evaluateAll(nodes => nodes.map(node => node.dataset.role)),
+    ['personalize', 'refresh'])
+  assert.equal(await page.locator('.world-wallpaper-panel').count(), 0, 'right-click no longer jumps straight into the panel')
+  await desktopMenu.locator('[data-role="refresh"]').click()
+  await page.locator('.world-toast').filter({ hasText: '桌面已刷新' }).waitFor()
+  assert.equal(await page.locator('.world-desktop-icon').count(), 3, 'a refresh keeps the icons where they belong')
+  await page.locator('.world-wall').click({ button: 'right', position: { x: 700, y: 320 } })
+  await page.locator('.world-context-menu.is-desktop [data-role="personalize"]').click()
+  await page.locator('.world-wallpaper-panel').waitFor()
+  await page.keyboard.press('Escape')
+  await page.waitForFunction(() => !document.querySelector('.world-wallpaper-panel'))
   assert.equal(await page.locator('.world-icons').evaluate(element => element.getBoundingClientRect().top), 50)
 
   const desktopIcon = page.getByRole('button', { name: 'DeepSeek Harness', exact: true })
