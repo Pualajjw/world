@@ -5,6 +5,55 @@
 - **设计文档**：[`DESIGN.md`](./DESIGN.md) —— 架构、窗口装填方式、状态机、视觉 token、风险
 - **浏览器设计**：[`BROWSER-DESIGN.md`](./BROWSER-DESIGN.md) —— 主进程 webview 租约契约、三档后端、限制与 P0 探针
 - **可点原型**：[`prototype/index.html`](./prototype/index.html) —— 直接浏览器打开
+- **源码仓库**：<https://github.com/Pualajjw/world>（MIT）
+
+## 从 GitHub 安装
+
+源码就在 <https://github.com/Pualajjw/world>，可以直接让 dsh 从仓库拉取安装，不需要先打包。前提是装了 DeepSeek Harness 桌面版，并且有 Node.js / git（桌面版自带的 CLI 已包含 pnpm）。
+
+**1. 安装到 desktop profile**
+
+Windows 在 PowerShell 或 cmd 里执行（路径换成你自己的安装位置）：
+
+```bat
+"C:\Users\<你>\AppData\Local\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add github:Pualajjw/world
+```
+
+`dsh` 已经在 PATH 里的话，等价于：
+
+```bat
+dsh plugin --profile desktop add github:Pualajjw/world
+```
+
+**2. 重启 DeepSeek Harness**（菜单退出后重新打开）。启动后任务栏左下角会显示 world 版本号，开始菜单里出现「设置」「日记」「待办」等入口。
+
+**版本与分支**
+
+```bat
+dsh plugin --profile desktop add github:Pualajjw/world#main      :: 跟踪 main
+dsh plugin --profile desktop add github:Pualajjw/world#4fddc6b   :: 锁定某个提交
+```
+
+- **更新**：重跑第 1 步的 `add` 命令，会拉到最新 `main` 并重装，之后重启 dsh。
+- **卸载**：`dsh plugin --profile desktop remove @local/dsh-world`。
+
+**网络**（github.com 直连被重置时）
+
+pnpm 读取 `HTTPS_PROXY` / `HTTP_PROXY`，先设置再安装：
+
+```bat
+set HTTPS_PROXY=http://127.0.0.1:7890
+set HTTP_PROXY=http://127.0.0.1:7890
+dsh plugin --profile desktop add github:Pualajjw/world
+```
+
+**离线安装**
+
+用本地构建出来的 `dist/world-<版本>-universal.tgz`：
+
+```bat
+dsh plugin --profile desktop add file:E:\path\to\world-0.2.77-universal.tgz
+```
 
 ## 形态
 
