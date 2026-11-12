@@ -1,9 +1,9 @@
 {
   "name": "@local/dsh-world",
-  "version": "0.2.77",
+  "version": "0.2.85",
   "private": true,
   "type": "module",
-  "description": "Win11 风格 DSH 桌面，内置 VSCode、局域网聊天（含发现诊断与 HTTP 在线兜底）、多标签浏览器、日记、待办、收纳盒和垃圾箱，支持桌面文件拖放与助手桌面截图。",
+  "description": "Win11 风格 DSH 桌面，内置 VSCode、终端（含 SSH 远程会话）、局域网聊天（含发现诊断与 HTTP 在线兜底）、多标签浏览器、日记、待办、收纳盒和垃圾箱，支持桌面文件拖放与助手桌面截图。",
   "main": "index.js",
   "exports": {
     ".": "./index.js",
@@ -25,6 +25,14 @@
     "lan-chat-app.js",
     "browser-app.js",
     "browser-frame.js",
+    "ansi.js",
+    "ssh.js",
+    "ssh-config.js",
+    "job-runner.js",
+    "terminal-app.js",
+    "terminal.js",
+    "workspace-roots.js",
+    "pbnpm-run.mjs",
     "external-apps.js",
     "app-format.js",
     "plugin-apps.js",
@@ -79,7 +87,7 @@
   ],
   "meta": {
     "title": "world",
-    "description": "Win11 风格桌面、内置 VSCode / 局域网聊天 / 多标签浏览器 / 日记、待办、收纳盒和垃圾箱、.worldapp 与文件拖放、3D 景深地面与跟随鼠标的小机器人。"
+    "description": "Win11 风格桌面、内置 VSCode / 终端（含 SSH 远程会话）/ 局域网聊天 / 多标签浏览器 / 日记、待办、收纳盒和垃圾箱、.worldapp 与文件拖放、3D 景深地面与跟随鼠标的小机器人。"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-atomic-write": "*",

@@ -209,7 +209,15 @@ function entryIconClass(name) {
   if (ext === 'js' || ext === 'mjs' || ext === 'jsx' || ext === 'ts' || ext === 'tsx') return 'is-js'
   if (ext === 'json') return 'is-json'
   if (ext === 'md' || ext === 'txt') return 'is-md'
+  if (ext === 'pbt' || ext === 'exe' || ext === 'pbl' || ext === 'pbd') return 'is-pb'
   return 'is-file'
+}
+
+/** PowerBuilder 的两个工程入口：`.pbt` 工程文件和编译出来的 `.exe`。 */
+const PROJECT_EXTENSIONS = new Set(['pbt', 'exe'])
+function isProjectEntry(name) {
+  const ext = name.includes('.') ? name.split('.').at(-1).toLowerCase() : ''
+  return PROJECT_EXTENSIONS.has(ext)
 }
 
 function dirName(path) {
@@ -299,20 +307,21 @@ function stateClass(letter) {
   return 'is-modified'
 }
 
-function TreeNode({ parent, entry, depth, expanded, tree, selected, onToggle, onOpen, onPin, onMenu }) {
+function TreeNode({ parent, entry, depth, expanded, tree, selected, onToggle, onOpen, onPin, onMenu, onOpenProject }) {
   const full = entry.path ? normalizePath(entry.path) : joinPath(parent, entry.name)
   const isDir = entry.type === 'directory'
+  const project = !isDir && isProjectEntry(entry.name)
   const open = expanded.has(full)
   const children = isDir ? (tree.get(full) || EMPTY_FILES) : EMPTY_FILES
   return h(React.Fragment, { key: full },
     h('button', {
       type: 'button',
-      className: `world-vscode-file${isDir ? ' is-dir' : ''}${open ? ' is-open' : ''}${selected === full ? ' selected' : ''}`,
+      className: `world-vscode-file${isDir ? ' is-dir' : ''}${open ? ' is-open' : ''}${project ? ' is-project' : ''}${selected === full ? ' selected' : ''}`,
       style: { paddingLeft: 8 + depth * 14 },
-      title: isDir ? full : `${full} · 双击锁定标签`,
+      title: isDir ? full : project ? `${full} · 点击作为 PowerBuilder 工程打开` : `${full} · 双击锁定标签`,
       'aria-expanded': isDir ? open : undefined,
-      onClick: () => isDir ? onToggle(full) : onOpen(full, false),
-      onDoubleClick: () => { if (!isDir) onPin(full) },
+      onClick: () => isDir ? onToggle(full) : project ? onOpenProject?.(full) : onOpen(full, false),
+      onDoubleClick: () => { if (!isDir && !project) onPin(full) },
       onContextMenu: event => onMenu?.(event, full),
     },
     isDir ? h(Twist, { open }) : h(TwistSpacer),
@@ -321,7 +330,7 @@ function TreeNode({ parent, entry, depth, expanded, tree, selected, onToggle, on
     h('span', { className: 'world-vscode-file-name' }, entry.name)),
     isDir && open && children.map(child => h(TreeNode, {
       key: child.name, parent: full, entry: child, depth: depth + 1,
-      expanded, tree, selected, onToggle, onOpen, onPin, onMenu,
+      expanded, tree, selected, onToggle, onOpen, onPin, onMenu, onOpenProject,
     })),
     isDir && open && children.length === 0
       ? h('div', { className: 'world-vscode-tree-note', style: { paddingLeft: 26 + depth * 14 } }, '空目录')
@@ -377,6 +386,9 @@ export function VscodeWindow({
   const [commitText, setCommitText] = React.useState('')
   const [picker, setPicker] = React.useState(null)
   const [pickerDraft, setPickerDraft] = React.useState('')
+  /** 别的插件留下的可打开目录：IMA 虚拟工作区、PowerBuilder 工程工作区。 */
+  const [pluginRoots, setPluginRoots] = React.useState(null)
+  const [openingProject, setOpeningProject] = React.useState('')
   const [fileMenu, setFileMenu] = React.useState(null)
   const fileMenuRef = React.useRef(null)
   const mounted = React.useRef(true)
@@ -863,6 +875,8 @@ export function VscodeWindow({
     setPicker({ path: start, parent: '', folders: [], busy: true, error: '', truncated: false })
     setPickerDraft(start)
     void browseTo(start)
+    // 列表可能刚在别处装好/授权，打开对话框时顺手重扫一次
+    void scanRootsRef.current?.()
   }
   const openPickerRef = React.useRef(openPicker)
   openPickerRef.current = openPicker
@@ -874,19 +888,12 @@ export function VscodeWindow({
   }
 
   /** 换文件夹会关掉现有标签：未保存的修改必须先问过。 */
-  const applyFolder = destination => {
-    const next = normalizePath(picker?.path || '')
-    if (!next) return
-    if (next === rootPath) { closePicker(); return }
+  const switchRoot = (next, destination = 'this') => {
+    if (!next || next === rootPath) return
     // 这个文件夹已经在别的窗口打开：只把它拿到前台，当前窗口原样保留
-    if (onFocusFolder?.(next)) { closePicker(); return }
-    if (destination === 'new') {
-      closePicker()
-      onOpenInNewWindow?.(next)
-      return
-    }
+    if (onFocusFolder?.(next)) return
+    if (destination === 'new') { onOpenInNewWindow?.(next); return }
     if (dirty && !window.confirm('当前窗口还有未保存的修改，切换文件夹会关闭这些标签。继续吗？')) return
-    closePicker()
     setTabs([])
     setActiveId('')
     setReveal(null)
@@ -900,6 +907,64 @@ export function VscodeWindow({
     setCommitText('')
     setNotice('')
     onRootChange?.(next)
+  }
+  const switchRootRef = React.useRef(switchRoot)
+  switchRootRef.current = switchRoot
+
+  const applyFolder = destination => {
+    const next = normalizePath(picker?.path || '')
+    if (!next) return
+    closePicker()
+    switchRoot(next, destination)
+  }
+
+  /** 插件提供的可打开位置：IMA 是一个整体，PB 是逐个工程。 */
+  const scanPluginRoots = React.useCallback(async signal => {
+    if (!session?.id) return
+    try {
+      const value = unwrap(await rpc.call('/api', 'world-vscode-roots/scan', {}, signal))
+      if (!mounted.current || signal?.aborted) return
+      setPluginRoots(value && typeof value === 'object' ? value : null)
+    } catch {
+      // 旧宿主没有这个服务，或者 IMA 没授权：这一栏不出现就好，不在侧栏里报警
+      if (mounted.current && !signal?.aborted) setPluginRoots(null)
+    }
+  }, [rpc, session?.id])
+  const scanRootsRef = React.useRef(scanPluginRoots)
+  scanRootsRef.current = scanPluginRoots
+
+  React.useEffect(() => {
+    const controller = new AbortController()
+    void scanPluginRoots(controller.signal)
+    return () => controller.abort()
+  }, [scanPluginRoots])
+
+  /**
+   * 树里的 `.pbt` / `.exe`：先交给 PB 插件解析成工程工作区，再切过去。
+   * pbnpm-pbd 认 PBT 和 EXE，pbnpm 只认 PBT——按顺序问，谁先成功就用谁的结果。
+   */
+  const openProject = async path => {
+    if (openingProject) return
+    setOpeningProject(path)
+    setError('')
+    setNotice('')
+    let failure = null
+    for (const endpoint of ['pbnpm-pbd-project/open', 'pbnpm-project/open']) {
+      try {
+        const value = unwrap(await rpc.call('/api', endpoint, { path }))
+        if (!value?.path) continue
+        setOpeningProject('')
+        flashNotice(`已打开工程 ${baseName(value.pbtPath || path)}`)
+        void scanRootsRef.current?.()
+        switchRootRef.current?.(normalizePath(value.path))
+        return
+      } catch (cause) {
+        failure = cause
+      }
+    }
+    setOpeningProject('')
+    const reason = failure ? String(failure.message || failure) : '没有安装 pbnpm / pbnpm-pbd 插件'
+    setError(`${baseName(path)} 不是能打开的 PowerBuilder 工程：${reason}`)
   }
 
   /**
@@ -1479,6 +1544,28 @@ export function VscodeWindow({
               unstagedFiles.length ? gitGroup('更改', unstagedFiles, false) : null,
               git.truncated ? h('div', { className: 'world-vscode-git-note' }, `更改过多，只显示前 ${changedFiles.length} 个。`) : null)))
 
+  /** 侧栏与「打开文件夹」共用的插件位置：IMA 一个整体，PB 工程逐个列出。 */
+  const pluginRootItems = React.useMemo(() => {
+    const items = []
+    const ima = pluginRoots?.ima
+    if (ima && typeof ima.path === 'string' && ima.path) {
+      items.push({
+        id: 'ima', kind: 'ima', label: ima.label || 'IMA', path: normalizePath(ima.path),
+        note: ima.available ? '知识库 · 笔记 · 记忆' : '未授权',
+        disabled: !ima.available, title: ima.error || 'IMA 当前不可用',
+      })
+    }
+    for (const project of pluginRoots?.projects || []) {
+      if (!project || typeof project.root !== 'string' || !project.root) continue
+      items.push({
+        id: project.id, kind: project.kind === 'exe' ? 'exe' : 'pbt', label: project.name,
+        path: normalizePath(project.root),
+        note: `PB${project.pbVersion ?? '?'} · ${project.libraries}库`,
+      })
+    }
+    return items
+  }, [pluginRoots])
+
   /** 模态目录选择器：只列子目录，路径与「上一级」在顶部。 */
   const pickerDialog = () => {
     const current = picker
@@ -1521,6 +1608,22 @@ export function VscodeWindow({
           'aria-label': '浏览系统文件夹', disabled: Boolean(current?.busy),
           onClick: () => void browseNative(),
         }, '浏览…')),
+      pluginRootItems.length ? h('div', { className: 'world-vscode-picker-roots' },
+        h('span', { className: 'world-vscode-picker-roots-head' }, '插件位置'),
+        h('div', { className: 'world-vscode-picker-roots-list' },
+          pluginRootItems.map(item => h('button', {
+            key: item.id, type: 'button',
+            className: `world-vscode-picker-root is-${item.kind}`,
+            disabled: item.disabled,
+            title: item.disabled ? `${item.title} · ${nativePath(item.path)}` : nativePath(item.path),
+            onClick: () => {
+              if (item.disabled) return
+              closePicker()
+              switchRoot(item.path)
+            },
+          }, h('span', { className: 'world-vscode-picker-root-icon is-' + item.kind }, h(FolderIcon, { open: false })),
+          h('span', { className: 'world-vscode-picker-root-name' }, item.label),
+          h('span', { className: 'world-vscode-picker-root-note' }, item.note))))) : null,
       h('div', { className: 'world-vscode-picker-list' },
         current?.busy && h('div', { className: 'world-vscode-picker-note' }, '正在读取…'),
         current?.error && h('div', { className: 'world-vscode-error' }, current.error),
@@ -1654,11 +1757,24 @@ export function VscodeWindow({
               expanded.has(treeRoot) && rootEntries.map(entry => h(TreeNode, {
                 key: entry.path || entry.name, parent: treeRoot, entry, depth: 1, expanded, tree, selected: active?.path,
                 onToggle: toggleDir, onOpen: openFile, onPin: path => openFile(path, true), onMenu: openFileMenu,
+                onOpenProject: openProject,
               })),
               busyDir && h('div', { className: 'world-vscode-file-note' }, '正在读取目录…'),
               busyFile && h('div', { className: 'world-vscode-file-note' }, '正在打开文件…'),
               error && h('div', { className: 'world-vscode-error' }, error),
-              rootEntries.length === 0 && !busyDir && !error && h('div', { className: 'world-vscode-file-note' }, '此目录为空')),
+              rootEntries.length === 0 && !busyDir && !error && h('div', { className: 'world-vscode-file-note' }, '此目录为空'),
+              pluginRootItems.length && !collectionMode ? h('div', { className: 'world-vscode-roots' },
+                h('div', { className: 'world-vscode-roots-head' }, '插件位置'),
+                pluginRootItems.map(item => h('button', {
+                  key: item.id, type: 'button',
+                  className: `world-vscode-root-entry is-${item.kind}${item.disabled ? ' is-disabled' : ''}${!item.disabled && item.path === rootPath ? ' is-current' : ''}`,
+                  title: item.disabled ? `${item.title || '当前不可用'} · ${nativePath(item.path)}` : nativePath(item.path),
+                  disabled: item.disabled,
+                  onClick: () => { setError(''); switchRoot(item.path) },
+                },
+                h('span', { className: `world-vscode-root-icon is-${item.kind}` }, h(FolderIcon, { open: false })),
+                h('span', { className: 'world-vscode-file-name' }, item.label),
+                h('span', { className: 'world-vscode-root-note' }, item.note)))) : null),
         h('div', {
           className: 'world-vscode-sidebar-resize', role: 'separator', 'aria-label': '调整侧栏宽度', title: '拖动调整宽度，双击复位',
           onPointerDown: event => {

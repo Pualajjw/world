@@ -21,6 +21,9 @@ import { checkIconDrag } from './icons-browser.mjs'
 import { checkStartSearch } from './start-search-browser.mjs'
 import { checkDesktopItems } from './desktop-items-browser.mjs'
 import { checkDesktopScreenshot } from './screenshot-browser.mjs'
+import { checkTerminal } from './terminal-browser.mjs'
+import { checkTerminalSsh } from './ssh-browser.mjs'
+import { checkPluginRoots } from './roots-browser.mjs'
 import { createDesktopBrain } from '../desktop-brain.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -94,18 +97,20 @@ try {
   assert.equal(await page.locator('.world-wall').evaluate(node => getComputedStyle(node).color), 'rgb(23, 35, 60)')
   await themeStyle.evaluate(node => node.remove())
 
-  assert.equal(await page.locator('.world-desktop-icon').count(), 3)
+  assert.equal(await page.locator('.world-desktop-icon').count(), 4)
   // 任务栏：开始按钮 + 3D 景深开关（窗口按钮在有窗口时才出现）
   assert.equal(await page.locator('.world-taskbar-center button').count(), 1)
   assert.equal(await page.locator('.world-depth-toggle').count(), 1)
   assert.equal(await page.locator('body').getAttribute('data-world-depth'), 'on')
   assert.equal(await page.locator('.world-floor').count(), 1)
   assert.equal(await page.locator('.world-desktop-icon').first().evaluate(element => getComputedStyle(element).perspective), 'none')
-  // DSH + VSCode + 局域网聊天 + 浏览器（0.2.37 起浏览器默认已安装）
-  // 设置 / 插件 / 日记 / 垃圾箱 / 待办 / VSCode / 局域网聊天 / 浏览器
-  assert.equal(await page.locator('.world-start').locator('.world-app-card').count(), 8)
+  // DSH + VSCode + 局域网聊天 + 浏览器 + 终端（0.2.37 起浏览器、0.2.81 起终端默认已安装）
+  // 设置 / 插件 / 日记 / 垃圾箱 / 待办 / VSCode / 局域网聊天 / 浏览器 / 终端
+  assert.equal(await page.locator('.world-start').locator('.world-app-card').count(), 9)
   assert.equal(await page.locator('.world-app-card[data-world-app-card="browser"]').count(), 1)
   assert.equal(await page.locator('[data-world-browser-icon]').count(), 1)
+  assert.equal(await page.locator('.world-app-card[data-world-app-card="terminal"]').count(), 1)
+  assert.equal(await page.locator('[data-world-terminal-icon]').count(), 1)
   assert.equal(await page.locator('.world-app-card[data-world-app-card="lanchat"]').count(), 1)
   assert.equal(await page.locator('#root').evaluate(rootElement => rootElement.inert), false)
   assert.equal(await page.locator('#root .app-frame').evaluate(element => getComputedStyle(element, '::before').webkitAppRegion), 'drag')
@@ -127,7 +132,7 @@ try {
   assert.equal(await page.locator('.world-wallpaper-panel').count(), 0, 'right-click no longer jumps straight into the panel')
   await desktopMenu.locator('[data-role="refresh"]').click()
   await page.locator('.world-toast').filter({ hasText: '桌面已刷新' }).waitFor()
-  assert.equal(await page.locator('.world-desktop-icon').count(), 3, 'a refresh keeps the icons where they belong')
+  assert.equal(await page.locator('.world-desktop-icon').count(), 4, 'a refresh keeps the icons where they belong')
   await page.locator('.world-wall').click({ button: 'right', position: { x: 700, y: 320 } })
   await page.locator('.world-context-menu.is-desktop [data-role="personalize"]').click()
   await page.locator('.world-wallpaper-panel').waitFor()
@@ -256,7 +261,7 @@ try {
   await page.getByRole('button', { name: '开始' }).click()
   assert.equal(await page.locator('.world-start').evaluate(element => element.classList.contains('open')), true)
   await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-install').click()
-  assert.equal(await page.locator('.world-desktop-icon').count(), 4)
+  assert.equal(await page.locator('.world-desktop-icon').count(), 5)
   const vscodeIcon = page.getByRole('button', { name: 'Visual Studio Code' })
   await vscodeIcon.dblclick({ force: true })
   const vscodeWindow = page.locator('.world-vscode-window')
@@ -651,7 +656,7 @@ try {
   await reopened.waitFor({ state: 'detached' })
   await page.getByRole('button', { name: '开始' }).click()
   await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-uninstall').click()
-  assert.equal(await page.locator('.world-desktop-icon').count(), 3)
+  assert.equal(await page.locator('.world-desktop-icon').count(), 4)
   await page.keyboard.press('Escape')
   assert.equal(await page.locator('.world-start').evaluate(element => element.classList.contains('open')), false)
 
@@ -723,7 +728,7 @@ try {
   await openStart()
   const chatCard = page.locator('.world-app-card[data-world-app-card="lanchat"]')
   await chatCard.locator('.world-app-install').click()
-  assert.equal(await page.locator('.world-desktop-icon').count(), 4)
+  assert.equal(await page.locator('.world-desktop-icon').count(), 5)
   await chatCard.locator('.world-app-open').click()
   const chatWindow = page.locator('.world-lanchat-window')
   await chatWindow.waitFor()
@@ -743,7 +748,7 @@ try {
   assert.equal(await page.locator('.world-lanchat-window').count(), 0)
   await openStart()
   await chatCard.locator('.world-app-uninstall').click()
-  assert.equal(await page.locator('.world-desktop-icon').count(), 3)
+  assert.equal(await page.locator('.world-desktop-icon').count(), 4)
   await page.keyboard.press('Escape')
 
   // 主应用右键：只有「打开」，明确标记不可卸载
@@ -772,7 +777,7 @@ try {
     icon: '🧩', color: '#22aa88', url: 'http://127.0.0.1:53317/prototype.html', size: { w: 70, h: 70 },
   })
   await dropPackage('demo-test.worldapp', goodPackage)
-  await page.waitForFunction(() => document.querySelectorAll('.world-desktop-icon').length === 4)
+  await page.waitForFunction(() => document.querySelectorAll('.world-desktop-icon').length === 5)
   assert.equal(await page.locator('.world-app-card[data-world-app-card="demo-test"]').count(), 1)
   assert.match(await page.locator('.world-toast').textContent(), /已安装/)
   const externalIcon = page.locator('[data-world-external-icon="demo-test"]')
@@ -792,7 +797,7 @@ try {
   assert.equal(await page.locator('.world-external-window').count(), 0)
   await contextClick(externalIcon)
   await page.locator('.world-context-menu [data-role="uninstall"]').click()
-  assert.equal(await page.locator('.world-desktop-icon').count(), 3)
+  assert.equal(await page.locator('.world-desktop-icon').count(), 4)
   assert.equal(await page.locator('.world-app-card[data-world-app-card="demo-test"]').count(), 0)
 
   // 非法包：javascript: 地址必须被拒绝，且不写入任何应用
@@ -800,7 +805,7 @@ try {
     format: 'dsh-world-app/1', id: 'bad-app', name: '坏包', url: 'javascript:alert(1)',
   }))
   await page.waitForFunction(() => document.querySelector('.world-toast')?.textContent?.includes('http'))
-  assert.equal(await page.locator('.world-desktop-icon').count(), 3)
+  assert.equal(await page.locator('.world-desktop-icon').count(), 4)
 
   // 3D 景深开关：关掉后地面消失、图标不再透视，再打开恢复
   await page.locator('.world-depth-toggle').click()
@@ -910,6 +915,9 @@ try {
   assert.equal(await page.locator('style[data-plugin="dsh-world"]').count(), 0)
   console.log('Browser interactions passed: desktop, root box, drag, maximize, minimize/restore, close, start menu, plugin windows, taskbar restore, dialog ownership, built-in LAN chat app, .worldapp drop install, context-menu uninstall, main-app protection, 3D depth toggle, flat icons, cursor-following mascot, cleanup.')
   await checkBrowserWindow(browser, root, bundle.outputFiles[0].text)
+  await checkTerminal(browser, bundle.outputFiles[0].text)
+  await checkTerminalSsh(browser, bundle.outputFiles[0].text)
+  await checkPluginRoots(browser, bundle.outputFiles[0].text)
   await checkLanChatInput(browser, root)
 } finally {
   desktopBridge.dispose()

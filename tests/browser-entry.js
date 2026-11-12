@@ -30,7 +30,24 @@ const remote = { workspaceFiles: { async list(sessionId, path) {
     { name: 'src', type: 'directory' }, { name: 'README.md', type: 'file', size: 20 },
   ], truncated: false } }
 } } }
-const rpc = { async call(_base, method, payload) {
+/**
+ * 宿主的 RPC 会随调用方的取消一起失败。假 transport 也得照做，
+ * 否则「Esc 取消连接」在浏览器测试里只会卡在那里，测不出真实行为。
+ */
+function cancellable(promise, signal) {
+  if (!signal) return promise
+  return new Promise((resolve, reject) => {
+    const stop = () => reject(Object.assign(new Error('已取消。'), { code: 'WORLD_SSH_CANCELLED' }))
+    if (signal.aborted) { stop(); return }
+    signal.addEventListener('abort', stop, { once: true })
+    promise.then(
+      value => { signal.removeEventListener('abort', stop); resolve(value) },
+      error => { signal.removeEventListener('abort', stop); reject(error) },
+    )
+  })
+}
+
+const rpc = { async call(_base, method, payload, signal) {
   calls.push({ method, payload })
   if (method.startsWith('world-journal/') && window.__worldJournalCall) return window.__worldJournalCall(method.slice('world-journal/'.length), payload)
   if (method.startsWith('world-tasks/') && window.__worldTasksCall) return window.__worldTasksCall(method.slice('world-tasks/'.length), payload)
@@ -38,6 +55,12 @@ const rpc = { async call(_base, method, payload) {
   if (method.startsWith('world-desktop-brain/') && window.__worldBrainCall) {
     try { return { ok: true, value: await window.__worldBrainCall(method.slice('world-desktop-brain/'.length), payload) } }
     catch (error) { return { ok: false, error: { message: error.message, code: error.code } } }
+  }
+  if (method.startsWith('world-terminal/') && window.__worldTerminalCall) {
+    return window.__worldTerminalCall(method.slice('world-terminal/'.length), payload)
+  }
+  if (method.startsWith('world-ssh/') && window.__worldSshCall) {
+    return cancellable(window.__worldSshCall(method.slice('world-ssh/'.length), payload), signal)
   }
   if (method.startsWith('world-workbench/') && window.__worldWorkbenchCall) {
     try { return { ok: true, value: await window.__worldWorkbenchCall(method.slice('world-workbench/'.length), payload) } }
@@ -62,6 +85,17 @@ const rpc = { async call(_base, method, payload) {
       }), 900))
     }
     return { ok: true, value: { path: payload.path, source: savedFiles.get(payload.path) || '', version: 'v1', eol: 'LF', bom: false } }
+  }
+  if (method === 'world-vscode-roots/scan' && window.__worldRootsCall) {
+    try { return { ok: true, value: await window.__worldRootsCall('scan', payload) } }
+    catch (error) { return { ok: false, error: { message: error.message, code: error.code } } }
+  }
+  if (method === 'pbnpm-pbd-project/open' && window.__worldPbdCall) {
+    return window.__worldPbdCall('open', payload)
+  }
+  if (method === 'world-vscode-source/list' && window.__worldWorkspaceList) {
+    const custom = await window.__worldWorkspaceList(payload)
+    if (custom) return custom
   }
   if (method === 'world-vscode-source/list') {
     const path = payload.path

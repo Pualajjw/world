@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { VscodeGlyph, VscodeWindow } from './vscode-app.js'
 import { LanChatGlyph, LanChatWindow } from './lan-chat-app.js'
 import { BrowserGlyph, BrowserWindow } from './browser-app.js'
+import { TerminalGlyph, TerminalWindow } from './terminal-app.js'
 import { DeskWalker } from './walker.js'
 import { layoutDeskIcons, groundOf } from './plane.js'
 import {
@@ -47,12 +48,14 @@ const APPS_STORAGE_KEY = 'dsh.world.apps'
 const VSCODE_STORAGE_KEY = 'dsh.world.vscode.window'
 const LANCHAT_STORAGE_KEY = 'dsh.world.lanchat.window'
 const BROWSER_STORAGE_KEY = 'dsh.world.browser.window'
+const TERMINAL_STORAGE_KEY = 'dsh.world.terminal.window'
 const BROWSER_MIGRATION_KEY = 'dsh.world.browser.migrated'
+const TERMINAL_MIGRATION_KEY = 'dsh.world.terminal.migrated'
 const DEPTH_STORAGE_KEY = 'dsh.world.depth'
 const ICON_POSITIONS_KEY = 'dsh.world.iconPositions'
 const FILE_LINKS_KEY = 'dsh.world.fileLinks'
 const HOLDERS_KEY = 'dsh.world.holders'
-const KNOWN_APPS = ['vscode', 'lanchat', 'browser']
+const KNOWN_APPS = ['vscode', 'lanchat', 'browser', 'terminal']
 const TASKBAR_HEIGHT = 48
 const DEFAULT_POSITION = { x: 20, y: 9, w: 60, h: 68 }
 const EMPTY_APPS = []
@@ -76,11 +79,14 @@ function currentMainSession(sessions) {
   return row ? { id: row.id, cwd: row.cwd || '' } : null
 }
 
-/** 浏览器像 Win11 自带 Edge：默认已安装、允许卸载；老配置只在首次迁移时补一次，不会把卸载过的又装回来。 */
+/**
+ * 浏览器和终端像 Win11 自带的应用：默认已安装、允许卸载。
+ * 老配置里没有终端，所以迁移只补一次——卸载过的人不会下次打开又被装回来。
+ */
 function readInstalledApps() {
   try {
     const raw = window.localStorage.getItem(APPS_STORAGE_KEY)
-    if (raw === null) return new Set(['browser'])
+    if (raw === null) return new Set(['browser', 'terminal'])
     const value = JSON.parse(raw || '[]')
     const apps = Array.isArray(value) ? new Set(value.filter(id => KNOWN_APPS.includes(id))) : new Set()
     if (!window.localStorage.getItem(BROWSER_MIGRATION_KEY)) {
@@ -88,8 +94,13 @@ function readInstalledApps() {
       saveInstalledApps(apps)
       window.localStorage.setItem(BROWSER_MIGRATION_KEY, '1')
     }
+    if (!window.localStorage.getItem(TERMINAL_MIGRATION_KEY)) {
+      apps.add('terminal')
+      saveInstalledApps(apps)
+      window.localStorage.setItem(TERMINAL_MIGRATION_KEY, '1')
+    }
     return apps
-  } catch { return new Set(['browser']) }
+  } catch { return new Set(['browser', 'terminal']) }
 }
 
 function saveInstalledApps(apps) {
@@ -115,7 +126,13 @@ function readIconPositions() {
     for (const [key, position] of Object.entries(value)) {
       if (typeof key !== 'string' || !key || !position || typeof position !== 'object') continue
       const x = Number(position.x), y = Number(position.y)
-      if (Number.isFinite(x) && Number.isFinite(y)) out[key] = { x, y }
+      if (Number.isFinite(x) && Number.isFinite(y)) {
+        // vw/vh 是存下这个位置时的视口（平面模式是容器）尺寸，换尺寸时按比例还原。
+        const vw = Number(position.vw), vh = Number(position.vh)
+        out[key] = Number.isFinite(vw) && Number.isFinite(vh) && vw > 0 && vh > 0
+          ? { x, y, vw, vh }
+          : { x, y }
+      }
     }
     return out
   }
@@ -127,6 +144,15 @@ function readIconPositions() {
 
 function saveIconPositions(value) {
   try { window.localStorage.setItem(ICON_POSITIONS_KEY, JSON.stringify(value)) } catch {}
+}
+
+/** 图标当前的边长：窗口缩小时 plane.js 会整档降低，拖动/落点都得按它收边。 */
+function iconSizeOf(container) {
+  if (!container) return 0
+  if (typeof window === 'undefined' || !window.getComputedStyle) return 0
+  const raw = getComputedStyle(container).getPropertyValue('--world-icon-size')
+  const value = Number.parseFloat(raw)
+  return Number.isFinite(value) && value > 0 ? value : 96
 }
 
 const newId = () => crypto.randomUUID?.() || [...crypto.getRandomValues(new Uint32Array(4))].map(value => value.toString(16)).join('')
@@ -179,6 +205,14 @@ function readLanChatRect() {
 function readBrowserRect() {
   try {
     const value = JSON.parse(window.localStorage.getItem(BROWSER_STORAGE_KEY) || 'null')
+    if (Number.isFinite(value?.x) && Number.isFinite(value?.y)) return clampVscodeRect(value)
+  } catch {}
+  return defaultVscodeRect()
+}
+
+function readTerminalRect() {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(TERMINAL_STORAGE_KEY) || 'null')
     if (Number.isFinite(value?.x) && Number.isFinite(value?.y)) return clampVscodeRect(value)
   } catch {}
   return defaultVscodeRect()
@@ -450,6 +484,9 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const [browserOpen, setBrowserOpen] = React.useState(false)
   const [browserState, setBrowserState] = React.useState('normal')
   const [browserRect, setBrowserRect] = React.useState(readBrowserRect)
+  const [terminalOpen, setTerminalOpen] = React.useState(false)
+  const [terminalState, setTerminalState] = React.useState('normal')
+  const [terminalRect, setTerminalRect] = React.useState(readTerminalRect)
   const [externalApps, setExternalApps] = React.useState(readExternalApps)
   const [externalWindows, setExternalWindows] = React.useState([])
   const [fileLinks, setFileLinks] = React.useState(readFileLinks)
@@ -498,10 +535,12 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const lastOpenState = React.useRef('normal')
   const lastLanChatOpenState = React.useRef('normal')
   const lastBrowserOpenState = React.useRef('normal')
+  const lastTerminalOpenState = React.useRef('normal')
   const dragRef = React.useRef(null)
   const appDragRef = React.useRef(null)
   const lanChatDragRef = React.useRef(null)
   const browserDragRef = React.useRef(null)
+  const terminalDragRef = React.useRef(null)
   const externalDragRef = React.useRef(null)
   const pluginDragRef = React.useRef(null)
   const ignoreDoubleClick = React.useRef(false)
@@ -698,9 +737,24 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     const container = iconsRef.current
     if (!container) return
     const apply = () => layoutDeskIcons(container, depth, iconPositionsRef.current[depth ? 'depth' : 'flat'])
+    // 拖窗口时 resize 一秒能来几十次，重排要等这一帧的尺寸定下来再做，别每来一次都算。
+    let frame = 0
+    const relayout = () => layoutDeskIcons(container, depth,
+      iconPositionsRef.current[depth ? 'depth' : 'flat'], { resolveCollisions: true })
+    const schedule = () => {
+      if (frame) return
+      frame = window.requestAnimationFrame(() => { frame = 0; relayout() })
+    }
     apply()
-    window.addEventListener('resize', apply)
-    return () => window.removeEventListener('resize', apply)
+    window.addEventListener('resize', schedule)
+    // 任务栏高度、宿主标题栏这类变化不一定伴随 window.resize，容器自己的尺寸也要盯着。
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(schedule) : null
+    observer?.observe(container)
+    return () => {
+      window.removeEventListener('resize', schedule)
+      observer?.disconnect()
+      if (frame) window.cancelAnimationFrame(frame)
+    }
   }, [depth, portal, installedApps, externalApps, fileLinks, holders])
 
   // 收纳盒被移除后，它的窗口和对应的 VSCode 收纳盒视图一起关掉。
@@ -792,9 +846,12 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
           const y = ground.clampY(event.clientY), scale = ground.scaleAt(y)
           positions.depth[link.id] = { x: Math.min(Math.max(event.clientX + index * 104, 48 * scale), width - 48 * scale), y }
         } else if (origin) {
+          // 图标档位会随窗口缩小降档，落点得按当前实际边长收边，不能写死 96。
+          const size = iconSizeOf(iconsRef.current) || 96
           positions.flat[link.id] = {
-            x: Math.min(Math.max(event.clientX - origin.left - 48 + index * 104, 0), Math.max(0, origin.width - 96)),
-            y: Math.min(Math.max(event.clientY - origin.top - 48, 0), Math.max(0, origin.height - 96)),
+            x: Math.min(Math.max(event.clientX - origin.left - size / 2 + index * 104, 0), Math.max(0, origin.width - size)),
+            y: Math.min(Math.max(event.clientY - origin.top - size / 2, 0), Math.max(0, origin.height - size)),
+            vw: origin.width, vh: origin.height,
           }
         }
       })
@@ -836,6 +893,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       else if (externalWindow) setActiveWindow(`ext:${externalWindow.dataset.worldAppId}`)
       else if (event.target.closest?.('.world-lanchat-window')) setActiveWindow('lanchat')
       else if (event.target.closest?.('.world-browser-window')) setActiveWindow('browser')
+      else if (event.target.closest?.('.world-terminal-window')) setActiveWindow('terminal')
       else if (vscodeWindow) setActiveWindow(`vscode:${vscodeWindow.dataset.worldVscodeKey}`)
       else if (event.target.closest?.('.world-window-frame')
         || (['normal', 'max'].includes(document.body.dataset.worldWindow) && event.target.closest?.('#root'))) setActiveWindow('dsh')
@@ -868,6 +926,11 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       saveRect(BROWSER_STORAGE_KEY, next)
       return next
     })
+    const onTerminalResize = () => setTerminalRect(current => {
+      const next = clampVscodeRect(current)
+      saveRect(TERMINAL_STORAGE_KEY, next)
+      return next
+    })
     const onPluginResize = () => setPluginWindows(list => {
       let changed = false
       const next = list.map(win => {
@@ -885,6 +948,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     window.addEventListener('resize', onAppResize)
     window.addEventListener('resize', onLanChatResize)
     window.addEventListener('resize', onBrowserResize)
+    window.addEventListener('resize', onTerminalResize)
     window.addEventListener('resize', onPluginResize)
     return () => {
       document.removeEventListener('keydown', onKeyDown)
@@ -893,6 +957,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       window.removeEventListener('resize', onAppResize)
       window.removeEventListener('resize', onLanChatResize)
       window.removeEventListener('resize', onBrowserResize)
+      window.removeEventListener('resize', onTerminalResize)
       window.removeEventListener('resize', onPluginResize)
     }
   }, [])
@@ -1013,6 +1078,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     }
     if (id === 'lanchat') return openLanChat()
     if (id === 'browser') return openBrowser()
+    if (id === 'terminal') return openTerminal()
     if (id.startsWith('ext:')) return openExternalApp(id.slice(4))
     if (id.startsWith('plugin:')) openPlugin(id.slice(7))
   }
@@ -1285,6 +1351,69 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     }
   }
   const toggleMaximizeBrowser = () => setBrowserState(current => current === 'max' ? 'normal' : 'max')
+
+  // 内置终端：窗口状态机与浏览器/聊天同构，命令由宿主端的 world-terminal 服务执行
+  const installTerminal = () => installApp('terminal')
+  const uninstallTerminal = () => {
+    uninstallApp('terminal')
+    setTerminalOpen(false)
+    setTerminalState('normal')
+    if (activeWindowRef.current === 'terminal') setActiveWindow('dsh')
+  }
+  const openTerminal = () => {
+    setStartOpen(false)
+    setTerminalOpen(true)
+    setTerminalState(current => current === 'min' ? lastTerminalOpenState.current : current)
+    setActiveWindow('terminal')
+  }
+  const closeTerminal = () => {
+    setTerminalOpen(false)
+    setTerminalState('normal')
+    if (activeWindowRef.current === 'terminal') setActiveWindow('dsh')
+  }
+  const minimizeTerminal = () => {
+    if (terminalState === 'normal' || terminalState === 'max') {
+      lastTerminalOpenState.current = terminalState
+      setTerminalState('min')
+    }
+  }
+  const toggleMaximizeTerminal = () => setTerminalState(current => current === 'max' ? 'normal' : 'max')
+  const beginTerminalDrag = event => {
+    if (event.target.closest('button') || terminalState !== 'normal') return
+    setActiveWindow('terminal')
+    terminalDragRef.current = { kind: 'move', pointerId: event.pointerId, x: event.clientX, y: event.clientY, rect: terminalRect }
+    event.currentTarget.setPointerCapture?.(event.pointerId)
+    event.preventDefault()
+  }
+  const beginTerminalResize = edge => event => {
+    event.stopPropagation()
+    event.preventDefault()
+    if (terminalState !== 'normal') return
+    setActiveWindow('terminal')
+    terminalDragRef.current = { kind: 'resize', edge, pointerId: event.pointerId, x: event.clientX, y: event.clientY, rect: terminalRect }
+    event.currentTarget.setPointerCapture?.(event.pointerId)
+  }
+  const moveTerminal = event => {
+    const drag = terminalDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    const dx = (event.clientX - drag.x) / (window.innerWidth || 1) * 100
+    const dy = (event.clientY - drag.y) / (window.innerHeight || 1) * 100
+    const next = { ...drag.rect }
+    if (drag.kind === 'move') { next.x += dx; next.y += dy }
+    else {
+      if (drag.edge.includes('w')) { next.x += dx; next.w -= dx }
+      if (drag.edge.includes('e')) next.w += dx
+      if (drag.edge.includes('n')) { next.y += dy; next.h -= dy }
+      if (drag.edge.includes('s')) next.h += dy
+    }
+    terminalDragRef.current.next = clampVscodeRect(next)
+    setTerminalRect(terminalDragRef.current.next)
+  }
+  const endTerminalDrag = event => {
+    if (!terminalDragRef.current || terminalDragRef.current.pointerId !== event.pointerId) return
+    saveRect(TERMINAL_STORAGE_KEY, terminalDragRef.current.next || terminalRect)
+    terminalDragRef.current = null
+  }
   const beginBrowserDrag = event => {
     if (event.target.closest('button') || browserState !== 'normal') return
     setActiveWindow('browser')
@@ -1505,6 +1634,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     if (id === 'vscode') uninstallVscode()
     else     if (id === 'lanchat') uninstallLanChat()
     else if (id === 'browser') uninstallBrowser()
+    else if (id === 'terminal') uninstallTerminal()
     else uninstallExternalApp(id)
   }
 
@@ -1522,8 +1652,9 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     event.preventDefault()
     const origin = drag.origin
     if (drag.mode === 'flat') {
-      const x = Math.min(Math.max(event.clientX - origin.left - drag.grabX, 0), Math.max(0, origin.width - 96))
-      const y = Math.min(Math.max(event.clientY - origin.top - drag.grabY, 0), Math.max(0, origin.height - 96))
+      const size = drag.size || 96
+      const x = Math.min(Math.max(event.clientX - origin.left - drag.grabX, 0), Math.max(0, origin.width - size))
+      const y = Math.min(Math.max(event.clientY - origin.top - drag.grabY, 0), Math.max(0, origin.height - size))
       drag.icon.style.left = `${x}px`
       drag.icon.style.top = `${y}px`
     } else {
@@ -1564,11 +1695,17 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     }
     const value = iconPositionsRef.current
     if (drag.mode === 'flat') {
-      value.flat[drag.id] = { x: Number.parseFloat(drag.icon.style.left) || 0, y: Number.parseFloat(drag.icon.style.top) || 0 }
+      value.flat[drag.id] = {
+        x: Number.parseFloat(drag.icon.style.left) || 0, y: Number.parseFloat(drag.icon.style.top) || 0,
+        vw: drag.origin.width, vh: drag.origin.height,
+      }
     } else {
       const left = Number.parseFloat(drag.icon.style.left) || 0
       const top = Number.parseFloat(drag.icon.style.top) || 0
-      value.depth[drag.id] = { x: left + 48 + drag.origin.left, y: top + 96 + drag.origin.top }
+      value.depth[drag.id] = {
+        x: left + 48 + drag.origin.left, y: top + 96 + drag.origin.top,
+        vw: window.innerWidth || 1, vh: window.innerHeight || 1,
+      }
     }
     saveIconPositions(value)
     layoutDeskIcons(iconsRef.current, depth, value[drag.mode])
@@ -1589,6 +1726,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       grabX: event.clientX - rect.left, grabY: event.clientY - rect.top,
       offsetX: rect.left + rect.width / 2 - event.clientX, offsetY: rect.bottom - event.clientY,
       origin, mode: depth ? 'depth' : 'flat', moved: false,
+      size: iconSizeOf(iconsRef.current) || 96,
     }
     window.addEventListener('pointermove', handlers.move, { passive: false })
     window.addEventListener('pointerup', handlers.end)
@@ -1824,6 +1962,10 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       id: 'browser', label: '浏览器', minimized: browserState === 'min', active: activeWindow === 'browser',
       glyph: h(BrowserGlyph, { size: 20 }),
     }] : []),
+    ...(terminalOpen && installedApps.has('terminal') ? [{
+      id: 'terminal', label: '终端', minimized: terminalState === 'min', active: activeWindow === 'terminal',
+      glyph: h(TerminalGlyph, { size: 20 }),
+    }] : []),
     ...externalWindows.map(win => {
       const app = externalApps.find(item => item.id === win.id)
       return app ? {
@@ -1851,6 +1993,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       { id: 'vscode', name: 'Visual Studio Code', installed: installedApps.has('vscode') },
       { id: 'lanchat', name: '局域网聊天', installed: installedApps.has('lanchat') },
       { id: 'browser', name: '浏览器', installed: installedApps.has('browser') },
+      { id: 'terminal', name: '终端', installed: installedApps.has('terminal') },
       ...externalApps.map(app => ({ id: `ext:${app.id}`, name: app.name, installed: true })),
       ...windowApps.map(app => ({ id: `plugin:${app.key}`, name: app.label, installed: true })),
     ],
@@ -1861,7 +2004,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       return { id: item.id, name: item.label, active: item.active,
         rect: desktopUi.bounds(item.id),
         state: item.id === 'dsh' ? state : item.id === 'lanchat' ? lanChatState
-          : item.id === 'browser' ? browserState : win?.state || 'normal',
+          : item.id === 'browser' ? browserState : item.id === 'terminal' ? terminalState : win?.state || 'normal',
         ...(item.id.startsWith('vscode:') ? { editor: editorHandles.current.get(win.key)?.getState() || null } : {}),
       }
     }),
@@ -1904,6 +2047,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
         } else if (appId === 'dsh') { id = 'dsh'; openWindow() }
         else if (appId === 'lanchat') { id = 'lanchat'; openLanChat() }
         else if (appId === 'browser') { id = 'browser'; openBrowser() }
+        else if (appId === 'terminal') { id = 'terminal'; openTerminal() }
         else if (appId.startsWith('ext:')) { id = appId; openExternalApp(appId.slice(4)) }
         else if (appId.startsWith('plugin:')) { id = appId; openPlugin(appId.slice(7)) }
       } else {
@@ -1922,6 +2066,9 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
           } else if (id === 'browser') {
             if (target === 'min') minimizeBrowser()
             else setBrowserState(target)
+          } else if (id === 'terminal') {
+            if (target === 'min') minimizeTerminal()
+            else setTerminalState(target)
           } else if (id.startsWith('vscode:')) {
             if (target === 'min') minimizeVscode(id.slice(7))
             else setVscodeWindows(list => list.map(win => `vscode:${win.key}` === id ? { ...win, state: target } : win))
@@ -1974,6 +2121,24 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     : busyPhase ? '正在做事。你可以看着，也可以随时插一句。'
     : ''
 
+  // 终端里的 `open <应用>`：只列桌面上真能打开的东西，打开的路径和图标双击走同一条
+  const launcherApps = [
+    { id: 'dsh', label: 'DeepSeek Harness' },
+    ...(installedApps.has('vscode') ? [{ id: 'vscode', label: 'Visual Studio Code' }] : []),
+    ...(installedApps.has('lanchat') ? [{ id: 'lanchat', label: '局域网聊天' }] : []),
+    ...(installedApps.has('browser') ? [{ id: 'browser', label: '浏览器' }] : []),
+    { id: 'settings', label: '设置' },
+  ]
+  const openLauncherApp = id => {
+    if (id === 'dsh') return openWindow()
+    if (id === 'vscode') return openVscode()
+    if (id === 'lanchat') return openLanChat()
+    if (id === 'browser') return openBrowser()
+    if (id === 'terminal') return openTerminal()
+    if (id === 'settings') return openSettingsPanel()
+    return undefined
+  }
+
   const allEntries = [
     { id: 'dsh', label: 'DeepSeek Harness', icon: DshMark, kind: 'app', open: openWindow },
     { id: 'settings', label: '设置', icon: SettingsGlyph, kind: 'app', open: openSettingsPanel },
@@ -1983,6 +2148,8 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     ...(installedApps.has('lanchat') ? [{ id: 'lanchat', label: '局域网聊天', icon: LanChatGlyph, kind: 'app', open: openLanChat }] : []),
     ...(installedApps.has('browser') ? [{ id: 'browser', label: '浏览器', icon: BrowserGlyph, kind: 'app',
       attrs: { 'data-world-browser-icon': true }, open: openBrowser }] : []),
+    ...(installedApps.has('terminal') ? [{ id: 'terminal', label: '终端', icon: TerminalGlyph, kind: 'app',
+      attrs: { 'data-world-terminal-icon': true }, open: openTerminal }] : []),
     ...JOURNAL_APPS.map(app => ({ id: `plugin:${app.key}`, label: app.label, icon: app.icon, kind: 'app',
       attrs: { 'data-world-journal-icon': app.key }, open: () => openPlugin(app.key) })),
     ...TASK_APPS.map(app => ({ id: `plugin:${app.key}`, label: app.label, icon: app.icon, kind: 'app',
@@ -2019,6 +2186,55 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     .slice(0, 12)
   const startHitIndex = Math.min(startHit, Math.max(0, startResults.length - 1))
   const openStartResult = row => { if (!row) return; row.open(); setStartOpen(false) }
+  // 菜单一屏放不下时得让人看得出来：Chromium 在 Windows 上用覆盖式滚动条，
+  // 手指不动它就不出现（::-webkit-scrollbar 也管不到），所以改成内容两端渐隐。
+  const startBodyRef = React.useRef(null)
+  const startBodyKey = [startOpen, startTerm, installedApps.size, externalApps.length, pluginApps.length].join('|')
+  React.useEffect(() => {
+    const node = startBodyRef.current
+    if (!node) return
+    const sync = () => {
+      node.classList.toggle('is-scrolled', node.scrollTop > 2)
+      node.classList.toggle('is-more', node.scrollTop + node.clientHeight < node.scrollHeight - 2)
+    }
+    sync()
+    node.addEventListener('scroll', sync, { passive: true })
+    const observer = new ResizeObserver(sync)
+    observer.observe(node)
+    return () => { node.removeEventListener('scroll', sync); observer.disconnect() }
+  }, [startBodyKey])
+  // 开始菜单里每一行整块可点：命中行里那颗按钮时交给按钮自己处理，不要触发两次。
+  const openCard = (event, open) => { if (event.target.closest('button')) return; open() }
+  // 键盘走列表：方向键在应用 / 插件里上下走，Enter 打主操作（未安装是「安装」，否则「打开」）。
+  // 行本身不是按钮（里面已经有按钮了），所以给它 tabIndex=-1 只接受程序聚焦，Tab 仍然只落在真按钮上。
+  const startPanelRef = React.useRef(null)
+  const startRowSelector = '.world-app-card, .world-plugin-card'
+  const stepStartRow = (host, delta) => {
+    const rows = [...(host || startPanelRef.current)?.querySelectorAll(startRowSelector) || []]
+    if (!rows.length) return false
+    const current = document.activeElement?.closest?.(startRowSelector)
+    const index = current ? rows.indexOf(current) : (delta > 0 ? -1 : rows.length)
+    rows[Math.max(0, Math.min(rows.length - 1, index + delta))]?.focus()
+    return true
+  }
+  const startRowKeyDown = event => {
+    const row = event.target.closest?.(startRowSelector)
+    if (!row) return
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      stepStartRow(event.currentTarget, event.key === 'ArrowDown' ? 1 : -1)
+    } else if (event.key === 'Enter' || event.key === ' ') {
+      // 主操作优先：没装的应用按 Enter 是「安装」，装好的就是「打开」。
+      const primary = row.querySelector('.world-app-install') || row.querySelector('.world-app-open') || row
+      event.preventDefault()
+      primary.click()
+    }
+  }
+  React.useEffect(() => {
+    startPanelRef.current?.querySelectorAll('.world-app-card').forEach(row => {
+      if (!row.hasAttribute('tabindex')) row.setAttribute('tabindex', '-1')
+    })
+  }, [startBodyKey])
 
   const desktop = h(React.Fragment, null,
     h(AssistantPointer, { control, pointer: assistantPointer, name: brainProfile?.name || '助手' }),
@@ -2076,10 +2292,12 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     !rootReady && state !== 'closed' && state !== 'min'
       ? h('div', { className: 'world-root-warning', role: 'status' }, '未检测到宿主界面容器 #root')
       : null),
-    h('div', { className: `world-start${startOpen ? ' open' : ''}`, 'aria-label': '开始菜单', 'aria-hidden': !startOpen },
-      h('div', { className: 'world-start-heading' }, h('strong', null, '应用'),
-        h('div', { className: 'world-workbench-setup-actions' },
-          h('button', { type: 'button', 'data-world-personalize': true, onClick: openPersonalization }, '助手个性化'))),
+    h('div', {
+      className: `world-start${startOpen ? ' open' : ''}`, 'aria-label': '开始菜单', 'aria-hidden': !startOpen,
+      ref: startPanelRef, onKeyDown: startRowKeyDown,
+      // 菜单里的右键不弹宿主默认菜单：这里的行没有桌面图标那套右键动作，弹出来只会是干扰。
+      onContextMenu: event => event.preventDefault(),
+    },
       h('div', { className: 'world-start-search' },
         h('svg', { className: 'world-start-search-glyph', width: 14, height: 14, viewBox: '0 0 16 16', 'aria-hidden': true },
           h('circle', { cx: 7, cy: 7, r: 4.6, fill: 'none', stroke: 'currentColor', strokeWidth: 1.4 }),
@@ -2091,12 +2309,14 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
           tabIndex: startOpen ? undefined : -1,
           onChange: event => { setStartQuery(event.target.value); setStartHit(0) },
           onKeyDown: event => {
-            if (event.key === 'ArrowDown') {
+            // 有搜索结果时方向键在结果里走；没有结果（也就是没在搜）时，方向键把焦点送进下面的列表。
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
               event.preventDefault(); event.stopPropagation()
-              setStartHit(Math.min(startHitIndex + 1, Math.max(0, startResults.length - 1)))
-            } else if (event.key === 'ArrowUp') {
-              event.preventDefault(); event.stopPropagation()
-              setStartHit(Math.max(0, startHitIndex - 1))
+              const step = event.key === 'ArrowDown' ? 1 : -1
+              if (!startResults.length) { stepStartRow(startPanelRef.current, step); return }
+              setStartHit(step > 0
+                ? Math.min(startHitIndex + 1, Math.max(0, startResults.length - 1))
+                : Math.max(0, startHitIndex - 1))
             } else if (event.key === 'Enter') {
               event.preventDefault(); event.stopPropagation()
               openStartResult(startResults[startHitIndex])
@@ -2113,7 +2333,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
             onClick: () => { setStartQuery(''); setStartHit(0); startSearchRef.current?.focus() },
           }, '×')
           : null),
-      h('div', { className: 'world-start-body' },
+      h('div', { className: 'world-start-body', ref: startBodyRef },
         startTerm
           ? h('section', { className: 'world-start-group' },
             h('div', { className: 'world-start-group-title' }, '搜索结果',
@@ -2134,24 +2354,27 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
           : h(React.Fragment, null,
             h('section', { className: 'world-start-group' },
           h('div', { className: 'world-start-group-title' }, '应用',
-            h('span', null, `${externalApps.length} 个外部应用`)),
-          h('div', { key: 'settings', className: 'world-app-card', 'data-world-app-card': 'settings' },
-            h('span', { className: 'world-app-card-icon' }, h(SettingsGlyph, { size: 34 })),
-            h('div', { className: 'world-app-card-info' }, h('strong', null, '设置'), h('span', null, '原生设置面板 · 打开在 DSH 窗口里')),
-            h('button', { type: 'button', className: 'world-app-open', 'data-world-settings-open': true, onClick: openSettingsPanel }, '打开')),
-          ...HOST_PANELS.map(page => h('div', { key: page.id, className: 'world-app-card', 'data-world-app-card': page.id },
-            h('span', { className: 'world-app-card-icon' }, h(PluginsGlyph, { size: 34 })),
-            h('div', { className: 'world-app-card-info' }, h('strong', null, page.label), h('span', null, page.note)),
-            h('button', { type: 'button', className: 'world-app-open', 'data-world-host-panel': page.id, onClick: () => openHostPage(page.id) }, '打开'))),
-          ...JOURNAL_APPS.map(app => h('div', { key: app.key, className: 'world-app-card', 'data-world-app-card': app.key },
+            externalApps.length ? h('span', null, `${externalApps.length} 个外部应用`) : null),
+          // 顺序按「先干什么、后干什么」排：日记/待办这些天天点的在最上面，「设置 / 插件管理」
+          // 这种配置入口沉到最后。以前设置排第一行，每次开菜单第一眼看到的是配置项而不是要用的东西。
+          ...JOURNAL_APPS.map(app => h('div', {
+            key: app.key, className: 'world-app-card', 'data-world-app-card': app.key,
+            onClick: event => openCard(event, () => openPlugin(app.key)),
+          },
             h('span', { className: 'world-app-card-icon' }, h(app.icon, { size: 34 })),
             h('div', { className: 'world-app-card-info' }, h('strong', null, app.label), h('span', null, app.description)),
             h('button', { type: 'button', className: 'world-app-open', onClick: () => openPlugin(app.key) }, '打开'))),
-          ...TASK_APPS.map(app => h('div', { key: app.key, className: 'world-app-card', 'data-world-app-card': app.key },
+          ...TASK_APPS.map(app => h('div', {
+            key: app.key, className: 'world-app-card', 'data-world-app-card': app.key,
+            onClick: event => openCard(event, () => openPlugin(app.key)),
+          },
             h('span', { className: 'world-app-card-icon' }, h(app.icon, { size: 34 })),
             h('div', { className: 'world-app-card-info' }, h('strong', null, app.label), h('span', null, app.description)),
             h('button', { type: 'button', className: 'world-app-open', onClick: () => openPlugin(app.key) }, '打开'))),
-          h('div', { className: 'world-app-card', 'data-world-app-card': 'vscode' },
+          h('div', {
+            className: 'world-app-card', 'data-world-app-card': 'vscode',
+            onClick: event => openCard(event, () => { if (installedApps.has('vscode')) openVscode() }),
+          },
             h('span', { className: 'world-app-card-icon' }, h(VscodeGlyph, { size: 34 })),
             h('div', { className: 'world-app-card-info' }, h('strong', null, 'Visual Studio Code'), h('span', null, '轻量代码编辑器')),
             installedApps.has('vscode')
@@ -2159,7 +2382,10 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
                 h('button', { type: 'button', className: 'world-app-open', onClick: () => openVscode() }, '打开'),
                 h('button', { type: 'button', className: 'world-app-uninstall', onClick: uninstallVscode }, '卸载'))
               : h('button', { type: 'button', className: 'world-app-install', onClick: installVscode }, '安装')),
-          h('div', { className: 'world-app-card', 'data-world-app-card': 'lanchat' },
+          h('div', {
+            className: 'world-app-card', 'data-world-app-card': 'lanchat',
+            onClick: event => openCard(event, () => { if (installedApps.has('lanchat')) openLanChat() }),
+          },
             h('span', { className: 'world-app-card-icon' }, h(LanChatGlyph, { size: 34 })),
             h('div', { className: 'world-app-card-info' }, h('strong', null, '局域网聊天'), h('span', null, '发现局域网里的 dsh · 私聊群聊')),
             installedApps.has('lanchat')
@@ -2167,7 +2393,10 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
                 h('button', { type: 'button', className: 'world-app-open', onClick: openLanChat }, '打开'),
                 h('button', { type: 'button', className: 'world-app-uninstall', onClick: uninstallLanChat }, '卸载'))
               : h('button', { type: 'button', className: 'world-app-install', onClick: installLanChat }, '安装')),
-          h('div', { className: 'world-app-card', 'data-world-app-card': 'browser' },
+          h('div', {
+            className: 'world-app-card', 'data-world-app-card': 'browser',
+            onClick: event => openCard(event, () => { if (installedApps.has('browser')) openBrowser() }),
+          },
             h('span', { className: 'world-app-card-icon' }, h(BrowserGlyph, { size: 34 })),
             h('div', { className: 'world-app-card-info' }, h('strong', null, '浏览器'), h('span', null, '内置网页窗口 · 多标签')),
             installedApps.has('browser')
@@ -2175,9 +2404,36 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
                 h('button', { type: 'button', className: 'world-app-open', 'data-world-browser-open': true, onClick: openBrowser }, '打开'),
                 h('button', { type: 'button', className: 'world-app-uninstall', onClick: uninstallBrowser }, '卸载'))
               : h('button', { type: 'button', className: 'world-app-install', onClick: installBrowser }, '安装')),
+          h('div', {
+            className: 'world-app-card', 'data-world-app-card': 'terminal',
+            onClick: event => openCard(event, () => { if (installedApps.has('terminal')) openTerminal() }),
+          },
+            h('span', { className: 'world-app-card-icon' }, h(TerminalGlyph, { size: 34 })),
+            h('div', { className: 'world-app-card-info' }, h('strong', null, '终端'), h('span', null, '命令行窗口 · 在会话目录里跑命令')),
+            installedApps.has('terminal')
+              ? h(React.Fragment, null,
+                h('button', { type: 'button', className: 'world-app-open', 'data-world-terminal-open': true, onClick: openTerminal }, '打开'),
+                h('button', { type: 'button', className: 'world-app-uninstall', onClick: uninstallTerminal }, '卸载'))
+              : h('button', { type: 'button', className: 'world-app-install', onClick: installTerminal }, '安装')),
+          // 配置入口沉底：原生设置面板和注册了宿主页面的插件页面。
+          h('div', {
+            key: 'settings', className: 'world-app-card', 'data-world-app-card': 'settings',
+            onClick: event => openCard(event, openSettingsPanel),
+          },
+            h('span', { className: 'world-app-card-icon' }, h(SettingsGlyph, { size: 34 })),
+            h('div', { className: 'world-app-card-info' }, h('strong', null, '设置'), h('span', null, '原生设置面板 · 打开在 DSH 窗口里')),
+            h('button', { type: 'button', className: 'world-app-open', 'data-world-settings-open': true, onClick: openSettingsPanel }, '打开')),
+          ...HOST_PANELS.map(page => h('div', {
+            key: page.id, className: 'world-app-card', 'data-world-app-card': page.id,
+            onClick: event => openCard(event, () => openHostPage(page.id)),
+          },
+            h('span', { className: 'world-app-card-icon' }, h(PluginsGlyph, { size: 34 })),
+            h('div', { className: 'world-app-card-info' }, h('strong', null, page.label), h('span', null, page.note)),
+            h('button', { type: 'button', className: 'world-app-open', 'data-world-host-panel': page.id, onClick: () => openHostPage(page.id) }, '打开'))),
           h('div', { className: 'world-external-cards' },
             ...externalApps.map(app => h('div', {
               key: app.id, className: 'world-app-card', 'data-world-app-card': app.id,
+              onClick: event => openCard(event, () => openExternalApp(app.id)),
             },
               h('span', { className: 'world-app-card-icon' }, h(ExternalAppGlyph, { app, size: 34 })),
               h('div', { className: 'world-app-card-info' }, h('strong', null, app.name), h('span', null, app.description || '外部应用包')),
@@ -2186,7 +2442,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
           ),
         h('section', { className: 'world-start-group' },
           h('div', { className: 'world-start-group-title' }, '插件',
-            h('span', null, `${pluginApps.length} 个整页插件`)),
+            pluginApps.length ? h('span', null, `${pluginApps.length} 个整页插件`) : null),
           pluginApps.length === 0
             ? h('div', { className: 'world-start-empty' }, '未检测到注册整页的插件')
             : pluginApps.map(app => {
@@ -2201,7 +2457,19 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
                 h('strong', null, app.label),
                 h('span', null, win ? (win.state === 'min' ? '已最小化' : '运行中') : '整页插件')),
               h('span', { className: 'world-plugin-card-action' }, win && win.state !== 'min' ? '置顶' : '打开'))
-            }))))),
+            })))),
+      // 底部状态栏：助手个性化原本挂在顶部标题行，跟着那颗 18px 的「应用」大标题一起
+      // 和下面的分组标题撞名字；现在标题没了，个性化与键盘提示合成一条安静的页脚。
+      h('div', { className: 'world-start-foot' },
+        h('button', {
+          type: 'button', className: 'world-start-personalize',
+          'data-world-personalize': true, onClick: openPersonalization,
+        },
+        h('svg', { width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', 'aria-hidden': true },
+          h('path', { d: 'M4 7h10M18 7h2M4 17h4M12 17h8' }),
+          h('circle', { cx: 16, cy: 7, r: 2.2 }), h('circle', { cx: 10, cy: 17, r: 2.2 })),
+        '助手个性化'),
+        h('span', { className: 'world-start-hint' }, startTerm ? 'Enter 打开 · Esc 清空' : '方向键选择 · Enter 打开'))),
     h('div', { className: 'world-taskbar' },
       h('span', { className: 'world-version', 'data-world-version': WORLD_VERSION }, `world v${WORLD_VERSION}`),
       h('div', { className: 'world-taskbar-center' },
@@ -2301,6 +2569,13 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       onDragStart: beginBrowserDrag, onDragMove: moveBrowser, onDragEnd: endBrowserDrag,
       onResizeStart: beginBrowserResize, onActivate: () => setActiveWindow('browser'),
       onTakeOver: () => control.takeOver(),
+    }),
+    terminalOpen && installedApps.has('terminal') && h(TerminalWindow, {
+      rect: terminalRect, state: terminalState, rpc, session, active: activeWindow === 'terminal',
+      apps: launcherApps, onOpenApp: openLauncherApp,
+      onClose: closeTerminal, onMinimize: minimizeTerminal, onToggleMaximize: toggleMaximizeTerminal,
+      onDragStart: beginTerminalDrag, onDragMove: moveTerminal, onDragEnd: endTerminalDrag,
+      onResizeStart: beginTerminalResize, onActivate: () => setActiveWindow('terminal'),
     }),
     ...pluginWindows.map(win => {
       const holder = win.key.startsWith('holder:') ? holders.find(item => item.id === win.key) : null
@@ -2442,7 +2717,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
         onClick: () => { setContextMenu(null); dissolveHolder(menuEntry.holder) } }, '解散收纳盒'),
       h('button', { type: 'button', 'data-role': 'reposition', onClick: () => resetIconPosition(contextMenu.appId) }, '还原位置'),
       h('button', { type: 'button', 'data-role': 'rearrange', onClick: resetAllIconPositions }, '重排全部图标'),
-      menuEntry && (menuEntry.kind === 'external' || ['vscode', 'lanchat', 'browser'].includes(menuEntry.id))
+      menuEntry && (menuEntry.kind === 'external' || ['vscode', 'lanchat', 'browser', 'terminal'].includes(menuEntry.id))
         ? h('button', { type: 'button', className: 'is-danger', 'data-role': 'uninstall', onClick: () => menuUninstall(contextMenu.appId) }, '卸载')
         : menuEntry?.kind === 'app'
           ? h('div', { className: 'world-context-note', 'data-role': 'protected' }, menuEntry.id === 'dsh' ? 'DSH 主应用不可卸载' : '内置应用不可卸载')

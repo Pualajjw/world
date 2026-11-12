@@ -19,6 +19,9 @@ import { createDesktopBrain } from './desktop-brain.js'
 import { registerWorkbench } from './workbench.js'
 import { createJournalStore, registerJournalTools } from './journal.js'
 import { createTasksStore, registerTasksTools } from './tasks.js'
+import { createWorldTerminal } from './terminal.js'
+import { createWorldSsh } from './ssh.js'
+import { createWorkspaceRoots, discoverToolDirs } from './workspace-roots.js'
 
 export const name = 'world'
 export const inject = ['fs', 'connection', 'sessions', 'sandboxPolicy', 'sessionController', 'agents']
@@ -166,6 +169,11 @@ export function apply(ctx) {
 
   // list 是「打开文件夹」对话框：只列子目录，读写仍按 root + sandbox policy 校验。
   serve(ctx, 'world-vscode-source', ['open', 'save', 'list', 'reveal', 'probe'], editor, 'WORLD_VSCODE_SOURCE')
+  // 插件留下的可打开目录（IMA 虚拟工作区、PB 工程工作区）与 pbnpm 的安装位置。
+  // 探测只读文件系统，不写、也不替别的插件做授权。
+  const toolDirs = () => discoverToolDirs(import.meta.dirname)
+  const roots = createWorkspaceRoots(ctx, { FsError, toolDirs })
+  serve(ctx, 'world-vscode-roots', ['scan'], roots, 'WORLD_VSCODE_ROOTS')
   serve(ctx, 'world-desktop', ['connect', 'poll', 'reply', 'disconnect', 'update'], desktop, 'WORLD_DESKTOP_ACTION')
   serve(ctx, 'world-desktop-brain', ['get', 'bind', 'configure', 'update_profile'], brain, 'WORLD_DESKTOP_BRAIN')
   // 自动推进的刹车：暂停只停「新轮次」，不动当前这一轮，也不撤销桌面授权。
@@ -183,5 +191,19 @@ export function apply(ctx) {
     const git = createVscodeGit(ctx, { FsError, writableRoots, subprocess: scope.subprocess })
     scope.effect(() => () => git.dispose(), 'world: VSCode git')
     serve(scope, 'world-vscode-git', ['status', 'stage', 'unstage', 'commit', 'pull', 'push'], git, 'WORLD_VSCODE_GIT')
+  })
+
+  // 终端：每条命令一个子进程，走同一个注入——没有子进程服务的宿主里窗口会自己报错，
+  // 其余桌面功能不受影响。
+  ctx.inject(['subprocess'], scope => {
+    const terminal = createWorldTerminal(ctx, { FsError, subprocess: scope.subprocess, toolDirs })
+    scope.effect(() => () => terminal.dispose(), 'world: terminal')
+    serve(scope, 'world-terminal', ['info', 'run', 'poll', 'cancel', 'chdir', 'complete'], terminal, 'WORLD_TERMINAL')
+
+    // SSH 会话和终端共用同一套子进程注入：没有子进程服务的宿主里，窗口会自己报错，
+    // 但不会影响桌面上的其它东西。
+    const ssh = createWorldSsh(ctx, { FsError, subprocess: scope.subprocess })
+    scope.effect(() => () => ssh.dispose(), 'world: ssh sessions')
+    serve(scope, 'world-ssh', ['hosts', 'open', 'run', 'poll', 'cancel', 'cd', 'complete', 'key', 'trust'], ssh, 'WORLD_SSH')
   })
 }

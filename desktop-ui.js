@@ -21,6 +21,7 @@ function rootsFor(id) {
       && (node.matches('[role="dialog"],[role="alertdialog"],[role="menu"],[role="listbox"]') || node.querySelector('[role="dialog"],[role="alertdialog"],[role="menu"],[role="listbox"]')))].filter(Boolean)
   if (id === 'browser') root = document.querySelector('.world-browser-window')
   else if (id === 'lanchat') root = document.querySelector('.world-lanchat-window')
+  else if (id === 'terminal') root = document.querySelector('.world-terminal-window')
   else if (id.startsWith('plugin:')) root = [...document.querySelectorAll('[data-world-plugin]')].find(node => node.dataset.worldPlugin === id.slice(7))
   else if (id.startsWith('vscode:')) root = [...document.querySelectorAll('[data-world-vscode-key]')].find(node => node.dataset.worldVscodeKey === id.slice(7))
   else if (id.startsWith('ext:')) root = [...document.querySelectorAll('[data-world-app-id]')].find(node => node.dataset.worldAppId === id.slice(4))
