@@ -14,9 +14,14 @@ export async function checkWindowRestore(page, appWindow, id, reopenFromStart) {
   const maximized = await bounds()
   assert.deepEqual(maximized, { x: 0, y: 40, width: 1280, height: 712 }, `${id}: fills the existing desktop area`)
 
+  // 点已经在前台的窗口 = 收回任务栏（Windows 的手感）；再点一次，最大化状态还在
+  await taskbar.click()
+  assert.equal(await appWindow.isVisible(), false,
+    `${id}: clicking the active taskbar item minimizes the window`)
+  assert.equal(await taskbar.evaluate(element => element.classList.contains('is-min')), true)
   await taskbar.click()
   assert.equal(await appWindow.evaluate(element => element.classList.contains('is-max')), true,
-    `${id}: clicking an already visible taskbar item preserves maximization`)
+    `${id}: coming back from the taskbar keeps it maximized`)
   assert.deepEqual(await bounds(), maximized)
 
   const minimizeAndRestore = async restore => {

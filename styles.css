@@ -119,6 +119,14 @@ body[data-world-window="max"][data-world-active-kind="plugin"] #root { z-index: 
 body[data-world-active-kind="vscode"] .world-window-frame,
 body[data-world-active-kind="plugin"] .world-window-frame { z-index: 3 !important; }
 body[data-world-active-kind="plugin"] .world-vscode-window { z-index: 3; }
+/* Keep the native caption at the viewport top when #root becomes a virtual
+   window. Its height comes from the host; web/fullscreen hosts reserve no row. */
+.world-desktop-titlebar {
+  position: fixed; inset: 0 0 auto;
+  height: var(--dsh-windows-titlebar-height, 0px); z-index: 99;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
 /* The host's native caption pseudo-element moves with #root into the simulated
    window. Its Electron drag region would swallow pointer events from our
    titlebar, including the three window buttons, so opened content is no-drag. */
@@ -225,6 +233,17 @@ body[data-world-adjusting="true"] .world-window-frame { transition: none; }
 }
 .world-window-frame:not(.is-max) .world-titlebar { cursor: move; }
 .world-title { min-width: 0; height: 100%; flex: 1; display: flex; align-items: center; gap: 10px; padding-left: 14px; }
+.world-title.has-sidebar-control { padding-left: 54px; }
+.world-sidebar-toggle {
+  position: absolute; left: 12px; top: calc((40px - 28px) / 2); width: 28px; height: 28px;
+  display: grid; place-items: center; padding: 0; border: 0; border-radius: var(--dsw-radius-sm, 4px);
+  background: transparent; color: var(--world-muted); cursor: pointer; -webkit-app-region: no-drag;
+}
+.world-sidebar-toggle:hover { background: var(--world-hover); color: var(--world-ink); }
+.world-sidebar-toggle:focus-visible { outline: 1px solid var(--world-accent); }
+/* Windows caption toggles use viewport-fixed coordinates; the virtual caption owns that control now. */
+html[data-windows-titlebar] body:has([data-world-sidebar-toggle]) #root [data-sidebar-toggle],
+body:has([data-world-sidebar-toggle]) #root [data-sidebar-opener] { display: none !important; }
 .world-title span { overflow: hidden; color: var(--world-ink); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .world-window-controls { height: 100%; flex: 0 0 auto; display: flex; }
 .world-cap {
@@ -2580,6 +2599,11 @@ body[data-world-wall-tone="dark"] .world-icon-label {
   min-height: 0; flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 16px;
   padding: 14px 18px 10px;
 }
+.world-mobile-body { align-items: center; text-align: center; }
+.world-mobile-network { display: flex; align-items: center; gap: inherit; max-width: 100%; }
+.world-mobile-network select { min-width: 0; max-width: 100%; font: inherit; color: var(--world-ink); background: var(--world-surface-1); }
+.world-mobile-qr { width: 240px; max-width: 100%; aspect-ratio: 1; flex: none; }
+.world-mobile-qr svg { display: block; width: 100%; height: 100%; }
 .world-wallpaper-section > span {
   display: block; margin-bottom: 8px; color: var(--world-muted); font-size: 11px; letter-spacing: .04em;
 }
@@ -2742,3 +2766,116 @@ body[data-world-active-kind="terminal"] .world-window-frame { z-index: 3 !import
 }
 .world-term-trust { color: var(--world-term-ansi-3); }
 body[data-world-active-kind="terminal"] .world-terminal-window.is-remote { --world-term-accent: var(--world-term-ansi-5); }
+
+/* Phone desktop: four columns, one foreground app, and a persistent home / app switcher. */
+.world-phone-status { display: none; }
+@media (max-width: 600px) {
+  :root {
+    --world-phone-status-height: 32px;
+    --world-desktop-top: calc(var(--dsh-windows-titlebar-height, 0px) + var(--world-phone-status-height));
+  }
+  body[data-world-layout="phone"] {
+    --world-win-x: 0vw !important;
+    --world-win-y: var(--world-desktop-top) !important;
+    --world-win-w: 100vw !important;
+    --world-win-h: calc(100vh - var(--world-desktop-top) - var(--world-taskbar-height)) !important;
+  }
+  body[data-world-layout="phone"] [data-world-phone-hidden] {
+    visibility: hidden !important; pointer-events: none !important;
+  }
+  .world-phone-status {
+    position: fixed; top: var(--dsh-windows-titlebar-height, 0px); left: 0; right: 0;
+    z-index: 102; height: var(--world-phone-status-height); box-sizing: border-box;
+    display: flex; align-items: center; padding: 0 16px;
+    background: var(--world-surface); color: var(--world-ink); font: 12px var(--world-font);
+    -webkit-app-region: no-drag;
+  }
+  .world-phone-status .world-clock {
+    position: absolute; top: 0; right: 16px;
+    z-index: 103; height: var(--world-phone-status-height); padding: 0;
+    display: flex; align-items: center; font-weight: 600; font-variant-numeric: tabular-nums;
+  }
+  .world-clock .world-date, .world-taskbar-center, .world-taskbar .world-version,
+  .world-taskbar .world-depth-toggle { display: none; }
+  .world-icons, .world-icons.is-plane {
+    inset: calc(var(--world-desktop-top) + 12px) 12px calc(var(--world-taskbar-height) + 12px);
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-rows: 96px;
+    align-content: start; gap: 8px; overflow-x: hidden; overflow-y: auto;
+    pointer-events: auto; touch-action: pan-y;
+    --world-icon-size: 96px !important; --world-icon-font: 12px !important;
+  }
+  .world-icons > .world-desktop-icon {
+    position: static !important; width: 100%; height: 96px;
+    transform: none !important; z-index: auto !important; border-color: transparent;
+    padding: 6px 2px 4px; gap: 6px; border-radius: 12px; touch-action: pan-y;
+  }
+  .world-icons .world-glyph { width: 48px; height: 48px; flex: none; }
+  .world-icons .world-glyph > svg { width: 48px; height: 48px; }
+  .world-icons .world-icon-label {
+    max-width: 100%; font-size: 12px; line-height: 15px; transform: none !important;
+    -webkit-line-clamp: 2;
+  }
+  .world-icons .world-walker, .world-floor-wrap { display: none !important; }
+  .world-phone-nav { display: grid; grid-template-columns: repeat(3, 1fr); flex: 1; min-width: 0; height: 100%; }
+  .world-phone-nav button, .world-phone-nav .world-start-button {
+    width: 100%; height: 100%; display: grid; place-items: center; padding: 0;
+    border: 0; border-radius: 0; background: transparent; color: var(--world-ink); cursor: pointer;
+  }
+  .world-phone-nav button:hover, .world-phone-nav button[aria-expanded="true"] { background: var(--world-hover); }
+  .world-phone-nav button:focus-visible { outline: 2px solid var(--world-accent); outline-offset: -3px; }
+  .world-taskbar-right { flex: none; margin: 0; padding-right: 4px; }
+  .world-phone-switcher {
+    position: fixed; inset: var(--world-desktop-top) 0 var(--world-taskbar-height); z-index: 101;
+    display: flex; flex-direction: column; padding: 16px; box-sizing: border-box;
+    background: var(--world-surface); color: var(--world-ink); font: 13px var(--world-font);
+  }
+  .world-phone-switcher header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .world-phone-switcher header button {
+    min-height: 40px; padding: 0 12px; border: 0; border-radius: 8px;
+    background: var(--world-surface-2); color: inherit; font: inherit; cursor: pointer;
+  }
+  .world-phone-running { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding-top: 16px; }
+  .world-phone-running > button {
+    display: flex; align-items: center; gap: 12px; flex: none; width: 100%; min-height: 72px;
+    padding: 12px; border: 1px solid var(--world-line); border-radius: 12px;
+    background: var(--world-surface-1); color: inherit; text-align: left; font: inherit; cursor: pointer;
+  }
+  .world-phone-running > button:hover { background: var(--world-hover); }
+  .world-phone-running-icon { flex: none; display: grid; place-items: center; width: 40px; height: 40px; }
+  .world-phone-running > button > span:last-child { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+  .world-phone-running strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+  .world-phone-running small { color: var(--world-muted); }
+  .world-start { left: 0; top: var(--world-desktop-top); bottom: var(--world-taskbar-height); width: 100%; max-height: none; border-radius: 0; transform: translateY(14px); }
+  .world-start.open { transform: none; }
+  .world-start-foot { flex-wrap: wrap; }
+  .world-start-hint { display: none; }
+
+  body[data-world-layout="phone"] :is(.world-window-frame,.world-vscode-window,.world-plugin-window),
+  body[data-world-layout="phone"]:is([data-world-window="normal"],[data-world-window="max"]) #root {
+    left: 0 !important; top: var(--world-desktop-top) !important; width: 100vw !important;
+    height: calc(100vh - var(--world-desktop-top) - var(--world-taskbar-height)) !important;
+    min-width: 0 !important; min-height: 0 !important; border-radius: 0 !important; box-shadow: none !important;
+    transition: none;
+  }
+  .world-titlebar, .world-vscode-titlebar, .world-plugin-titlebar { cursor: default !important; }
+  :is(.world-titlebar,.world-vscode-titlebar,.world-plugin-titlebar) button:is([aria-label="最大化"],[aria-label="还原"]) { display: none; }
+  .world-resize-handle, .world-vscode-resize, .world-plugin-resize { display: none; }
+  body[data-world-layout="phone"] > [data-world-dialog] {
+    --world-dialog-x: 0vw !important; --world-dialog-y: var(--world-desktop-top) !important;
+    --world-dialog-w: 100vw !important;
+    --world-dialog-h: calc(100vh - var(--world-desktop-top) - var(--world-taskbar-height)) !important;
+  }
+  .world-vscode-body { position: relative; }
+  .world-vscode-sidebar {
+    position: absolute; top: 0; bottom: 0; left: 48px; z-index: 4;
+    width: min(260px, calc(100% - 48px)) !important; min-width: 0; max-width: calc(100% - 48px);
+  }
+  .world-vscode-picker-foot, .world-vscode-picker-actions { flex-wrap: wrap; }
+  .world-journal { flex-direction: column; }
+  .world-journal .world-journal-list { width: 100%; flex: 0 0 40%; border-right: 0; border-bottom: 1px solid var(--world-line); }
+  .world-journal-detail { overflow: auto; }
+  .world-journal-detail textarea { min-height: 96px; }
+  .world-browser-toolbar { padding: 0 4px; gap: 2px; }
+  .world-browser-home, .world-browser-error { padding: 16px; overflow: auto; }
+  .world-browser-home-form { width: 100%; }
+}

@@ -696,6 +696,21 @@ export function TerminalWindow({
     onOpenApp?.(hit.id)
   }
 
+  /**
+   * 关窗口前先说清会丢什么：正在跑的命令会被中断，远程会话会断开。
+   * `exit` 与标题栏的关闭键都走这里，免得「手滑关掉」把跑了半天的构建扔掉。
+   */
+  const requestClose = () => {
+    const running = Boolean(jobRef.current) || Boolean(startingRef.current)
+    const host = remoteRef.current?.hostName
+    if (running || host) {
+      const what = [running ? '还有命令在跑，关闭会中断它' : '', host ? `还连着 ${host}，关闭会断开远程会话` : '']
+        .filter(Boolean).join('；')
+      if (!window.confirm(`${what}。仍要关闭吗？`)) return
+    }
+    onClose()
+  }
+
   /** 排到队尾：命令还在跑时敲的东西按顺序等着，输出顺序才不会串。 */
   const enqueue = line => {
     queueRef.current.push(line)
@@ -735,7 +750,7 @@ export function TerminalWindow({
     if (/^exit$/iu.test(line)) {
       echoPrompt(line)
       if (remoteRef.current) disconnect()
-      else onClose()
+      else requestClose()
       return
     }
     if (/^(logout|disconnect)$/iu.test(line)) { echoPrompt(line); disconnect(); return }
@@ -1072,7 +1087,7 @@ export function TerminalWindow({
       h(Cap, { label: maximized ? '还原' : '最大化', onClick: onToggleMaximize },
         h('svg', { width: 10, height: 10, viewBox: '0 0 10 10', 'aria-hidden': true },
           h('rect', { x: 0.5, y: 0.5, width: 9, height: 9, fill: 'none', stroke: 'currentColor', strokeWidth: 1 }))),
-      h(Cap, { label: '关闭', close: true, onClick: onClose },
+      h(Cap, { label: '关闭', close: true, onClick: requestClose },
         h('svg', { width: 10, height: 10, viewBox: '0 0 10 10', 'aria-hidden': true },
           h('path', { d: 'M0 0l10 10M10 0L0 10', stroke: 'currentColor', strokeWidth: 1 }))))),
   fatal

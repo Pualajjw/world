@@ -241,9 +241,15 @@ test('the shell argv uses the platform command switch and merges stderr', async 
     // Windows 上命令落成临时批处理：引号和括号才不会被 cmd 吃掉
     assert.match(spec.argv.at(-1), /\.cmd$/u)
     const script = await readFile(spec.argv.at(-1), 'utf8')
-    assert.match(script, /echo hi/u)
-    assert.match(script, /call :dsh_cmd 2>&1/u)
     assert.match(script, /chcp 65001/u)
+    // 命令在子文件里，外层只 `call` 它：这样 PATH 里的 .cmd 垫片（pbnpm.cmd）
+    // 才不会把 `call :dsh_cmd` 的子程序返回位置弄丢
+    const bodyPath = /call "([^"]+)"/u.exec(script)?.[1]
+    assert.ok(bodyPath, `outer script should call a body file: ${script}`)
+    assert.ok(!/:dsh_cmd/u.test(script), 'the label subroutine is gone')
+    const body = await readFile(bodyPath, 'utf8')
+    assert.match(body, /echo hi/u)
+    assert.match(body, /exit \/b %ERRORLEVEL%/u)
   } else {
     assert.ok(spec.argv.at(-1).endsWith('echo hi 2>&1'), spec.argv.join(' '))
   }
@@ -274,6 +280,23 @@ test('pbnpm is put on PATH with a wrapper that fixes its GBK output', async t =>
   const wrapper = await readFile(join(parts[0], 'pbnpm.cmd'), 'utf8')
   assert.match(wrapper, /pbnpm-run\.mjs/u)
   assert.match(wrapper, /pbnpm\.exe.*%\*/u)
+  // 宿主的 execPath 是 DeepSeek Harness.exe：必须显式进 node 模式，否则包装会当 GUI 启动
+  assert.match(wrapper, /set "ELECTRON_RUN_AS_NODE=1"/u)
+})
+
+test('a .cmd shim on PATH still runs (the label subroutine is gone)', async t => {
+  if (process.platform !== 'win32') return
+  const shim = await realpath(await mkdtemp(join(tmpdir(), 'world-shim-')))
+  await writeFile(join(shim, 'world-shim.cmd'), '@echo off\r\necho hi-from-shim\r\nexit /b 7\r\n')
+  t.after(() => rm(shim, { recursive: true, force: true }))
+  const previous = process.env.PATH
+  process.env.PATH = `${shim};${previous}`
+  t.after(() => { process.env.PATH = previous })
+  const { workspace, service } = await setup(t)
+  // 这条曾经会报「找不到批处理标签 dsh_cmd」：批处理垫片把 call :label 的返回位置弄丢了
+  const done = await run(service, workspace, 'world-shim')
+  assert.match(done.output, /hi-from-shim/u)
+  assert.equal(done.exitCode, 7)
 })
 
 test('without pbnpm the terminal leaves PATH alone', async t => {

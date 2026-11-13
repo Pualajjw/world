@@ -29,9 +29,11 @@ import { FileLinkGlyph, HolderGlyph, HolderPage, RenameDialog } from './holder-a
 import { openNativeSettings } from './native-settings.js'
 import { HOST_PANELS, openHostPanel } from './host-panels.js'
 import { version as WORLD_VERSION } from './package.json'
+import { PHONE_BREAKPOINT, isPhoneViewport, fitSavedDesktopRect } from './responsive.js'
 import { WorkbenchSetup } from './workbench-setup.js'
 import { readWallpaper, saveWallpaper, wallpaperFor, wallpaperStyle, wallpaperTone } from './wallpaper.js'
 import { WallpaperPanel } from './wallpaper-panel.js'
+import { MobileConnect, MobileGlyph } from './mobile-connect.js'
 import { activityTiming } from './assistant-activity.js'
 import { createConversationSeat } from './conversation-seat.js'
 import { captureDesktopScreenshot } from './desktop-shot.js'
@@ -57,6 +59,11 @@ const FILE_LINKS_KEY = 'dsh.world.fileLinks'
 const HOLDERS_KEY = 'dsh.world.holders'
 const KNOWN_APPS = ['vscode', 'lanchat', 'browser', 'terminal']
 const TASKBAR_HEIGHT = 48
+/** 窗口最小尺寸（CSS 像素）：主窗口过去没有下限，能被拖成一条 2px 的缝，找不回来。 */
+const MIN_WINDOW_WIDTH = 720
+const MIN_WINDOW_HEIGHT = 480
+/** 甩到桌面顶边多近算「要最大化」（CSS 像素）。 */
+const TOP_SNAP_SLACK = 6
 const DEFAULT_POSITION = { x: 20, y: 9, w: 60, h: 68 }
 const EMPTY_APPS = []
 const NOOP_SUBSCRIBE = () => () => {}
@@ -197,7 +204,7 @@ function saveHolders(value) {
 function readLanChatRect() {
   try {
     const value = JSON.parse(window.localStorage.getItem(LANCHAT_STORAGE_KEY) || 'null')
-    if (Number.isFinite(value?.x) && Number.isFinite(value?.y)) return clampVscodeRect(value)
+    if (Number.isFinite(value?.x) && Number.isFinite(value?.y)) return fitSavedDesktopRect(value, clampVscodeRect)
   } catch {}
   return defaultVscodeRect()
 }
@@ -205,7 +212,7 @@ function readLanChatRect() {
 function readBrowserRect() {
   try {
     const value = JSON.parse(window.localStorage.getItem(BROWSER_STORAGE_KEY) || 'null')
-    if (Number.isFinite(value?.x) && Number.isFinite(value?.y)) return clampVscodeRect(value)
+    if (Number.isFinite(value?.x) && Number.isFinite(value?.y)) return fitSavedDesktopRect(value, clampVscodeRect)
   } catch {}
   return defaultVscodeRect()
 }
@@ -213,7 +220,7 @@ function readBrowserRect() {
 function readTerminalRect() {
   try {
     const value = JSON.parse(window.localStorage.getItem(TERMINAL_STORAGE_KEY) || 'null')
-    if (Number.isFinite(value?.x) && Number.isFinite(value?.y)) return clampVscodeRect(value)
+    if (Number.isFinite(value?.x) && Number.isFinite(value?.y)) return fitSavedDesktopRect(value, clampVscodeRect)
   } catch {}
   return defaultVscodeRect()
 }
@@ -233,7 +240,7 @@ function defaultVscodeRect() {
 function readVscodeRect() {
   try {
     const value = JSON.parse(window.localStorage.getItem(VSCODE_STORAGE_KEY) || 'null')
-    if (Number.isFinite(value?.x) && Number.isFinite(value?.y)) return clampVscodeRect(value)
+    if (Number.isFinite(value?.x) && Number.isFinite(value?.y)) return fitSavedDesktopRect(value, clampVscodeRect)
   } catch {}
   return defaultVscodeRect()
 }
@@ -271,8 +278,10 @@ function clampRect(rect) {
   const minY = desktopTop / height * 100
   const maxWidth = 100
   const maxHeight = Math.max(0, (height - desktopTop - TASKBAR_HEIGHT) / height * 100)
-  const w = Math.min(maxWidth, Math.max(0, Number(rect?.w) || 0))
-  const h = Math.min(maxHeight, Math.max(0, Number(rect?.h) || 0))
+  const minW = Math.min(width, MIN_WINDOW_WIDTH) / width * 100
+  const minH = Math.min(Math.max(0, height - desktopTop - TASKBAR_HEIGHT), MIN_WINDOW_HEIGHT) / height * 100
+  const w = Math.min(maxWidth, Math.max(minW, Number(rect?.w) || minW))
+  const h = Math.min(maxHeight, Math.max(minH, Number(rect?.h) || minH))
   const x = Math.min(100 - w, Math.max(0, Number(rect?.x) || 0))
   const maxY = Math.max(minY, (height - TASKBAR_HEIGHT - height * h / 100) / height * 100)
   return {
@@ -283,10 +292,28 @@ function clampRect(rect) {
   }
 }
 
+/** 指针在桌面顶边松手：按 Windows 的手感把这个窗口最大化，而不是留一条贴在标题栏下的缝。 */
+function droppedOnTopEdge(event) {
+  const top = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--dsh-windows-titlebar-height')) || 0
+  return event.clientY <= top + TOP_SNAP_SLACK
+}
+
+/**
+ * 这次拖动到底动没动（不是点了一下）。
+ * 不能只看窗口坐标有没有变：窗口已经贴在顶边时再往上拖，clamp 之后位置一个像素都不变，
+ * 那种情况恰恰是最想「甩到顶部」的一次。
+ */
+function dragTraveled(event, drag) {
+  const x = Number.isFinite(drag?.startX) ? drag.startX : drag?.x
+  const y = Number.isFinite(drag?.startY) ? drag.startY : drag?.y
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return false
+  return Math.hypot(event.clientX - x, event.clientY - y) >= 4
+}
+
 function readPosition() {
   try {
     const stored = JSON.parse(window.localStorage.getItem(STORAGE_KEY) || 'null')
-    if (Number.isFinite(stored?.x) && Number.isFinite(stored?.y)) return clampRect({ ...DEFAULT_POSITION, ...stored })
+    if (Number.isFinite(stored?.x) && Number.isFinite(stored?.y)) return fitSavedDesktopRect({ ...DEFAULT_POSITION, ...stored }, clampRect)
   } catch {}
   return DEFAULT_POSITION
 }
@@ -303,12 +330,19 @@ function saveRect(key, rect) {
 function usePortalContainer() {
   const [container, setContainer] = React.useState(null)
   React.useLayoutEffect(() => {
+    // Electron combines drag regions in document order. Place the native row
+    // before the host menus so their no-drag regions keep accepting clicks.
+    const titlebar = document.createElement('div')
+    titlebar.className = 'world-desktop-titlebar'
+    titlebar.dataset.worldPortal = 'dsh-world-titlebar'
+    titlebar.setAttribute('aria-hidden', 'true')
+    document.body.prepend(titlebar)
     const node = document.createElement('div')
     node.dataset.worldPortal = 'dsh-world'
     node.style.display = 'contents'
     document.body.append(node)
     setContainer(node)
-    return () => node.remove()
+    return () => { node.remove(); titlebar.remove() }
   }, [])
   return container
 }
@@ -331,7 +365,7 @@ function useHostWindow(state, position) {
         const frame = overlay?.parentElement
         if (frame) for (const sibling of frame.children) if (sibling !== overlay) locked.add(sibling)
         for (const sibling of body.children) {
-          if (sibling !== root && sibling.dataset.worldPortal !== 'dsh-world'
+          if (sibling !== root && sibling.dataset.worldPortal !== 'dsh-world' && sibling.dataset.worldPortal !== 'dsh-world-titlebar'
             && sibling.dataset.windowsMenu === undefined && sibling.dataset.worldDialog === undefined) locked.add(sibling)
         }
       }
@@ -366,9 +400,69 @@ function useHostWindow(state, position) {
         else body.style.removeProperty(name)
       }
     }
-  }, [state, position.x, position.y])
+  }, [state, position.x, position.y, position.w, position.h])
 
   return rootReady
+}
+
+/** Mirror the native layout state; the Host remains the only owner of sidebar visibility. */
+function useHostSidebar() {
+  const [sidebar, setSidebar] = React.useState(null)
+  React.useLayoutEffect(() => {
+    const sync = () => {
+      const root = document.getElementById('root')
+      const frame = root?.querySelector('[data-shell-overlay]')?.parentElement
+      const nativeToggle = root?.querySelector('[data-sidebar-toggle],[data-sidebar-opener]')
+      const next = frame && nativeToggle ? { collapsed: frame.hasAttribute('data-sidebar-collapsed'), blocked: root.inert } : null
+      setSidebar(previous => previous?.collapsed === next?.collapsed && previous?.blocked === next?.blocked ? previous : next)
+    }
+    sync()
+    const observer = new MutationObserver(sync)
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true,
+      attributeFilter: ['data-sidebar-collapsed', 'inert'] })
+    return () => observer.disconnect()
+  }, [])
+  return sidebar
+}
+
+/** Keep background apps mounted, but remove them from phone input and keyboard navigation. */
+function usePhoneWindows(phone, activeWindow) {
+  React.useLayoutEffect(() => {
+    if (!phone) return
+    const previous = new Map()
+    const sync = () => {
+      for (const node of document.querySelectorAll('.world-window-frame,.world-vscode-window,.world-plugin-window,body > [data-world-dialog]')) {
+        if (node.dataset.worldAssistantDialog === 'true') continue
+        const id = node.classList.contains('world-window-frame') ? 'dsh'
+          : node.dataset.worldPlugin ? `plugin:${node.dataset.worldPlugin}`
+          : node.dataset.worldDialog ? `plugin:${node.dataset.worldDialog}`
+          : node.dataset.worldAppId ? `ext:${node.dataset.worldAppId}`
+          : node.dataset.worldVscodeKey ? `vscode:${node.dataset.worldVscodeKey}`
+          : node.classList.contains('world-lanchat-window') ? 'lanchat' : node.dataset.worldApp
+        if (!previous.has(node)) previous.set(node, node.inert)
+        const hidden = id !== activeWindow
+        node.toggleAttribute('data-world-phone-hidden', hidden)
+        node.inert = hidden || previous.get(node)
+      }
+    }
+    sync()
+    const observer = new MutationObserver(sync)
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-world-dialog'] })
+    return () => {
+      observer.disconnect()
+      for (const [node, inert] of previous) {
+        node.inert = inert
+        node.removeAttribute('data-world-phone-hidden')
+      }
+    }
+  }, [phone, activeWindow])
+}
+
+function PhoneGlyph({ kind }) {
+  return h('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, 'aria-hidden': true },
+    kind === 'home' ? h('circle', { cx: 12, cy: 12, r: 7 })
+      : kind === 'recent' ? h('rect', { x: 5, y: 5, width: 14, height: 14, rx: 2 })
+        : h('path', { d: 'M5 6h14M5 12h14M5 18h14', strokeLinecap: 'round' }))
 }
 
 /** 开始菜单 / 桌面上的「设置」图标：一个齿轮，跟桌面其它图标一样用 currentColor。 */
@@ -447,8 +541,10 @@ function AssistantActivity({ activity, control }) {
     h('span', { 'data-world-assistant-timing': true }, activityTiming(host, now)))
 }
 
-function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, catalog, conversationSeat, getDirectoryPicker, openSettings, openPanel }) {
+function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, catalog, conversationSeat, getDirectoryPicker, openSettings, openPanel, toggleSidebar }) {
   const portal = usePortalContainer()
+  const hostSidebar = useHostSidebar()
+  const sidebarControl = hostSidebar && typeof toggleSidebar === 'function'
   const catalogApi = catalog || EMPTY_CATALOG
   const pluginApps = React.useSyncExternalStore(catalogApi.subscribe, catalogApi.getSnapshot)
   const [journalClient] = React.useState(() => createJournalClient(rpc))
@@ -500,10 +596,16 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const [pluginWindows, setPluginWindows] = React.useState([])
   const [session, setSession] = React.useState(() => currentMainSession(sessions))
   const [activeWindow, setActiveWindow] = React.useState('dsh')
+  const [phone, setPhone] = React.useState(isPhoneViewport)
+  const [phoneRecent, setPhoneRecent] = React.useState(false)
+  const desktopFocusRef = React.useRef('dsh')
+  const phoneDesktopRects = React.useRef(new Map())
+  const recentRef = React.useRef(null)
   const [clock, setClock] = React.useState(null)
   const [depth, setDepth] = React.useState(readDepth)
   const [wallpaper, setWallpaper] = React.useState(readWallpaper)
   const [wallpaperOpen, setWallpaperOpen] = React.useState(false)
+  const [mobileOpen, setMobileOpen] = React.useState(false)
 
   React.useEffect(() => {
     const syncTheme = () => {
@@ -599,12 +701,43 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   vscodeWindowsRef.current = vscodeWindows
   vscodeDirtyRef.current = vscodeDirty
 
+  React.useLayoutEffect(() => {
+    const media = window.matchMedia(`(max-width: ${PHONE_BREAKPOINT}px)`)
+    const sync = () => {
+      if (media.matches) desktopFocusRef.current = activeWindowRef.current
+      else if (activeWindowRef.current === 'desktop') setActiveWindow(desktopFocusRef.current)
+      setPhone(media.matches)
+      setPhoneRecent(false)
+    }
+    media.addEventListener('change', sync)
+    return () => media.removeEventListener('change', sync)
+  }, [])
+  React.useLayoutEffect(() => {
+    document.body.dataset.worldLayout = phone ? 'phone' : 'desktop'
+    return () => { delete document.body.dataset.worldLayout }
+  }, [phone])
+  React.useLayoutEffect(() => {
+    if (!phone) return
+    for (const [id, rect] of [['dsh', position], ['browser', browserRect], ['terminal', terminalRect], ['lanchat', lanChatRect],
+      ...vscodeWindows.map(win => [`vscode:${win.key}`, win.rect]), ...pluginWindows.map(win => [`plugin:${win.key}`, win.rect])]) {
+      if (!phoneDesktopRects.current.has(id)) phoneDesktopRects.current.set(id, rect)
+    }
+  }, [phone, position, browserRect, terminalRect, lanChatRect, vscodeWindows, pluginWindows])
+  usePhoneWindows(phone, phoneRecent ? 'desktop' : activeWindow)
+  React.useEffect(() => {
+    if (!phoneRecent) return
+    recentRef.current?.querySelector('button')?.focus()
+    const onKeyDown = event => { if (event.key === 'Escape') { event.preventDefault(); setPhoneRecent(false) } }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [phoneRecent])
+
   const showNotice = message => {
     setNotice(message)
     window.clearTimeout(noticeTimer.current)
     noticeTimer.current = window.setTimeout(() => setNotice(''), 2600)
   }
-  const rootReady = useHostWindow(state, position)
+  const rootReady = useHostWindow(phone && (activeWindow !== 'dsh' || phoneRecent) && state !== 'closed' ? 'min' : state, position)
   const brainCall = async (operation, payload, signal) => {
     const request = ++brainRequest.current
     const result = await rpc.call('/api', `world-desktop-brain/${operation}`, payload, signal)
@@ -686,7 +819,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     update()
     const timer = window.setInterval(update, 1000)
     return () => window.clearInterval(timer)
-  }, [])
+  }, [phone])
 
   // 3D 景深：把指针位置写进 CSS 变量，让地面网格与光晕做反向视差。
   // 只移动壁纸层，图标列与窗口保持原坐标，拖拽/点击/测试用的 rect 都不受影响。
@@ -736,11 +869,11 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   React.useEffect(() => {
     const container = iconsRef.current
     if (!container) return
-    const apply = () => layoutDeskIcons(container, depth, iconPositionsRef.current[depth ? 'depth' : 'flat'])
+    const apply = () => { if (!isPhoneViewport()) layoutDeskIcons(container, depth, iconPositionsRef.current[depth ? 'depth' : 'flat']) }
     // 拖窗口时 resize 一秒能来几十次，重排要等这一帧的尺寸定下来再做，别每来一次都算。
     let frame = 0
-    const relayout = () => layoutDeskIcons(container, depth,
-      iconPositionsRef.current[depth ? 'depth' : 'flat'], { resolveCollisions: true })
+    const relayout = () => { if (!isPhoneViewport()) layoutDeskIcons(container, depth,
+      iconPositionsRef.current[depth ? 'depth' : 'flat'], { resolveCollisions: true }) }
     const schedule = () => {
       if (frame) return
       frame = window.requestAnimationFrame(() => { frame = 0; relayout() })
@@ -755,7 +888,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       observer?.disconnect()
       if (frame) window.cancelAnimationFrame(frame)
     }
-  }, [depth, portal, installedApps, externalApps, fileLinks, holders])
+  }, [depth, portal, installedApps, externalApps, fileLinks, holders, phone])
 
   // 收纳盒被移除后，它的窗口和对应的 VSCode 收纳盒视图一起关掉。
   React.useEffect(() => {
@@ -901,15 +1034,21 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       if (!event.target.closest?.('.world-desktop-icon')) setSelected(false)
       if (!event.target.closest?.('.world-context-menu')) setContextMenu(null)
     }
+    // Retain the desktop rectangles throughout the resize gesture, including the
+    // intermediate 601px desktop viewport on the way back to a wide window.
+    const resizedRect = (id, current, clamp) => {
+      const saved = phoneDesktopRects.current
+      if (!saved.has(id)) saved.set(id, current)
+      return isPhoneViewport() ? current : clamp(saved.get(id))
+    }
     const onResize = () => setPosition(current => {
-      const next = clampRect(current)
-      if (next.x !== current.x || next.y !== current.y || next.w !== current.w || next.h !== current.h) savePosition(next)
+      const next = resizedRect('dsh', current, clampRect)
       return next
     })
     const onAppResize = () => setVscodeWindows(list => {
       let changed = false
       const next = list.map(win => {
-        const rect = clampVscodeRect(win.rect)
+        const rect = resizedRect(`vscode:${win.key}`, win.rect, clampVscodeRect)
         if (rect.x === win.rect.x && rect.y === win.rect.y && rect.w === win.rect.w && rect.h === win.rect.h) return win
         changed = true
         return { ...win, rect }
@@ -917,27 +1056,23 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       return changed ? next : list
     })
     const onLanChatResize = () => setLanChatRect(current => {
-      const next = clampVscodeRect(current)
-      saveRect(LANCHAT_STORAGE_KEY, next)
+      const next = resizedRect('lanchat', current, clampVscodeRect)
       return next
     })
     const onBrowserResize = () => setBrowserRect(current => {
-      const next = clampVscodeRect(current)
-      saveRect(BROWSER_STORAGE_KEY, next)
+      const next = resizedRect('browser', current, clampVscodeRect)
       return next
     })
     const onTerminalResize = () => setTerminalRect(current => {
-      const next = clampVscodeRect(current)
-      saveRect(TERMINAL_STORAGE_KEY, next)
+      const next = resizedRect('terminal', current, clampVscodeRect)
       return next
     })
     const onPluginResize = () => setPluginWindows(list => {
       let changed = false
       const next = list.map(win => {
-        const rect = clampPluginRect(win.rect)
+        const rect = resizedRect(`plugin:${win.key}`, win.rect, clampPluginRect)
         if (rect.x === win.rect.x && rect.y === win.rect.y && rect.w === win.rect.w && rect.h === win.rect.h) return win
         changed = true
-        savePluginRect(win.key, rect)
         return { ...win, rect }
       })
       return changed ? next : list
@@ -1022,6 +1157,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   }, [pluginWindows])
 
   const openWindow = () => {
+    setPhoneRecent(false)
     if (state === 'closed') { lastOpenState.current = 'normal'; setState('normal') }
     else if (state === 'min') setState(lastOpenState.current)
     setActiveWindow('dsh')
@@ -1066,6 +1202,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     if (activeWindowRef.current === `plugin:${key}`) setActiveWindow('dsh')
   }
   const restoreWindow = id => {
+    setPhoneRecent(false)
     setStartOpen(false)
     if (id === 'dsh') return openWindow()
     if (id.startsWith('vscode:')) {
@@ -1081,6 +1218,34 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     if (id === 'terminal') return openTerminal()
     if (id.startsWith('ext:')) return openExternalApp(id.slice(4))
     if (id.startsWith('plugin:')) openPlugin(id.slice(7))
+  }
+
+  /**
+   * 点任务栏按钮（Windows 的手感）：窗口已经在前台就收回任务栏，否则叫回来。
+   * 助手派的 `focus_window` 仍走 restoreWindow —— 那里「把窗口拿到前台」是字面意思，
+   * 不该因为目标已经在前面就把它最小化。
+   */
+  const taskbarToggle = id => {
+    const minimized = (() => {
+      if (id === 'dsh') return state === 'min' || state === 'closed'
+      if (id.startsWith('vscode:')) return vscodeWindowsRef.current.find(win => win.key === id.slice(7))?.state === 'min'
+      if (id === 'lanchat') return lanChatState === 'min'
+      if (id === 'browser') return browserState === 'min'
+      if (id === 'terminal') return terminalState === 'min'
+      if (id.startsWith('plugin:')) return pluginWindowsRef.current.find(win => win.key === id.slice(7))?.state === 'min'
+      if (id.startsWith('ext:')) return externalWindowsRef.current.find(win => win.id === id.slice(4))?.state === 'min'
+      return false
+    })()
+    if (!minimized && activeWindowRef.current === id) {
+      if (id === 'dsh') return minimize()
+      if (id.startsWith('vscode:')) return minimizeVscode(id.slice(7))
+      if (id === 'lanchat') return minimizeLanChat()
+      if (id === 'browser') return minimizeBrowser()
+      if (id === 'terminal') return minimizeTerminal()
+      if (id.startsWith('plugin:')) return minimizePlugin(id.slice(7))
+      if (id.startsWith('ext:')) return minimizeExternalApp(id.slice(4))
+    }
+    restoreWindow(id)
   }
 
   /** 开始菜单 / 桌面上的「设置」：先把 DSH 窗口立起来，再打开原生设置面板。
@@ -1103,9 +1268,11 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   }
 
   const beginPluginDrag = key => event => {
+    if (isPhoneViewport()) return
     if (event.target.closest('button')) return
     const win = pluginWindowsRef.current.find(item => item.key === key)
     if (!win || win.state !== 'normal') return
+    phoneDesktopRects.current.delete(`plugin:${key}`)
     focusPlugin(key)
     pluginDragRef.current = {
       kind: 'move', key, pointerId: event.pointerId,
@@ -1115,6 +1282,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     event.preventDefault()
   }
   const beginPluginResize = key => edge => event => {
+    phoneDesktopRects.current.delete(`plugin:${key}`)
     event.stopPropagation()
     event.preventDefault()
     const win = pluginWindowsRef.current.find(item => item.key === key)
@@ -1146,8 +1314,14 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const endPluginDrag = event => {
     const drag = pluginDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
-    if (drag.next) savePluginRect(drag.key, drag.next)
     pluginDragRef.current = null
+    // 甩到顶边：把矩形退回拖动前再最大化，还原时才不会贴在标题栏下面
+    if (drag.kind === 'move' && dragTraveled(event, drag) && droppedOnTopEdge(event)) {
+      setPluginWindows(list => list.map(win => win.key === drag.key
+        ? { ...win, rect: drag.rect, state: 'max', lastOpen: 'max' } : win))
+      return
+    }
+    if (drag.next) savePluginRect(drag.key, drag.next)
   }
 
   const installApp = id => setInstalledApps(current => {
@@ -1379,13 +1553,16 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   }
   const toggleMaximizeTerminal = () => setTerminalState(current => current === 'max' ? 'normal' : 'max')
   const beginTerminalDrag = event => {
+    if (isPhoneViewport()) return
     if (event.target.closest('button') || terminalState !== 'normal') return
+    phoneDesktopRects.current.delete('terminal')
     setActiveWindow('terminal')
     terminalDragRef.current = { kind: 'move', pointerId: event.pointerId, x: event.clientX, y: event.clientY, rect: terminalRect }
     event.currentTarget.setPointerCapture?.(event.pointerId)
     event.preventDefault()
   }
   const beginTerminalResize = edge => event => {
+    phoneDesktopRects.current.delete('terminal')
     event.stopPropagation()
     event.preventDefault()
     if (terminalState !== 'normal') return
@@ -1410,18 +1587,27 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     setTerminalRect(terminalDragRef.current.next)
   }
   const endTerminalDrag = event => {
-    if (!terminalDragRef.current || terminalDragRef.current.pointerId !== event.pointerId) return
-    saveRect(TERMINAL_STORAGE_KEY, terminalDragRef.current.next || terminalRect)
+    const drag = terminalDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
     terminalDragRef.current = null
+    if (drag.kind === 'move' && dragTraveled(event, drag) && droppedOnTopEdge(event)) {
+      setTerminalRect(drag.rect)
+      toggleMaximizeTerminal()
+      return
+    }
+    saveRect(TERMINAL_STORAGE_KEY, drag.next || terminalRect)
   }
   const beginBrowserDrag = event => {
+    if (isPhoneViewport()) return
     if (event.target.closest('button') || browserState !== 'normal') return
+    phoneDesktopRects.current.delete('browser')
     setActiveWindow('browser')
     browserDragRef.current = { kind: 'move', pointerId: event.pointerId, x: event.clientX, y: event.clientY, rect: browserRect }
     event.currentTarget.setPointerCapture?.(event.pointerId)
     event.preventDefault()
   }
   const beginBrowserResize = edge => event => {
+    phoneDesktopRects.current.delete('browser')
     event.stopPropagation()
     event.preventDefault()
     if (browserState !== 'normal') return
@@ -1446,22 +1632,31 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     setBrowserRect(browserDragRef.current.next)
   }
   const endBrowserDrag = event => {
-    if (!browserDragRef.current || browserDragRef.current.pointerId !== event.pointerId) return
-    saveRect(BROWSER_STORAGE_KEY, browserDragRef.current.next || browserRect)
+    const drag = browserDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
     browserDragRef.current = null
+    if (drag.kind === 'move' && dragTraveled(event, drag) && droppedOnTopEdge(event)) {
+      setBrowserRect(drag.rect)
+      toggleMaximizeBrowser()
+      return
+    }
+    saveRect(BROWSER_STORAGE_KEY, drag.next || browserRect)
   }
 
   const beginVscodeDrag = key => event => {
+    if (isPhoneViewport()) return
     if (event.target.closest('button')) return
     const win = vscodeWindowsRef.current.find(item => item.key === key)
     // 最大化时标题栏不给拖：先还原再拖（和 Windows 一致）比拖着一个全屏窗口跑更不容易出怪动作
     if (!win || win.state !== 'normal') return
+    phoneDesktopRects.current.delete(`vscode:${key}`)
     setActiveWindow(`vscode:${key}`)
     appDragRef.current = { key, kind: 'move', pointerId: event.pointerId, x: event.clientX, y: event.clientY, rect: win.rect }
     event.currentTarget.setPointerCapture?.(event.pointerId)
     event.preventDefault()
   }
   const beginVscodeResize = key => edge => event => {
+    phoneDesktopRects.current.delete(`vscode:${key}`)
     event.stopPropagation()
     event.preventDefault()
     const win = vscodeWindowsRef.current.find(item => item.key === key)
@@ -1487,19 +1682,28 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     setVscodeWindows(list => list.map(win => win.key === drag.key ? { ...win, rect: drag.next } : win))
   }
   const endVscodeDrag = event => {
-    if (!appDragRef.current || appDragRef.current.pointerId !== event.pointerId) return
-    if (appDragRef.current.next) saveRect(VSCODE_STORAGE_KEY, appDragRef.current.next)
+    const drag = appDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
     appDragRef.current = null
+    if (drag.kind === 'move' && dragTraveled(event, drag) && droppedOnTopEdge(event)) {
+      setVscodeWindows(list => list.map(win => win.key === drag.key
+        ? { ...win, rect: drag.rect, state: 'max' } : win))
+      return
+    }
+    if (drag.next) saveRect(VSCODE_STORAGE_KEY, drag.next)
   }
 
   const beginLanChatDrag = event => {
+    if (isPhoneViewport()) return
     if (event.target.closest('button') || lanChatState !== 'normal') return
+    phoneDesktopRects.current.delete('lanchat')
     setActiveWindow('lanchat')
     lanChatDragRef.current = { kind: 'move', pointerId: event.pointerId, x: event.clientX, y: event.clientY, rect: lanChatRect }
     event.currentTarget.setPointerCapture?.(event.pointerId)
     event.preventDefault()
   }
   const beginLanChatResize = edge => event => {
+    phoneDesktopRects.current.delete('lanchat')
     event.stopPropagation()
     event.preventDefault()
     if (lanChatState !== 'normal') return
@@ -1524,9 +1728,15 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     setLanChatRect(lanChatDragRef.current.next)
   }
   const endLanChatDrag = event => {
-    if (!lanChatDragRef.current || lanChatDragRef.current.pointerId !== event.pointerId) return
-    saveRect(LANCHAT_STORAGE_KEY, lanChatDragRef.current.next || lanChatRect)
+    const drag = lanChatDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
     lanChatDragRef.current = null
+    if (drag.kind === 'move' && dragTraveled(event, drag) && droppedOnTopEdge(event)) {
+      setLanChatRect(drag.rect)
+      toggleMaximizeLanChat()
+      return
+    }
+    saveRect(LANCHAT_STORAGE_KEY, drag.next || lanChatRect)
   }
 
   // 外部 .worldapp 应用：安装后的窗口状态机
@@ -1561,6 +1771,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const toggleMaximizeExternalApp = id => setExternalWindows(list => list.map(win => win.id === id
     ? { ...win, state: win.state === 'max' ? 'normal' : 'max' } : win))
   const beginExternalDrag = id => event => {
+    if (isPhoneViewport()) return
     if (event.target.closest('button')) return
     const win = externalWindowsRef.current.find(item => item.id === id && item.state === 'normal')
     if (!win) return
@@ -1597,8 +1808,13 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const endExternalDrag = event => {
     const drag = externalDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
-    if (drag.next) saveExternalRect(drag.id, drag.next)
     externalDragRef.current = null
+    if (drag.kind === 'move' && dragTraveled(event, drag) && droppedOnTopEdge(event)) {
+      setExternalWindows(list => list.map(win => win.id === drag.id
+        ? { ...win, rect: drag.rect, state: 'max' } : win))
+      return
+    }
+    if (drag.next) saveExternalRect(drag.id, drag.next)
   }
 
   // 桌面图标右键菜单：DSH 主应用只给「打开」，其它应用才可以卸载
@@ -1714,6 +1930,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     suppressIconTimerRef.current = window.setTimeout(() => { suppressIconClickRef.current = false }, 320)
   }
   const beginIconDrag = event => {
+    if (isPhoneViewport()) return
     if (event.button !== 0) return
     const icon = event.target.closest?.('.world-desktop-icon')
     if (!icon || !iconsRef.current?.contains(icon)) return
@@ -1863,6 +2080,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   }
 
   const beginResize = edge => event => {
+    phoneDesktopRects.current.delete('dsh')
     if (state !== 'normal') return
     event.stopPropagation()
     event.preventDefault()
@@ -1875,7 +2093,9 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   }
 
   const beginDrag = event => {
+    if (isPhoneViewport()) return
     if (state !== 'normal' || event.target.closest('button')) return
+    phoneDesktopRects.current.delete('dsh')
     setActiveWindow('dsh')
     dragRef.current = { kind: 'move', pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, position, moved: false }
     document.body.dataset.worldAdjusting = 'true'
@@ -1909,9 +2129,15 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const endDrag = event => {
     const drag = dragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
-    if (drag.moved && drag.next) {
+    // 甩到桌面顶边就地最大化：位置一个字节都不记，还原时窗口回到拖动前的地方
+    const snapped = drag.kind === 'move' && dragTraveled(event, drag) && droppedOnTopEdge(event)
+    if (snapped) {
+      toggleMaximize()
+    } else if (drag.moved && drag.next) {
       setPosition(drag.next)
       savePosition(drag.next)
+    }
+    if (snapped || drag.moved) {
       ignoreDoubleClick.current = true
       window.setTimeout(() => { ignoreDoubleClick.current = false }, 350)
     }
@@ -1981,6 +2207,15 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       }
     }),
   ]
+
+  const phoneWindowKey = taskbarWindows.map(item => `${item.id}:${item.minimized}`).join('|')
+  React.useEffect(() => {
+    if (phone && !taskbarWindows.some(item => item.id === activeWindow && !item.minimized)) setActiveWindow('desktop')
+  }, [phone, activeWindow, phoneWindowKey])
+  const showPhoneHome = () => {
+    setActiveWindow('desktop'); setStartOpen(false); setPhoneRecent(false); setContextMenu(null)
+    document.activeElement?.blur?.()
+  }
 
   const desktopState = () => ({
     title: document.title || 'world',
@@ -2175,6 +2410,8 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const noteOf = id => id === 'settings' ? '原生设置面板'
     : ([...JOURNAL_APPS, ...TASK_APPS].find(app => `plugin:${app.key}` === id)?.description || '')
   const searchCatalog = [
+    ...globalThis.__WORLD_MOBILE_ACCESS__ ? [] : [{ key: 'mobile', label: '手机连接', note: '扫码打开 world', hint: '应用',
+      icon: () => h(MobileGlyph, { size: 22 }), open: () => { setStartOpen(false); setMobileOpen(true) } }],
     ...allEntries.map(entry => ({ key: entry.id, label: entry.label, note: entry.note || entry.path || entry.app?.description || noteOf(entry.id),
       hint: KIND_HINTS[entry.kind] || '应用', icon: entry.icon, open: entry.open })),
     ...pluginApps.map(app => ({ key: `page:${app.key}`, label: app.label, note: '', hint: '整页插件',
@@ -2258,6 +2495,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       h('div', { className: 'world-vignette' })),
     h('div', {
       className: 'world-icons', ref: iconsRef,
+      inert: phone && (phoneRecent || (activeWindow !== 'desktop' && taskbarWindows.some(item => item.id === activeWindow && !item.minimized))) ? true : undefined,
       onPointerDown: beginIconDrag,
       onClickCapture: event => { if (suppressIconClickRef.current) { event.preventDefault(); event.stopPropagation() } },
       onDoubleClickCapture: event => { if (suppressIconClickRef.current) { event.preventDefault(); event.stopPropagation() } },
@@ -2269,8 +2507,8 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
         'data-world-icon-id': entry.id, 'data-world-icon-kind': entry.kind,
         ...entry.attrs,
         'aria-label': entry.label, title: entry.label,
-        onClick: entry.id === 'dsh' ? () => setSelected(true) : undefined,
-        onDoubleClick: entry.open,
+        onClick: phone ? () => { setPhoneRecent(false); entry.open() } : entry.id === 'dsh' ? () => setSelected(true) : undefined,
+        onDoubleClick: phone ? undefined : entry.open,
         onKeyDown: event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); entry.open() } },
         onContextMenu: event => openContextMenu(event, entry.id, entry.label, entry.kind),
       }, h('span', { className: 'world-glyph' }, h(entry.icon)),
@@ -2283,7 +2521,15 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       className: 'world-titlebar', onPointerDown: beginDrag, onPointerMove: moveDrag,
       onPointerUp: endDrag, onPointerCancel: endDrag, onDoubleClick: toggleFromTitlebar,
     },
-      h('div', { className: 'world-title' }, h(DshMark, { size: 16 }), h('span', null, 'DeepSeek Harness')),
+      sidebarControl && h('button', {
+        type: 'button', className: 'world-sidebar-toggle', 'data-world-sidebar-toggle': true,
+        'aria-label': hostSidebar.collapsed ? '展开聊天列表' : '收起聊天列表', 'aria-expanded': !hostSidebar.collapsed,
+        title: hostSidebar.collapsed ? '展开聊天列表' : '收起聊天列表', disabled: hostSidebar.blocked,
+        onPointerDown: event => event.stopPropagation(), onDoubleClick: event => event.stopPropagation(),
+        onClick: () => toggleSidebar(),
+      }, h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': true },
+        h('rect', { x: 3, y: 4, width: 18, height: 16, rx: 2 }), h('path', { d: 'M9 4v16' }))),
+      h('div', { className: `world-title${sidebarControl ? ' has-sidebar-control' : ''}` }, h(DshMark, { size: 16 }), h('span', null, 'DeepSeek Harness')),
       h(WindowControls, { state, onMinimize: minimize, onToggleMaximize: toggleMaximize, onClose: closeWindow })),
     state === 'normal' ? ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'].map(edge => h('div', {
       key: edge, className: `world-resize-handle world-resize-${edge}`, 'aria-hidden': true,
@@ -2415,6 +2661,14 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
                 h('button', { type: 'button', className: 'world-app-open', 'data-world-terminal-open': true, onClick: openTerminal }, '打开'),
                 h('button', { type: 'button', className: 'world-app-uninstall', onClick: uninstallTerminal }, '卸载'))
               : h('button', { type: 'button', className: 'world-app-install', onClick: installTerminal }, '安装')),
+          !globalThis.__WORLD_MOBILE_ACCESS__ && h('div', {
+            className: 'world-app-card', 'data-world-app-card': 'mobile',
+            onClick: event => openCard(event, () => { setStartOpen(false); setMobileOpen(true) }),
+          },
+            h('span', { className: 'world-app-card-icon' }, h(MobileGlyph)),
+            h('div', { className: 'world-app-card-info' }, h('strong', null, '手机连接'), h('span', null, '扫码打开 world')),
+            h('button', { type: 'button', className: 'world-app-open', 'data-world-mobile-open': true,
+              onClick: () => { setStartOpen(false); setMobileOpen(true) } }, '打开')),
           // 配置入口沉底：原生设置面板和注册了宿主页面的插件页面。
           h('div', {
             key: 'settings', className: 'world-app-card', 'data-world-app-card': 'settings',
@@ -2470,7 +2724,26 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
           h('circle', { cx: 16, cy: 7, r: 2.2 }), h('circle', { cx: 10, cy: 17, r: 2.2 })),
         '助手个性化'),
         h('span', { className: 'world-start-hint' }, startTerm ? 'Enter 打开 · Esc 清空' : '方向键选择 · Enter 打开'))),
+    h('div', { className: 'world-phone-status', 'aria-hidden': !phone }, h('span', null, 'world'),
+      phone && h('div', { className: 'world-clock', ref: clockRef },
+        h('div', { 'data-world-time': true }, clock?.time || ''), h('div', { className: 'world-date', 'data-world-date': true }, clock?.date || ''))),
+    phone && phoneRecent && h('section', { className: 'world-phone-switcher', 'aria-label': '应用切换', ref: recentRef },
+      h('header', null, h('strong', null, '运行中的应用'),
+        h('button', { type: 'button', onClick: () => setPhoneRecent(false), 'aria-label': '收起应用切换' }, '完成')),
+      h('div', { className: 'world-phone-running' },
+        taskbarWindows.length ? taskbarWindows.map(item => h('button', {
+          key: item.id, type: 'button', 'data-world-phone-window': item.id,
+          onClick: () => restoreWindow(item.id),
+        }, h('span', { className: 'world-phone-running-icon' }, item.glyph),
+        h('span', null, h('strong', null, item.label), h('small', null, item.minimized ? '已最小化' : '运行中'))))
+          : h('p', null, '还没有打开的应用'))),
     h('div', { className: 'world-taskbar' },
+      phone && h('nav', { className: 'world-phone-nav', 'aria-label': '手机导航' },
+        h('button', { type: 'button', className: 'world-start-button', 'aria-label': '全部应用', 'aria-expanded': startOpen,
+          onClick: () => { setPhoneRecent(false); setStartOpen(open => !open) } }, h(PhoneGlyph, { kind: 'apps' })),
+        h('button', { type: 'button', 'aria-label': '返回桌面', onClick: showPhoneHome }, h(PhoneGlyph, { kind: 'home' })),
+        h('button', { type: 'button', 'aria-label': '切换应用', 'aria-expanded': phoneRecent,
+          onClick: () => { setStartOpen(false); setPhoneRecent(open => !open) } }, h(PhoneGlyph, { kind: 'recent' }))),
       h('span', { className: 'world-version', 'data-world-version': WORLD_VERSION }, `world v${WORLD_VERSION}`),
       h('div', { className: 'world-taskbar-center' },
         h('button', {
@@ -2487,7 +2760,8 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
               key: item.id, type: 'button',
               className: `world-taskbar-app${item.active ? ' on' : ''}${item.minimized ? ' is-min' : ''}`,
               'data-world-taskbar': item.id, 'aria-label': `${item.label}（窗口 ${index + 1}）`,
-              title: item.minimized ? `${item.label} · 已最小化，点击还原` : item.label, onClick: () => restoreWindow(item.id),
+              title: item.minimized ? `${item.label} · 已最小化，点击还原` : `${item.label} · 点击最小化`,
+              onClick: () => taskbarToggle(item.id),
             },
             h('span', { className: 'world-taskbar-app-icon' }, item.glyph),
             h('span', { className: 'world-taskbar-app-name' }, item.label))))
@@ -2523,7 +2797,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
           title: depth ? '关闭 3D 景深' : '开启 3D 景深', 'aria-label': '3D 景深',
           onClick: () => setDepth(value => !value),
         }, h(DepthGlyph, { size: 20 })),
-        h('div', { className: 'world-clock', ref: clockRef },
+        !phone && h('div', { className: 'world-clock', ref: clockRef },
           h('div', { 'data-world-time': true }, clock?.time || ''), h('div', { className: 'world-date', 'data-world-date': true }, clock?.date || '')))),
     ...(installedApps.has('vscode') ? vscodeWindows.map(win => {
       const isActive = activeWindow === `vscode:${win.key}`
@@ -2564,7 +2838,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     browserOpen && installedApps.has('browser') && h(BrowserWindow, {
       rect: browserRect, state: browserState, active: activeWindow === 'browser',
       // 原生 guest 不参与 DOM 合成：开始菜单/其它应用在前台时隐藏它，避免盖住上层窗口
-      suspended: startOpen || (activeWindow !== 'browser' && activeWindow !== 'dsh'),
+      suspended: startOpen || phoneRecent || (activeWindow !== 'browser' && (phone || activeWindow !== 'dsh')),
       onClose: closeBrowser, onMinimize: minimizeBrowser, onToggleMaximize: toggleMaximizeBrowser,
       onDragStart: beginBrowserDrag, onDragMove: moveBrowser, onDragEnd: endBrowserDrag,
       onResizeStart: beginBrowserResize, onActivate: () => setActiveWindow('browser'),
@@ -2642,6 +2916,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
         if (granted) setBrainSetup(null)
       },
     }),
+    mobileOpen && h(MobileConnect, { rpc, onClose: () => setMobileOpen(false) }),
     wallpaperOpen && h(WallpaperPanel, {
       value: wallpaper, mode: depth ? 'depth' : 'flat',
       onChange: setWallpaper, onClose: () => setWallpaperOpen(false),
@@ -2751,6 +3026,7 @@ export function apply(ctx) {
       openSettings: () => openNativeSettings(ctx.slots),
       // 只能在 DSH 窗口里打开的宿主页面（插件管理），按「设置」的模式处理。
       openPanel: id => openHostPanel(ctx.layout, id),
+      toggleSidebar: typeof ctx.layout?.toggleSidebar === 'function' ? () => ctx.layout.toggleSidebar() : undefined,
       getDirectoryPicker: () => typeof ctx.get === 'function' ? ctx.get('remote.directoryPicker') : undefined }),
   }, DesktopLayer))
   ctx.slots.inject(ASSISTANT_CONVERSATION_SLOT, () => ctx.slots.register({

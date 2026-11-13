@@ -43,6 +43,8 @@ export function LanChatWindow({
   const [error, setError] = React.useState('')
   const [attempt, setAttempt] = React.useState(0)
   const [botCount, setBotCount] = React.useState(0)
+  const frameUrl = port ? globalThis.__WORLD_MOBILE_ACCESS__
+    ? new URL('/_world_mobile/lan-chat/', window.location.href).href : `http://127.0.0.1:${port}/` : ''
   const frameRef = React.useRef(null)
   const sendThemeRef = React.useRef(() => {})
 
@@ -62,7 +64,7 @@ export function LanChatWindow({
     const send = () => {
       const frame = frameRef.current
       if (!frame?.contentWindow || !port) return
-      frame.contentWindow.postMessage(readTheme(), `http://127.0.0.1:${port}`)
+      frame.contentWindow.postMessage(readTheme(), new URL(frameUrl).origin)
     }
     sendThemeRef.current = send
     send()
@@ -71,7 +73,7 @@ export function LanChatWindow({
     observer.observe(document.body, { attributes: true, attributeFilter: themeAttributes })
     observer.observe(document.documentElement, { attributes: true, attributeFilter: themeAttributes })
     return () => { observer.disconnect(); if (sendThemeRef.current === send) sendThemeRef.current = () => {} }
-  }, [port])
+  }, [port, frameUrl])
 
   React.useEffect(() => {
     let alive = true
@@ -137,7 +139,7 @@ export function LanChatWindow({
         h('span', null, '请确认 world 插件已更新并重启 dsh；也可以单独运行 lan-chat/start.cmd。'),
         h('button', { type: 'button', onClick: () => setAttempt(value => value + 1) }, '重试'))
       : port
-        ? h('iframe', { ref: frameRef, title: '局域网聊天', src: `http://127.0.0.1:${port}/`, className: 'world-lanchat-frame',
+        ? h('iframe', { ref: frameRef, title: '局域网聊天', src: frameUrl, className: 'world-lanchat-frame',
           onLoad: () => sendThemeRef.current() })
         : h('div', { className: 'world-lanchat-loading', role: 'status' }, '正在连接本机聊天服务…')),
   !minimized && !maximized

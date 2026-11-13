@@ -22,6 +22,7 @@ import { createTasksStore, registerTasksTools } from './tasks.js'
 import { createWorldTerminal } from './terminal.js'
 import { createWorldSsh } from './ssh.js'
 import { createWorkspaceRoots, discoverToolDirs } from './workspace-roots.js'
+import { createMobileAccess } from './mobile-access.js'
 
 export const name = 'world'
 export const inject = ['fs', 'connection', 'sessions', 'sandboxPolicy', 'sessionController', 'agents']
@@ -166,6 +167,16 @@ export function apply(ctx) {
       },
     }), `world: ${serviceName} ${operation}`)
   }
+
+  // The Desktop keeps its loopback Host; world owns the optional, on-demand phone entry.
+  const mobile = createMobileAccess({
+    connection: ctx.connection, webServer: () => ctx.get('webServer'), chat: () => chat.start(),
+    config: { host: process.env.WORLD_MOBILE_HOST, port: process.env.WORLD_MOBILE_PORT,
+      publicOrigin: process.env.WORLD_MOBILE_ORIGIN,
+      certFile: process.env.WORLD_MOBILE_CERT, keyFile: process.env.WORLD_MOBILE_KEY },
+  })
+  ctx.effect(() => () => mobile.dispose(), 'world: mobile browser access')
+  serve(ctx, 'world-mobile', ['addresses', 'open'], mobile, 'WORLD_MOBILE')
 
   // list 是「打开文件夹」对话框：只列子目录，读写仍按 root + sandbox policy 校验。
   serve(ctx, 'world-vscode-source', ['open', 'save', 'list', 'reveal', 'probe'], editor, 'WORLD_VSCODE_SOURCE')

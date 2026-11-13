@@ -1,4 +1,5 @@
 import React from 'react'
+import { fitSavedDesktopRect } from './responsive.js'
 import { PLUGIN_SLOT, createPluginCatalog } from './plugin-catalog.js'
 
 export { PLUGIN_SLOT, createPluginCatalog }
@@ -48,7 +49,7 @@ export function defaultPluginRect(index = 0) {
 export function readPluginRect(key, index = 0) {
   try {
     const stored = JSON.parse(window.localStorage.getItem(RECT_STORAGE_PREFIX + key) || 'null')
-    if (Number.isFinite(stored?.x) && Number.isFinite(stored?.y)) return clampPluginRect(stored)
+    if (Number.isFinite(stored?.x) && Number.isFinite(stored?.y)) return fitSavedDesktopRect(stored, clampPluginRect)
   } catch {}
   return defaultPluginRect(index)
 }

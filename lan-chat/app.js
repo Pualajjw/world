@@ -307,6 +307,8 @@
 
   /* ------------------------------ live 后端 ------------------------------ */
   function createLiveBackend() {
+    // The phone entry mounts this app under a same-origin prefix. Direct LAN access stays at /.
+    function address(path) { return new URL('.' + path, document.baseURI).href }
     var state = { me: { nickname: '我' }, peers: [], bots: [], pending: {}, retrying: {}, conversations: [], messages: {} },
       listeners = new Set(), source = null
     function emit() { for (var fn of listeners) fn(state) }
@@ -319,14 +321,14 @@
       emit()
     }
     function post(path, payload) {
-      return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload || {}) })
+      return fetch(address(path), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload || {}) })
         .then(function (res) { if (!res.ok) throw new Error('HTTP ' + res.status); return res.json() })
     }
     return {
       start: function () {
-        return fetch('/api/state').then(function (res) { return res.json() }).then(function (data) {
+        return fetch(address('/api/state')).then(function (res) { return res.json() }).then(function (data) {
           adopt(data)
-          source = new EventSource('/api/events')
+          source = new EventSource(address('/api/events'))
           source.onmessage = function (event) {
             try {
               var packet = JSON.parse(event.data)
@@ -341,9 +343,9 @@
       updateGroup: function (options) { return post('/api/group/settings', options).then(function (data) { adopt(data.state); return data }) },
       markRead: function (convId) { return post('/api/read', { conversationId: convId }).then(function (data) { adopt(data.state) }) },
       setProfile: function (nickname) { return post('/api/profile', { nickname: nickname }).then(function (data) { adopt(data.state) }) },
-      refresh: function () { return fetch('/api/state').then(function (res) { return res.json() }).then(adopt) },
+      refresh: function () { return fetch(address('/api/state')).then(function (res) { return res.json() }).then(adopt) },
       botSessions: function () {
-        return fetch('/api/bots/sessions').then(function (res) { return res.json() })
+        return fetch(address('/api/bots/sessions')).then(function (res) { return res.json() })
       },
       bindBot: function (botId, sessionId) {
         return post('/api/bind', { botId: botId, sessionId: sessionId }).then(function (data) { adopt(data.state); return data })

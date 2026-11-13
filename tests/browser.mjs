@@ -24,6 +24,7 @@ import { checkDesktopScreenshot } from './screenshot-browser.mjs'
 import { checkTerminal } from './terminal-browser.mjs'
 import { checkTerminalSsh } from './ssh-browser.mjs'
 import { checkPluginRoots } from './roots-browser.mjs'
+import { checkPhoneDesktop } from './phone-browser.mjs'
 import { createDesktopBrain } from '../desktop-brain.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -106,7 +107,7 @@ try {
   assert.equal(await page.locator('.world-desktop-icon').first().evaluate(element => getComputedStyle(element).perspective), 'none')
   // DSH + VSCode + 局域网聊天 + 浏览器 + 终端（0.2.37 起浏览器、0.2.81 起终端默认已安装）
   // 设置 / 插件 / 日记 / 垃圾箱 / 待办 / VSCode / 局域网聊天 / 浏览器 / 终端
-  assert.equal(await page.locator('.world-start').locator('.world-app-card').count(), 9)
+  assert.equal(await page.locator('.world-start').locator('.world-app-card').count(), 10)
   assert.equal(await page.locator('.world-app-card[data-world-app-card="browser"]').count(), 1)
   assert.equal(await page.locator('[data-world-browser-icon]').count(), 1)
   assert.equal(await page.locator('.world-app-card[data-world-app-card="terminal"]').count(), 1)
@@ -116,6 +117,24 @@ try {
   assert.equal(await page.locator('#root .app-frame').evaluate(element => getComputedStyle(element, '::before').webkitAppRegion), 'drag')
   assert.equal(await page.locator('#host-ui').evaluate(element => element.inert), true)
   assert.equal(await page.locator('[data-windows-menu]').evaluate(element => element.inert), false)
+  const checkDesktopTitlebar = async () => {
+    assert.deepEqual(await page.locator('.world-desktop-titlebar').evaluate(node => {
+      const rect = node.getBoundingClientRect()
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+        region: getComputedStyle(node).webkitAppRegion, inert: Boolean(node.closest('[inert]')) }
+    }), { x: 0, y: 0, width: 1280, height: 40, region: 'drag', inert: false })
+    assert.equal(await page.evaluate(() => document.elementFromPoint(640, 20)?.classList.contains('world-desktop-titlebar')), true)
+    assert.equal(await page.locator('[data-windows-menu]').evaluate(node => getComputedStyle(node).webkitAppRegion), 'no-drag')
+    assert.equal(await page.evaluate(() => Boolean(document.querySelector('.world-desktop-titlebar')
+      .compareDocumentPosition(document.querySelector('[data-windows-menu]')) & Node.DOCUMENT_POSITION_FOLLOWING)), true)
+    assert.equal(await page.evaluate(() => document.elementFromPoint(70, 20)?.closest('[data-windows-menu]') !== null), true)
+  }
+  // Caption menu controls remain clickable above the restored native drag row.
+  await page.locator('[data-windows-menu]').evaluate(node => { node.style.cssText = 'position:fixed;top:0;left:48px;height:40px;z-index:1100;-webkit-app-region:no-drag' })
+  await page.locator('[data-windows-menu] button').evaluate(node => {
+    node.addEventListener('click', () => { node.dataset.clicks = String(Number(node.dataset.clicks || 0) + 1) })
+  })
+  await checkDesktopTitlebar()
   assert.equal(await page.locator('#overlay-root').evaluate(element => element.inert), false)
   assert.deepEqual(await page.locator('.world-taskbar').evaluate(element => {
     const rect = element.getBoundingClientRect()
@@ -150,7 +169,10 @@ try {
   assert.equal(await page.locator('#host-ui').evaluate(element => element.inert), false)
   assert.equal(await page.locator('#root .app-frame').evaluate(element => getComputedStyle(element, '::before').webkitAppRegion), 'no-drag')
   assert.equal(await page.locator('.world-cap').first().evaluate(element => getComputedStyle(element).webkitAppRegion), 'no-drag')
+  await checkDesktopTitlebar()
   assert.equal(await page.evaluate(() => document.elementFromPoint(400, 300)?.closest('#host-ui')?.id === 'host-ui'), true)
+  await page.locator('[data-windows-menu] button').click()
+  assert.equal(await page.locator('[data-windows-menu] button').getAttribute('data-clicks'), '1')
   assert.equal(await page.evaluate(() => document.elementFromPoint(1100, 200)?.closest('.world-wall') !== null), true)
   assert.deepEqual(await page.locator('#root').evaluate(element => {
     const rect = element.getBoundingClientRect()
@@ -229,6 +251,52 @@ try {
   await page.waitForFunction(() => Math.abs(document.querySelector('#root').getBoundingClientRect().width - 848) < 1)
   assert.equal(await page.locator('#root').evaluate(element => element.getBoundingClientRect().width), 848)
 
+  // 缩到最小也有下限：以前能从右边一路拖成 2px 的缝，之后连缩放手柄都找不回来。
+  // 用东侧手柄缩（左边界不动），后面的层级 / 点击断言还按原来的窗口位置算。
+  const eastGripForMin = await page.locator('.world-resize-e').boundingBox()
+  await page.mouse.move(eastGripForMin.x + eastGripForMin.width / 2, eastGripForMin.y + eastGripForMin.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(200, eastGripForMin.y + eastGripForMin.height / 2, { steps: 8 })
+  await page.mouse.up()
+  await page.waitForFunction(() => document.querySelector('#root').getBoundingClientRect().width >= 719.5)
+  const narrowest = await page.locator('#root').evaluate(element => element.getBoundingClientRect().width)
+  assert.ok(narrowest >= 719.5 && narrowest <= 721, `缩到最窄仍是可用的窗口：${narrowest}`)
+  const southGrip = await page.locator('.world-resize-s').boundingBox()
+  await page.mouse.move(southGrip.x + southGrip.width / 2, southGrip.y + southGrip.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(southGrip.x + southGrip.width / 2, 0)
+  await page.mouse.up()
+  await page.waitForFunction(() => document.querySelector('#root').getBoundingClientRect().height >= 479.5)
+  assert.ok(await page.locator('#root').evaluate(element => element.getBoundingClientRect().height) >= 479.5)
+
+  // 任务栏按钮：已经在前台就收回任务栏（Windows 的手感），再点回来
+  await page.locator('[data-world-taskbar="dsh"]').click()
+  await page.waitForFunction(() => document.body.dataset.worldWindow === 'min')
+  await page.locator('[data-world-taskbar="dsh"]').click()
+  await page.waitForFunction(() => document.body.dataset.worldWindow === 'normal')
+
+  // 甩到桌面顶边 = 最大化；还原时回到拖动前那一处，而不是贴在标题栏下面
+  const beforeSnap = await page.locator('#root').evaluate(element => {
+    const rect = element.getBoundingClientRect()
+    return { x: Math.round(rect.x), y: Math.round(rect.y) }
+  })
+  const snapBar = await page.locator('.world-titlebar').boundingBox()
+  await page.mouse.move(snapBar.x + snapBar.width / 2, snapBar.y + snapBar.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(snapBar.x + snapBar.width / 2, 44, { steps: 6 })
+  await page.mouse.up()
+  await page.waitForFunction(() => document.body.dataset.worldWindow === 'max')
+  assert.deepEqual(await page.locator('#root').evaluate(element => {
+    const rect = element.getBoundingClientRect()
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+  }), { x: 0, y: 40, width: 1280, height: 712 })
+  await page.getByRole('button', { name: '还原' }).click()
+  await page.waitForFunction(() => document.body.dataset.worldWindow === 'normal')
+  assert.deepEqual(await page.locator('#root').evaluate(element => {
+    const rect = element.getBoundingClientRect()
+    return { x: Math.round(rect.x), y: Math.round(rect.y) }
+  }), beforeSnap)
+
   await page.getByRole('button', { name: '最大化' }).click()
   await page.waitForFunction(() => document.body.dataset.worldWindow === 'max')
   assert.deepEqual(await page.locator('#root').evaluate(element => {
@@ -252,11 +320,13 @@ try {
   await page.waitForFunction(() => document.body.dataset.worldWindow === 'min')
   assert.equal(await page.locator('#root').evaluate(rootElement => rootElement.inert), false)
   assert.equal(await page.locator('#host-ui').evaluate(element => element.inert), true)
+  await checkDesktopTitlebar()
   await page.getByRole('button', { name: 'DeepSeek Harness', exact: true }).dblclick()
   await page.waitForFunction(() => document.body.dataset.worldWindow === 'max')
   await page.getByRole('button', { name: '关闭' }).click()
   await page.waitForFunction(() => document.body.dataset.worldWindow === 'closed')
   assert.equal(await page.locator('#root .app-frame').evaluate(element => getComputedStyle(element, '::before').webkitAppRegion), 'drag')
+  await checkDesktopTitlebar()
 
   await page.getByRole('button', { name: '开始' }).click()
   assert.equal(await page.locator('.world-start').evaluate(element => element.classList.contains('open')), true)
@@ -913,7 +983,9 @@ try {
   assert.equal(await page.locator('#root').evaluate(rootElement => rootElement.inert), false)
   assert.equal(await page.locator('#host-ui').evaluate(element => element.inert), false)
   assert.equal(await page.locator('style[data-plugin="dsh-world"]').count(), 0)
+  assert.equal(await page.locator('.world-desktop-titlebar').count(), 0)
   console.log('Browser interactions passed: desktop, root box, drag, maximize, minimize/restore, close, start menu, plugin windows, taskbar restore, dialog ownership, built-in LAN chat app, .worldapp drop install, context-menu uninstall, main-app protection, 3D depth toggle, flat icons, cursor-following mascot, cleanup.')
+  await checkPhoneDesktop(browser, bundle.outputFiles[0].text)
   await checkBrowserWindow(browser, root, bundle.outputFiles[0].text)
   await checkTerminal(browser, bundle.outputFiles[0].text)
   await checkTerminalSsh(browser, bundle.outputFiles[0].text)

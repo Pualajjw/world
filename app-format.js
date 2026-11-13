@@ -2,6 +2,7 @@
  * .worldapp 应用包的纯数据层：格式常量、校验、本地注册表与窗口几何。
  * 不依赖 React / DOM 模块之外的运行时，方便单独测试；组件在 external-apps.js。
  */
+import { fitSavedDesktopRect } from './responsive.js'
 
 export const APP_FORMAT = 'dsh-world-app/1'
 export const APP_FILE_PATTERN = /\.worldapp$/i
@@ -105,7 +106,7 @@ export function defaultAppRect(index = 0, size) {
 export function readExternalRect(id, index = 0, size) {
   try {
     const value = JSON.parse(window.localStorage.getItem(RECT_PREFIX + id + '.window') || 'null')
-    if (Number.isFinite(value?.x) && Number.isFinite(value?.y)) return clampAppRect(value)
+    if (Number.isFinite(value?.x) && Number.isFinite(value?.y)) return fitSavedDesktopRect(value, clampAppRect)
   } catch {}
   return defaultAppRect(index, size)
 }

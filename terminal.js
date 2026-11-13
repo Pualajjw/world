@@ -96,23 +96,34 @@ export function createWorldTerminal(ctx, { subprocess, FsError, toolDirs = () =>
   /**
    * 一条命令行 → argv。
    * POSIX：整条丢给 `sh -c`，引号由 sh 自己解释。
-   * Windows：写成临时批处理再执行，正文里有 `call :dsh_cmd 2>&1`，让整段脚本的
-   * stdout/stderr 汇到一股，窗口里就能看到真实的先后顺序；`exit /b %ERRORLEVEL%`
-   * 把子程序的退出码带回脚本本身。
+   * Windows：写成两个临时批处理——外层 `call "<id>-body.cmd" 2>&1` 把 stdout/stderr
+   * 汇成一股（窗口里才看得到真实先后顺序）并带回退出码，命令正文在子文件里执行。
+   * 正文不能直接写在 `:dsh_cmd` 子程序里：命令一旦命中 PATH 里的 `.cmd` 垫片
+   * （`pbnpm` 就是），cmd 会丢掉子程序的返回位置并报「找不到批处理标签」。
    */
   async function argvFor(shell, line, id) {
     if (shell.platform === 'windows') {
-      const script = join(await scriptDir(), `${id}.cmd`)
+      const dir = await scriptDir()
+      const script = join(dir, `${id}.cmd`)
+      // 命令本身再落一个批处理，外层只负责 `call` 它。原因：`call :dsh_cmd` 这种子程序
+      // 一旦被执行到的命令命中 `.cmd` 垫片（PATH 里的 pbnpm.cmd 就是），cmd 会丢掉
+      // 子程序的返回位置，直接报「找不到批处理标签 dsh_cmd」——用户的 pbnpm 就是这么废掉的。
+      // 换成 `call <文件>` 之后，垫片在子文件里怎么跑都不影响外层。
+      const body = join(dir, `${id}-body.cmd`)
+      await writeFile(body, [
+        '@echo off',
+        escapePercentForBatch(line),
+        'exit /b %ERRORLEVEL%',
+        '',
+      ].join('\r\n'), 'utf8')
       await writeFile(script, [
         '@echo off',
         'chcp 65001 >nul',
-        'call :dsh_cmd 2>&1',
+        `call "${body}" 2>&1`,
         'exit /b %ERRORLEVEL%',
-        ':dsh_cmd',
-        escapePercentForBatch(line),
         '',
       ].join('\r\n'), 'utf8')
-      return { argv: [shell.path, '/d', '/s', '/c', script], script }
+      return { argv: [shell.path, '/d', '/s', '/c', script], script, scripts: [script, body] }
     }
     return { argv: [shell.path, '-c', `${line} 2>&1`], script: '' }
   }
@@ -139,8 +150,13 @@ export function createWorldTerminal(ctx, { subprocess, FsError, toolDirs = () =>
     if (!wrapperDir) {
       wrapperDir = join(await scriptDir(), 'bin')
       await mkdir(wrapperDir, { recursive: true })
+      // 宿主的 process.execPath 是 `DeepSeek Harness.exe`。不显式把 ELECTRON_RUN_AS_NODE
+      // 写进包装里，它会以 GUI 身份启动（参数里的 .mjs 被当成要打开的东西），
+      // 包装看起来「跑了」，其实什么都没做——pbnpm 只会在窗口里留一句报错。
       await writeFile(join(wrapperDir, 'pbnpm.cmd'), [
         '@echo off',
+        'setlocal',
+        'set "ELECTRON_RUN_AS_NODE=1"',
         `"${process.execPath}" "${join(import.meta.dirname, 'pbnpm-run.mjs')}" "${join(dirs[0], 'pbnpm.exe')}" %*`,
         '',
       ].join('\r\n'), 'utf8')
@@ -159,7 +175,7 @@ export function createWorldTerminal(ctx, { subprocess, FsError, toolDirs = () =>
 
   /** 忘掉一个任务：连它的临时批处理一起删，别在 %TEMP% 里堆一地的 .cmd。 */
   function forgetScript(script) {
-    if (script) void rm(script, { force: true }).catch(() => {})
+    for (const file of [script].flat().filter(Boolean)) void rm(file, { force: true }).catch(() => {})
   }
 
   return {
@@ -220,13 +236,13 @@ export function createWorldTerminal(ctx, { subprocess, FsError, toolDirs = () =>
         const cwd = await directoryOf(payload.cwd, home, active)
         const { path: toolPath } = await toolEnv()
         const id = `job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-        const { argv, script } = await argvFor(shell, line, id)
+        const { argv, scripts } = await argvFor(shell, line, id)
         // 分页器/凭据弹窗在无头窗口里没人能应答，直接关掉；颜色则强制打开，否则
         // git / ls 会因为「不是终端」而退回无色输出，窗口里看着像坏了。
         const started = runner.start({
-          id, argv, cwd, signal: active, line, script,
+          id, argv, cwd, signal: active, line,
           code: 'WORLD_TERMINAL_SPAWN',
-          cleanup: () => forgetScript(script),
+          cleanup: () => forgetScript(scripts),
           env: {
             TERM: 'xterm-256color', COLORTERM: 'truecolor', FORCE_COLOR: '1', CLICOLOR_FORCE: '1',
             GIT_PAGER: 'cat', PAGER: 'cat', GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never',
