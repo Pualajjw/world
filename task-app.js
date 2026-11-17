@@ -69,11 +69,24 @@ export function TasksPage({ rpc, visible = true, onDirtyChange }) {
     return result.value
   }, [rpc])
 
+  const listView = React.useRef(null)
+  React.useLayoutEffect(() => {
+    // A return to the same filter is a new visit; earlier responses still belong to the old one.
+    const view = { filter }
+    listView.current = view
+    return () => { if (listView.current === view) listView.current = null }
+  }, [filter, visible, request])
+
   const refresh = React.useCallback(async (nextFilter = filter) => {
-    const value = await request('list', payloadOf(nextFilter))
-    if (!alive.current) return value
-    setList(current => value.revision >= current.revision ? { ...value, error: '' } : current)
-    return value
+    const view = listView.current
+    const isCurrent = () => alive.current && view && listView.current === view && view.filter === nextFilter
+    try {
+      const value = await request('list', payloadOf(nextFilter))
+      if (isCurrent()) setList(current => value.revision >= current.revision ? { ...value, error: '' } : current)
+      return value
+    } catch (error) {
+      if (isCurrent()) throw error
+    }
   }, [filter, request])
 
   React.useEffect(() => {

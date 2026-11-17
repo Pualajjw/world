@@ -3,9 +3,18 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { checkLanChatInput } from './lan-chat-browser.mjs'
-import { checkBrowserWindow } from './browser-frame.browser.mjs'
+import { checkBrowserHomeSearch, checkBrowserWindow } from './browser-frame.browser.mjs'
 import { checkWindowRestore } from './window-restore.mjs'
 import { checkDesktopTools } from './desktop-browser.mjs'
+import { checkLaunchImmersive } from './launch-browser.mjs'
+import { checkPickerOverflow } from './picker-browser.mjs'
+import { checkReplaceDraft } from './replace-draft-browser.mjs'
+import { checkSaveDraft } from './save-draft-browser.mjs'
+import { checkProcesses } from './process-manager-browser.mjs'
+import { checkStorage } from './storage-manager-browser.mjs'
+import { checkUpdates } from './updates-browser.mjs'
+import { checkQuickOpen } from './quick-open-browser.mjs'
+import { checkBatchStart } from './batch-start-browser.mjs'
 import { createDesktopBridge } from '../desktop-bridge.js'
 import { checkDesktopControl } from './control-browser.mjs'
 import { checkWorkbenchSetup } from './setup-browser.mjs'
@@ -16,15 +25,22 @@ import { checkOwnershipOrdering } from './ownership-browser.mjs'
 import { checkAssistantConversation } from './conversation-browser.mjs'
 import { checkJournal } from './journal-browser.mjs'
 import { checkTasks } from './tasks-browser.mjs'
+import { checkTasksFilter } from './tasks-filter-browser.mjs'
 import { checkWalkerMotion } from './walker-motion-browser.mjs'
 import { checkIconDrag } from './icons-browser.mjs'
 import { checkStartSearch } from './start-search-browser.mjs'
+import { checkNotices } from './notice-browser.mjs'
+import { checkPowerMenu } from './power-browser.mjs'
+import { checkConfirmDialog } from './confirm-browser.mjs'
 import { checkDesktopItems } from './desktop-items-browser.mjs'
 import { checkDesktopScreenshot } from './screenshot-browser.mjs'
-import { checkTerminal } from './terminal-browser.mjs'
+import { checkPhoneTerminal, checkTerminal } from './terminal-browser.mjs'
+import { checkTerminalIme } from './terminal-ime-browser.mjs'
+import { checkVscodeFormats } from './vscode-formats-browser.mjs'
 import { checkTerminalSsh } from './ssh-browser.mjs'
 import { checkPluginRoots } from './roots-browser.mjs'
 import { checkPhoneDesktop } from './phone-browser.mjs'
+import { checkWindowEdges } from './window-edges.mjs'
 import { createDesktopBrain } from '../desktop-brain.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -102,12 +118,18 @@ try {
   // 任务栏：开始按钮 + 3D 景深开关（窗口按钮在有窗口时才出现）
   assert.equal(await page.locator('.world-taskbar-center button').count(), 1)
   assert.equal(await page.locator('.world-depth-toggle').count(), 1)
-  assert.equal(await page.locator('body').getAttribute('data-world-depth'), 'on')
+  // 0.2.95 起默认进平面桌面（原来的普通桌面），3D 景深要点任务栏那颗按钮才打开。
+  assert.equal(await page.locator('body').getAttribute('data-world-depth'), 'off')
   assert.equal(await page.locator('.world-floor').count(), 1)
+  assert.equal(await page.locator('.world-floor-wrap').evaluate(element => getComputedStyle(element).display), 'none')
+  assert.equal(await page.locator('.world-depth-toggle').getAttribute('data-world-depth-toggle'), 'off')
+  // 下面这些检查（地面、机器人、图标按平面摆位）都得在 3D 下才有意义，先替用户把景深打开。
+  await page.locator('.world-depth-toggle').click()
+  await page.waitForFunction(() => document.body.dataset.worldDepth === 'on')
   assert.equal(await page.locator('.world-desktop-icon').first().evaluate(element => getComputedStyle(element).perspective), 'none')
   // DSH + VSCode + 局域网聊天 + 浏览器 + 终端（0.2.37 起浏览器、0.2.81 起终端默认已安装）
-  // 设置 / 插件 / 日记 / 垃圾箱 / 待办 / VSCode / 局域网聊天 / 浏览器 / 终端
-  assert.equal(await page.locator('.world-start').locator('.world-app-card').count(), 10)
+  // 内置入口含 DSH 进程管理器与上网；新增入口不改变桌面上的图标。
+  assert.equal(await page.locator('.world-start').locator('.world-app-card').count(), 12)
   assert.equal(await page.locator('.world-app-card[data-world-app-card="browser"]').count(), 1)
   assert.equal(await page.locator('[data-world-browser-icon]').count(), 1)
   assert.equal(await page.locator('.world-app-card[data-world-app-card="terminal"]').count(), 1)
@@ -342,23 +364,70 @@ try {
   // 没有打开文件时不放一个永远点不动的「保存」按钮，也不放假的「欢迎」标签
   assert.equal(await vscodeWindow.getByRole('button', { name: '保存', exact: true }).count(), 0)
   assert.equal(await vscodeWindow.locator('.world-vscode-tab').count(), 0)
-  assert.equal(await vscodeWindow.evaluate(element => getComputedStyle(element).zIndex), '5')
+  // 标题栏「对话」：编辑器里挂 DSH 原生对话，打开对话座位、主对话暂时让位；关闭后恢复
+  await vscodeWindow.getByRole('button', { name: '打开对话' }).click()
+  await page.locator('.world-vscode-chat [data-fixture-composer]').waitFor()
+  await page.waitForFunction(() => document.querySelector('[data-world-conversation-away]') !== null)
+  assert.equal(await page.locator('.world-vscode-tab.active .world-vscode-tab-name').textContent(), '对话')
+  assert.equal(await page.locator('.world-vscode-chat [data-fixture-chat]').getAttribute('data-fixture-chat'), 'session-1')
+  assert.match(await page.locator('.world-vscode-chat-session-name').textContent(), /工作区会话/u)
+  assert.equal(await page.locator('.world-vscode-chat-folder').textContent(), 'workspace')
+  assert.deepEqual(await page.evaluate(() => window.__worldTesting.conversation.conflicts), [])
+  // 新建会话：cwd 用当前文件夹；历史会话只列这个文件夹，点一条切回去
+  await page.locator('.world-vscode-chat-new').click()
+  await page.waitForFunction(() => document.querySelector('.world-vscode-chat [data-fixture-composer]')?.dataset.fixtureComposer === 'session-2')
+  assert.deepEqual(await page.evaluate(() => window.__worldTesting.sessionCreates.at(-1)), { id: 'session-2', workspaceId: 'ws-main' })
+  assert.equal(await page.locator('.world-vscode-chat-session-name').textContent(), '新建会话 session-2')
+  await page.locator('.world-vscode-chat-session').click()
+  await page.locator('.world-vscode-chat-menu').waitFor()
+  assert.equal(await page.locator('.world-vscode-chat-option').count(), 2)
+  await page.locator('.world-vscode-chat-option').filter({ hasText: '工作区会话' }).click()
+  await page.waitForFunction(() => document.querySelector('.world-vscode-chat [data-fixture-composer]')?.dataset.fixtureComposer === 'session-1')
+  // 原生模型菜单关闭后主动刷新 projection，模型名才会跟上
+  await page.locator('.world-vscode-chat').getByRole('button', { name: '模型菜单' }).click()
+  await page.locator('[data-fixture-popup]').waitFor()
+  await page.locator('[data-fixture-popup]').getByRole('button', { name: '保留当前模型' }).click()
+  await page.waitForFunction(() => window.__worldTesting.projectionRefreshes.includes('session-1'))
+  await page.locator('.world-vscode-chat [data-fixture-composer] textarea').fill('帮我看一下 main.js')
+  await page.locator('.world-vscode-chat').getByRole('button', { name: '发送', exact: true }).click()
+  assert.deepEqual(await page.evaluate(() => window.__worldTesting.conversation.sent.at(-1)),
+    { sessionId: 'session-1', text: '帮我看一下 main.js' })
+  await page.locator('.world-vscode-tab.active .world-vscode-tab-close').click()
+  await page.waitForFunction(() => document.querySelector('[data-slot="main.conversation"]') !== null)
+  assert.equal(await page.locator('.world-vscode-chat').count(), 0)
+  assert.deepEqual(await page.evaluate(() => window.__worldTesting.conversation.conflicts), [])
+  assert.equal(await vscodeWindow.evaluate(element => Number(getComputedStyle(element).zIndex) > 0), true)
   assert.equal(await page.locator('#root').evaluate(element => getComputedStyle(element).zIndex), '0')
   assert.equal(await page.locator('#host-ui').evaluate(element => element.inert), true)
   await page.getByRole('button', { name: 'DeepSeek Harness', exact: true }).dblclick({ force: true })
   await page.waitForFunction(() => document.body.dataset.worldActiveWindow === 'dsh')
-  assert.equal(await vscodeWindow.evaluate(element => getComputedStyle(element).zIndex), '3')
-  assert.equal(await page.locator('#root').evaluate(element => getComputedStyle(element).zIndex), '4')
+  // 主窗口也进同一套叠放栈：被点到栈顶后，标题栏框和 #root 共用一个 z，并且压过 VSCode
+  const raisedFrameZ = await page.locator('.world-window-frame').evaluate(element => getComputedStyle(element).zIndex)
+  assert.equal(await page.locator('#root').evaluate(element => getComputedStyle(element).zIndex), raisedFrameZ)
+  assert.equal(await vscodeWindow.evaluate(element => Number(getComputedStyle(element).zIndex) < Number(getComputedStyle(document.querySelector('.world-window-frame')).zIndex)), true)
+  const topAtOverlap = () => page.evaluate(() => {
+    const node = document.elementFromPoint(500, 300)
+    return node?.closest('.world-vscode-window') ? 'vscode' : node?.closest('#root') ? 'dsh' : 'other'
+  })
+  assert.equal(await topAtOverlap(), 'dsh', '主窗口在前台时，重叠处真的点到 DSH，不只是 z-index 数字变了')
+  // 主窗口也能钉住：点 VSCode 之后 DSH 仍然压在上面，取消钉住才让出去
+  await page.locator('.world-titlebar').getByRole('button', { name: '钉住（始终置顶）' }).click()
   await page.mouse.click(1100, 300)
   await page.waitForFunction(() => String(document.body.dataset.worldActiveWindow).startsWith('vscode'))
-  assert.equal(await vscodeWindow.evaluate(element => getComputedStyle(element).zIndex), '5')
+  assert.equal(await page.locator('#root').evaluate(element => Number(getComputedStyle(element).zIndex) > Number(getComputedStyle(document.querySelector('.world-vscode-window')).zIndex)), true)
+  assert.equal(await topAtOverlap(), 'dsh', '钉住的主窗口失去焦点后，重叠处仍然在 DSH 上')
+  await page.locator('.world-titlebar').getByRole('button', { name: '取消钉住（不再始终置顶）' }).click()
+  // 点图钉本身也会激活 DSH；再点一次露出在 DSH 外面的 VSCode 区域，让它重新回到最上面
+  await page.mouse.click(1100, 300)
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('.world-vscode-window')).zIndex) > Number(getComputedStyle(document.querySelector('.world-window-frame')).zIndex))
+  assert.equal(await topAtOverlap(), 'vscode')
   await page.getByRole('button', { name: '关闭 Visual Studio Code' }).click()
   await vscodeWindow.waitFor({ state: 'detached' })
   await page.getByRole('button', { name: '开始' }).click()
   await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-open').click()
   await vscodeWindow.waitFor()
   await page.waitForFunction(() => String(document.body.dataset.worldActiveWindow).startsWith('vscode'))
-  assert.equal(await vscodeWindow.evaluate(element => getComputedStyle(element).zIndex), '5')
+  assert.equal(await vscodeWindow.evaluate(element => Number(getComputedStyle(element).zIndex) > Number(getComputedStyle(document.querySelector('.world-window-frame')).zIndex)), true)
   assert.deepEqual(await page.locator('.world-vscode-window').evaluate(element => {
     const rect = element.getBoundingClientRect()
     return { width: rect.width, height: rect.height }
@@ -404,6 +473,16 @@ try {
   await page.keyboard.press('ArrowRight')
   await page.keyboard.press('ArrowRight')
   assert.equal(await page.locator('.world-vscode-status-pos').textContent(), '行 1, 列 3')
+  // 换行开关桌面上也有（过去只有手机）：状态栏显示当前状态，点一下等于 Alt+Z
+  const wrapToggle = page.locator('.world-vscode-statusbar .world-vscode-status-wrap')
+  assert.equal(await wrapToggle.textContent(), '换行 关', '桌面默认不折行')
+  await wrapToggle.click()
+  assert.equal(await wrapToggle.textContent(), '换行 开')
+  assert.equal(await wrapToggle.getAttribute('aria-pressed'), 'true')
+  assert.equal(await page.locator('.world-vscode-textarea').evaluate(node => getComputedStyle(node).whiteSpace), 'pre-wrap')
+  await wrapToggle.click()
+  assert.equal(await wrapToggle.textContent(), '换行 关')
+  assert.equal(await page.locator('.world-vscode-textarea').evaluate(node => getComputedStyle(node).whiteSpace), 'pre')
   // 状态栏如实报告换行符与编码（保存时会原样写回）
   assert.equal(await page.evaluate(() => document.querySelector('.world-vscode-statusbar')?.textContent?.includes('LF')), true)
 
@@ -471,20 +550,72 @@ try {
   const scrolledFirst = await page.locator('.world-vscode-gutter-row').first().textContent()
   console.log(`Large file check: ${largeStats.lineCount} lines, ${largeStats.gutterRows} gutter rows, scrolled to line ${scrolledFirst}.`)
 
-  // 源代码管理：分组、逐行/批量暂存、提交后清空
+  // 源代码管理：目录树折叠、目录级批量暂存、提交后清空
   await page.getByRole('button', { name: '源代码管理', exact: true }).click()
   assert.equal(await page.locator('.world-vscode-git-group').count(), 2)
-  assert.equal(await page.locator('.world-vscode-git-file').count(), 3)
+  assert.equal(await page.locator('.world-vscode-git-file').count(), 5)
+  assert.equal(await page.locator('.world-vscode-git-file.is-dir').count(), 2)
+  await page.locator('.world-vscode-git-history-row').first().waitFor()
+  const historyToggle = page.locator('.world-vscode-git-history-toggle')
+  assert.equal(await historyToggle.getAttribute('aria-expanded'), 'true')
+  assert.equal(await page.locator('.world-vscode-git-history-row').count(), 2)
+  await page.locator('.world-vscode-git-history-row').first().click()
+  assert.match(await page.locator('.world-vscode-git-history-detail').innerText(), /World Tester/u)
+  assert.match(await page.locator('.world-vscode-git-history-detail pre').innerText(), /支持中文说明/u)
+  await historyToggle.click()
+  assert.equal(await page.locator('.world-vscode-git-history-row').count(), 0)
+  await historyToggle.focus()
+  await page.keyboard.press('Enter')
+  assert.equal(await page.locator('.world-vscode-git-history-row').count(), 2)
+  await page.locator('.world-vscode-git-history-row').first().click()
+  const gitDirs = page.locator('.world-vscode-git-file.is-dir')
+  await gitDirs.first().click()
+  assert.equal(await page.locator('.world-vscode-git-file').count(), 4)
+  await gitDirs.first().click()
+  assert.equal(await page.locator('.world-vscode-git-file').count(), 5)
   assert.equal(await page.locator('.world-vscode-activity-badge').textContent(), '3')
   assert.equal(await page.locator('.world-vscode-git-primary').isDisabled(), true)
   assert.equal(await page.locator('.world-vscode-git-actions button').first().isEnabled(), true)
+  // 单击更改文件打开只读 Diff：工作区组用工作区 patch，行号 + 红绿行都要在
   await page.locator('.world-vscode-git-file').filter({ hasText: 'README.md' }).click()
-  assert.ok(await page.locator('.world-vscode-tab-name').filter({ hasText: 'README.md' }).count() >= 1)
+  await page.locator('.world-vscode-diff').waitFor()
+  assert.equal(await page.locator('.world-vscode-diff-scope').textContent(), '工作区')
+  assert.equal(await page.locator('.world-vscode-diff-line.is-add').count(), 1)
+  assert.equal(await page.locator('.world-vscode-diff-line.is-del').count(), 1)
+  assert.equal(await page.locator('.world-vscode-diff-line.is-meta').count(), 0)
+  assert.match(await page.locator('.world-vscode-diff-rows').textContent(), /added worktree line/u)
+  assert.deepEqual(await page.evaluate(() => {
+    const call = window.__worldTesting.calls.filter(item => item.method === 'world-vscode-git/diff').at(-1)
+    return { paths: call.payload.paths, staged: call.payload.staged, untracked: call.payload.untracked }
+  }), { paths: ['README.md'], staged: false, untracked: false })
+  await page.locator('.world-vscode-tab.active .world-vscode-tab-close').click()
+  // 已暂存组看索引里的 patch
+  await page.locator('.world-vscode-git-file').filter({ hasText: 'main.js' }).click()
+  await page.locator('.world-vscode-diff').waitFor()
+  assert.equal(await page.locator('.world-vscode-diff-scope').textContent(), '已暂存')
+  assert.match(await page.locator('.world-vscode-diff-rows').textContent(), /added index line/u)
+  assert.equal(await page.evaluate(() => window.__worldTesting.calls
+    .filter(item => item.method === 'world-vscode-git/diff').at(-1).payload.staged), true)
+  await page.locator('.world-vscode-tab.active .world-vscode-tab-close').click()
+  // 双击仍打开源码；顺手把单击带出来的 Diff 标签关掉，保持后面的标签数不变
+  await page.locator('.world-vscode-git-file').filter({ hasText: 'README.md' }).dblclick()
+  await page.locator('.world-vscode-textarea').waitFor()
+  await page.waitForFunction(() => document.querySelector('.world-vscode-tab.active .world-vscode-tab-name')?.textContent === 'README.md')
+  assert.equal(await page.locator('.world-vscode-tab.active .world-vscode-tab-name').textContent(), 'README.md')
+  assert.equal(await page.locator('.world-vscode-tab.is-diff').count(), 1)
+  await page.locator('.world-vscode-tab.is-diff .world-vscode-tab-close').click()
+  assert.equal(await page.locator('.world-vscode-tab.is-diff').count(), 0)
+  // 目录行的 + 只暂存这个目录下的内容，根目录的 README.md 留在「更改」组里
+  const changeDir = page.locator('.world-vscode-git-group').last().locator('.world-vscode-git-file.is-dir')
+  await changeDir.locator('.world-vscode-git-act').click()
+  assert.equal(await page.evaluate(() => window.__worldTesting.calls
+    .filter(call => call.method === 'world-vscode-git/stage').at(-1).payload.paths.join(',')), 'src/app.js')
+  assert.equal(await page.locator('.world-vscode-git-group').last().locator('.world-vscode-git-file.is-dir').count(), 0)
   const changesGroup = page.locator('.world-vscode-git-group-head').filter({ hasText: '更改' })
   await changesGroup.hover()
   await changesGroup.getByRole('button').click()
   assert.equal(await page.locator('.world-vscode-git-group').count(), 1)
-  assert.equal(await page.locator('.world-vscode-git-file').count(), 3)
+  assert.equal(await page.locator('.world-vscode-git-file').count(), 4)
   await page.locator('.world-vscode-git-message').fill('feat: git 面板')
   assert.equal(await page.locator('.world-vscode-git-primary').isEnabled(), true)
   await page.locator('.world-vscode-git-primary').click()
@@ -494,6 +625,14 @@ try {
   assert.match(await page.locator('.world-vscode-git-msg').textContent(), /feat: git 面板/u)
   assert.equal(await page.evaluate(() => window.__worldTesting.calls.some(call => call.method === 'world-vscode-git/stage')), true)
   assert.equal(await page.evaluate(() => window.__worldTesting.calls.some(call => call.method === 'world-vscode-git/commit' && call.payload.message === 'feat: git 面板')), true)
+
+  await page.waitForFunction(() => document.querySelector('.world-vscode-git-history-row')?.textContent.includes('feat: git 面板'))
+  const logCallsBeforeRefresh = await page.evaluate(() => window.__worldTesting.calls.filter(call => call.method === 'world-vscode-git/log').length)
+  await page.getByRole('button', { name: '刷新 Git 状态', exact: true }).click()
+  await page.waitForFunction(count => window.__worldTesting.calls.filter(call => call.method === 'world-vscode-git/log').length > count, logCallsBeforeRefresh)
+  const logCallsBeforePull = await page.evaluate(() => window.__worldTesting.calls.filter(call => call.method === 'world-vscode-git/log').length)
+  await page.locator('.world-vscode-git-actions button').first().click()
+  await page.waitForFunction(count => window.__worldTesting.calls.filter(call => call.method === 'world-vscode-git/log').length > count, logCallsBeforePull)
 
   // 搜索：输入即搜、结果按文件分组、点击命中定位到行
   await page.getByRole('button', { name: '搜索', exact: true }).click()
@@ -523,6 +662,54 @@ try {
   assert.equal(await page.locator('.world-vscode-sidebar-title').textContent(), '搜索')
   assert.equal(await page.locator('.world-vscode-search-hit').count(), 2)
 
+  // 替换：展开替换行 → 按文件替换 → 全部替换（确认后只改结果里的文件）
+  await page.getByRole('button', { name: '切换替换' }).click()
+  await page.locator('.world-vscode-search-box.is-replace input').fill('next')
+  await page.locator('.world-vscode-search-file-replace').nth(1).click()
+  await page.waitForFunction(() => window.__worldTesting.calls.some(call =>
+    call.method === 'world-vscode-search/replace' && call.payload.paths?.length === 1 && call.payload.paths[0] === 'README.md'))
+  assert.match(await page.locator('.world-vscode-search-notice').textContent(), /已替换/u)
+  await page.waitForFunction(() => !document.querySelector('.world-vscode-search-replace-all')?.disabled)
+  await page.locator('.world-vscode-search-replace-all').click()
+  const replaceCard = page.locator('[data-world-confirm-card]')
+  await replaceCard.waitFor()
+  assert.equal(await replaceCard.locator('.world-confirm-title').textContent(), '全部替换')
+  await page.locator('[data-world-confirm] [data-role="confirm"]').click()
+  await page.waitForFunction(() => window.__worldTesting.calls.some(call =>
+    call.method === 'world-vscode-search/replace' && call.payload.paths?.length === 2 && call.payload.replacement === 'next'))
+  assert.equal(await page.evaluate(() => window.__worldTesting.calls.filter(call =>
+    call.method === 'world-vscode-search/replace').at(-1).payload.regex), false)
+  await page.getByRole('button', { name: '切换替换' }).click()
+
+  // 批处理：文件树右键运行，输出面板流式显示，结束后报退出码
+  await page.getByRole('button', { name: '资源管理器', exact: true }).click()
+  assert.equal(await page.locator('.world-vscode-explorer-list').count(), 1)
+  await page.getByRole('button', { name: 'build.bat', exact: true }).click({ button: 'right' })
+  await page.locator('.world-vscode-menu').locator('button').filter({ hasText: '运行批处理' }).click()
+  await page.waitForFunction(() => document.querySelector('.world-vscode-output-text')?.textContent.includes('hello from batch'))
+  assert.equal(await page.evaluate(() => {
+    const output = document.querySelector('.world-vscode-output')?.getBoundingClientRect()
+    const editor = document.querySelector('.world-vscode-editor')?.getBoundingClientRect()
+    const tabs = document.querySelector('.world-vscode-tabs')?.getBoundingClientRect()
+    return Boolean(output && editor && tabs) && output.height >= editor.height - tabs.height - 1
+  }), true, 'the run output fills the editor body')
+  assert.equal(await page.evaluate(() => window.__worldTesting.calls.some(call =>
+    call.method === 'world-terminal/run' && call.payload.line.includes('build.bat') && call.payload.cwd === '/workspace')), true)
+  // 收起：进程继续跑，正文回到批处理文件；状态栏点回来还能看到输出
+  await page.locator('.world-vscode-output').getByRole('button', { name: '收起', exact: true }).click()
+  await page.waitForFunction(() => !document.querySelector('.world-vscode-output'))
+  await page.waitForFunction(() => document.querySelector('.world-vscode-tab.active .world-vscode-tab-name')?.textContent === 'build.bat')
+  await page.waitForFunction(() => document.querySelector('.world-vscode-textarea')?.value.includes('@echo off'))
+  await page.waitForFunction(() => document.querySelector('.world-vscode-status-batch')?.textContent.includes('● 输出'))
+  await page.locator('.world-vscode-status-batch').click()
+  await page.waitForFunction(() => document.querySelector('.world-vscode-output-text')?.textContent.includes('hello from batch'))
+  await page.waitForFunction(() => document.querySelector('.world-vscode-output-state')?.textContent.includes('退出码 0'))
+  await page.locator('.world-vscode-output').getByRole('button', { name: '关闭输出', exact: true }).click()
+  await page.waitForFunction(() => !document.querySelector('.world-vscode-output'))
+  // 回到 main.js，后面的语法高亮断言仍按这个文件
+  await page.locator('.world-vscode-tab').filter({ hasText: 'main.js' }).first().click()
+  await page.waitForFunction(() => document.querySelector('.world-vscode-tab.active .world-vscode-tab-name')?.textContent === 'main.js')
+
   // 语法高亮覆盖层与文本逐行对齐，关键字有独立颜色
   assert.equal(await page.locator('.world-vscode-highlight').count(), 1)
   assert.equal(await page.locator('.world-vscode-highlight .world-vscode-tok-kw').first().textContent(), 'const')
@@ -533,11 +720,11 @@ try {
     return { line: line.getBoundingClientRect().height, gutter: gutter.getBoundingClientRect().height }
   }), { line: 20, gutter: 20 })
 
-  // 侧栏：Ctrl+B 折叠、拖拽改宽、双击复位
+  // 侧栏：Ctrl+Shift+B 折叠、拖拽改宽、双击复位
   await page.locator('.world-vscode-textarea').click()
-  await page.keyboard.press('Control+b')
+  await page.keyboard.press('Control+Shift+b')
   assert.equal(await page.locator('.world-vscode-sidebar').count(), 0)
-  await page.keyboard.press('Control+b')
+  await page.keyboard.press('Control+Shift+b')
   await page.locator('.world-vscode-sidebar').waitFor()
   const sidebarBefore = await page.locator('.world-vscode-sidebar').evaluate(element => element.getBoundingClientRect().width)
   const handle = await page.locator('.world-vscode-sidebar-resize').boundingBox()
@@ -550,11 +737,8 @@ try {
   await page.locator('.world-vscode-sidebar-resize').dblclick()
   assert.equal(await page.locator('.world-vscode-sidebar').evaluate(element => element.clientWidth), 220)
 
-  await page.getByRole('button', { name: '资源管理器', exact: true }).click()
-  assert.equal(await page.locator('.world-vscode-explorer-list').count(), 1)
-
   // 打开文件夹：对话框只列子文件夹，选定后资源管理器、搜索和 Git 都换根
-  await page.locator('.world-vscode-title-btn').click()
+  await page.locator('.world-vscode-title-btn[aria-label="打开文件夹"]').click()
   const picker = page.locator('.world-vscode-picker')
   await picker.waitFor()
   assert.equal(await picker.locator('.world-vscode-picker-row').count(), 1)
@@ -580,14 +764,49 @@ try {
   assert.equal(await page.getByRole('button', { name: 'README.md', exact: true }).count(), 0)
   assert.equal(await page.evaluate(() => window.__worldTesting.calls.filter(call => call.method === 'world-vscode-source/list').at(-1).payload.path), '/workspace/src')
   assert.equal(await page.evaluate(() => window.__worldTesting.calls.filter(call => call.method === 'world-vscode-git/status').at(-1).payload.root), '/workspace/src')
+  // 默认打开最后一次打开的文件夹：src 是最近一次换根，关窗后从开始菜单重开仍应落在 src，而不是会话 cwd
+  await vscodeWindow.getByRole('button', { name: '关闭 Visual Studio Code' }).click()
+  await page.waitForFunction(() => document.querySelectorAll('.world-vscode-window').length === 0)
+  await page.getByRole('button', { name: '开始' }).click()
+  await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-open').click()
+  await page.waitForFunction(() => document.querySelector('.world-vscode-status-root')?.textContent.includes('src'))
+  assert.equal(await page.locator('.world-vscode-status-root').textContent(), '◆ src')
+  // 历史文件夹：对话框顶部直接列出上一个根，点一条就切回去
+  await page.locator('.world-vscode-title-btn[aria-label="打开文件夹"]').click()
+  const recent = page.locator('.world-vscode-picker-recent')
+  await recent.waitFor()
+  assert.equal(await recent.locator('.world-vscode-picker-recent-row').count(), 1)
+  assert.equal(await recent.locator('.world-vscode-picker-root-name').textContent(), 'workspace')
+  await recent.locator('.world-vscode-picker-recent-row').click()
+  await page.waitForFunction(() => document.querySelector('.world-vscode-status-root')?.textContent.includes('workspace'))
+  assert.equal(await page.locator('.world-vscode-picker').count(), 0)
+  // 再从历史点回 src，后面的搜索断言仍以 src 为根
+  await page.locator('.world-vscode-title-btn[aria-label="打开文件夹"]').click()
+  await page.locator('.world-vscode-picker-recent .world-vscode-picker-recent-row').filter({ hasText: 'src' }).click()
+  await page.waitForFunction(() => document.querySelector('.world-vscode-status-root')?.textContent.includes('src'))
+  // 对话跟着目录走：src 没有会话时是空态，新建的会话 cwd 必须是 src
+  await page.getByRole('button', { name: '打开对话' }).click()
+  await page.locator('.world-vscode-chat-empty').waitFor()
+  assert.match(await page.locator('.world-vscode-chat-empty').textContent(), /这个文件夹还没有对话/u)
+  assert.equal(await page.locator('.world-vscode-chat-folder').textContent(), 'src')
+  const createsBefore = await page.evaluate(() => window.__worldTesting.sessionCreates.length)
+  await page.locator('.world-vscode-chat-empty-actions .is-primary').click()
+  await page.waitForFunction(before => window.__worldTesting.sessionCreates.length === before + 1, createsBefore)
+  assert.equal(await page.evaluate(() => window.__worldTesting.sessionCreates.at(-1).cwd), '/workspace/src')
+  await page.waitForFunction(() => document.querySelector('.world-vscode-chat [data-fixture-composer]')?.dataset.fixtureComposer === 'session-3')
+  await page.locator('.world-vscode-tab.active .world-vscode-tab-close').click()
   await page.getByRole('button', { name: '搜索', exact: true }).click()
   await page.locator('.world-vscode-search-input').fill('value')
   await page.waitForFunction(() => document.querySelectorAll('.world-vscode-search-file').length === 2)
   assert.equal(await page.evaluate(() => window.__worldTesting.calls.filter(call => call.method === 'world-vscode-search/find').at(-1).payload.root), '/workspace/src')
 
-  // 多开：桌面图标再开一个独立窗口，标签互不影响，任务栏各占一项
-  await page.getByRole('button', { name: '开始' }).click()
-  await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-open').click()
+  // 多开：换一个文件夹再开一个独立窗口，标签互不影响，任务栏各占一项
+  await page.locator('.world-vscode-title-btn[aria-label="打开文件夹"]').click()
+  const secondPicker = page.locator('.world-vscode-picker')
+  await secondPicker.locator('.world-vscode-picker-input').fill('/workspace')
+  await secondPicker.locator('.world-vscode-picker-input').press('Enter')
+  await page.waitForFunction(() => document.querySelector('.world-vscode-picker-input')?.value === '/workspace')
+  await secondPicker.getByRole('button', { name: '在新窗口打开' }).click()
   await page.waitForFunction(() => document.querySelectorAll('.world-vscode-window').length === 2)
   const windows = page.locator('.world-vscode-window')
   assert.equal(await page.locator('[data-world-taskbar^="vscode:"]').count(), 2)
@@ -602,20 +821,41 @@ try {
   // 点哪个窗口哪个就压到最上面
   // 后面的窗口只在左侧错开 60px 露面：点露出来的那条（标题栏左侧）才会激活它
   await windows.nth(0).click({ force: true, position: { x: 24, y: 10 } })
-  await page.waitForFunction(() => Number(getComputedStyle(document.querySelectorAll('.world-vscode-window')[0]).zIndex) === 5)
-  assert.equal(await windows.nth(1).evaluate(element => getComputedStyle(element).zIndex), '4')
+  await page.waitForFunction(() => {
+    const [first, second] = document.querySelectorAll('.world-vscode-window')
+    return Number(getComputedStyle(first).zIndex) > Number(getComputedStyle(second).zIndex)
+  })
+  // 钉住：失去焦点也压在未钉住窗口之上；取消钉住后立刻回到最近激活次序
+  const pinFirst = windows.nth(0).getByRole('button', { name: '钉住（始终置顶）' })
+  await pinFirst.click()
+  assert.equal(await windows.nth(0).getByRole('button', { name: '取消钉住（不再始终置顶）' }).getAttribute('aria-pressed'), 'true')
+  await page.locator('[data-world-taskbar^="vscode:"]').nth(1).click()
+  await page.waitForFunction(() => {
+    const [first, second] = document.querySelectorAll('.world-vscode-window')
+    return Number(getComputedStyle(first).zIndex) > Number(getComputedStyle(second).zIndex)
+  })
+  await windows.nth(0).getByRole('button', { name: '取消钉住（不再始终置顶）' }).click()
+  // 取消钉住本身也会把被点的窗口激活；再点另一个任务栏按钮，叠放次序才回到最近激活
+  await page.locator('[data-world-taskbar^="vscode:"]').nth(1).click()
+  await page.waitForFunction(() => {
+    const [first, second] = document.querySelectorAll('.world-vscode-window')
+    return Number(getComputedStyle(second).zIndex) > Number(getComputedStyle(first).zIndex)
+  })
+  // 重新点回旧窗口，后续按键归属仍按原来的套路走
+  await windows.nth(0).click({ force: true, position: { x: 24, y: 10 } })
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelectorAll('.world-vscode-window')[0]).zIndex) > Number(getComputedStyle(document.querySelectorAll('.world-vscode-window')[1]).zIndex))
   assert.equal((await page.locator('[data-world-taskbar^="vscode:"]').evaluateAll(nodes => nodes.map(node => node.textContent))).join('|'), 'src|workspace')
-  // 快捷键只归一个窗口：两个窗口都挂着 window 监听，Ctrl+B 不能把两个侧栏一起收掉
-  await page.keyboard.press('Control+b')
+  // 快捷键只归一个窗口：两个窗口都挂着 window 监听，Ctrl+Shift+B 不能把两个侧栏一起收掉
+  await page.keyboard.press('Control+Shift+b')
   await page.waitForFunction(() => document.querySelectorAll('.world-vscode-window')[0].querySelector('.world-vscode-sidebar') === null)
   assert.equal(await windows.nth(1).locator('.world-vscode-sidebar').count(), 1)
-  await page.keyboard.press('Control+b')
+  await page.keyboard.press('Control+Shift+b')
   await page.waitForFunction(() => document.querySelectorAll('.world-vscode-window')[0].querySelector('.world-vscode-sidebar') !== null)
   await windows.nth(1).getByRole('button', { name: '关闭 Visual Studio Code' }).click()
   await page.waitForFunction(() => document.querySelectorAll('.world-vscode-window').length === 1)
 
   // 对话框是模态的：焦点落在列表行上也能 Esc 关掉，点卡片外面也能关，点里面不关
-  await page.locator('.world-vscode-title-btn').click()
+  await page.locator('.world-vscode-title-btn[aria-label="打开文件夹"]').click()
   await page.locator('.world-vscode-picker').waitFor()
   // 当前根是 /workspace/src（没有子文件夹），先回上一级拿到可聚焦的行
   await page.locator('.world-vscode-picker-up').click()
@@ -623,7 +863,7 @@ try {
   await page.locator('.world-vscode-picker-row').first().focus()
   await page.keyboard.press('Escape')
   await page.locator('.world-vscode-picker').waitFor({ state: 'detached' })
-  await page.locator('.world-vscode-title-btn').click()
+  await page.locator('.world-vscode-title-btn[aria-label="打开文件夹"]').click()
   await page.locator('.world-vscode-picker').waitFor()
   // Tab 在卡片里循环：从最后一个键（打开）按 Tab 回到第一个可聚焦元素（关闭 ×）
   await picker.getByRole('button', { name: '打开', exact: true }).focus()
@@ -634,14 +874,14 @@ try {
   await page.locator('.world-vscode-picker').click({ position: { x: 4, y: 4 } })
   await page.locator('.world-vscode-picker').waitFor({ state: 'detached' })
 
-  // 同一个文件夹只有一个实例：「在新窗口打开」只会把已开的窗口拿到前台
-  await page.locator('.world-vscode-title-btn').click()
+  // 同一文件夹只保留一个窗口；显式新窗口操作也复用当前目录实例。
+  await page.locator('.world-vscode-title-btn[aria-label="打开文件夹"]').click()
   await page.locator('.world-vscode-picker').getByRole('button', { name: '在新窗口打开' }).click()
   await page.waitForTimeout(250)
   assert.equal(await page.locator('.world-vscode-window').count(), 1)
   assert.equal(await page.locator('.world-vscode-picker').count(), 0)
-  // 换一个文件夹才真的再开一个窗口：标签只显示文件夹名，不重复
-  await page.locator('.world-vscode-title-btn').click()
+  // 另一个文件夹有自己的窗口和标签。
+  await page.locator('.world-vscode-title-btn[aria-label="打开文件夹"]').click()
   await page.locator('.world-vscode-picker-up').click()
   await page.locator('.world-vscode-picker').getByRole('button', { name: '在新窗口打开' }).click()
   await page.waitForFunction(() => document.querySelectorAll('.world-vscode-window').length === 2)
@@ -649,11 +889,12 @@ try {
     (await page.locator('[data-world-taskbar^="vscode:"] .world-taskbar-app-name').evaluateAll(nodes => nodes.map(node => node.textContent))).join('|'),
     'src|workspace',
   )
-  // 桌面图标再开「同一个文件夹」同样只聚焦，不再叠一个窗口
+  // 最近目录已打开时，默认创建未选择文件夹的空白实例。
   await page.getByRole('button', { name: '开始' }).click()
   await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-open').click()
   await page.waitForTimeout(250)
-  assert.equal(await page.locator('.world-vscode-window').count(), 2)
+  assert.equal(await page.locator('.world-vscode-window').count(), 3)
+  assert.equal(await page.locator('.world-vscode-window').last().locator('.world-vscode-status-root').textContent(), '◆ 打开文件夹')
   assert.equal(await page.locator('.world-vscode-window').last().evaluate(node => node.classList.contains('is-active')), true)
   while (await page.locator('.world-vscode-window').count() > 1) {
     await page.locator('.world-vscode-window').last().getByRole('button', { name: '关闭 Visual Studio Code' }).click()
@@ -683,6 +924,18 @@ try {
   await page.waitForFunction(() => !document.querySelector('.world-vscode-window').classList.contains('is-max'))
   assert.equal(await solo.evaluate(element => Math.round(element.getBoundingClientRect().width) < window.innerWidth), true)
   assert.equal(await solo.locator('.world-vscode-resize').count(), 8)
+
+  // 应用窗口一样能甩到边上占半屏（七种窗口共用同一套边缘判定）
+  const vscodeBar = await solo.locator('.world-vscode-titlebar').boundingBox()
+  await page.mouse.move(vscodeBar.x + 120, vscodeBar.y + 12)
+  await page.mouse.down()
+  await page.mouse.move(1278, vscodeBar.y + 12, { steps: 8 })
+  await page.mouse.up()
+  await page.waitForTimeout(240)
+  assert.deepEqual(await solo.evaluate(element => {
+    const rect = element.getBoundingClientRect()
+    return { right: Math.round(rect.right), bottom: Math.round(rect.bottom) }
+  }), { right: 1280, bottom: 752 }, 'VSCode 窗口甩到右边要贴住右边界与任务栏')
 
   // 最大化状态下最小化，任务栏还原后仍是最大化（lastOpen）
   await solo.getByRole('button', { name: '最大化 Visual Studio Code' }).click()
@@ -751,8 +1004,11 @@ try {
 
   await page.locator('[data-world-taskbar="plugin:workflow-studio"]').click()
   assert.equal(await page.locator('body').getAttribute('data-world-active-window'), 'plugin:workflow-studio')
-  assert.equal(await firstWindow.evaluate(element => getComputedStyle(element).zIndex), '6')
-  assert.equal(await secondWindow.evaluate(element => getComputedStyle(element).zIndex), '2')
+  await page.waitForFunction(() => {
+    const first = document.querySelector('[data-world-plugin="workflow-studio"]')
+    const second = document.querySelector('[data-world-plugin="assessment"]')
+    return Number(getComputedStyle(first).zIndex) > Number(getComputedStyle(second).zIndex)
+  })
   if (process.env.WORLD_SHOT) {
     await page.waitForFunction(() => getComputedStyle(document.querySelector('.world-start')).opacity === '0')
     await page.screenshot({ path: process.env.WORLD_SHOT })
@@ -805,7 +1061,7 @@ try {
   assert.equal(await page.locator('[data-world-taskbar="lanchat"]').count(), 1)
   assert.equal(await page.locator('body').getAttribute('data-world-active-window'), 'lanchat')
   assert.equal(await page.locator('.world-lanchat-frame').count(), 1)
-  assert.equal(await chatWindow.evaluate(element => getComputedStyle(element).zIndex), '5')
+  assert.equal(await chatWindow.evaluate(element => Number(getComputedStyle(element).zIndex) > Number(getComputedStyle(document.querySelector('.world-window-frame')).zIndex)), true)
   await chatWindow.locator('[aria-label="最小化"]').click()
   assert.equal(await chatWindow.evaluate(element => element.style.display), 'none')
   await page.locator('[data-world-taskbar="lanchat"]').click()
@@ -821,12 +1077,13 @@ try {
   assert.equal(await page.locator('.world-desktop-icon').count(), 4)
   await page.keyboard.press('Escape')
 
-  // 主应用右键：只有「打开」，明确标记不可卸载
+  // 主应用右键：打开 / 设置 / 插件，明确标记不可卸载
   const contextClick = locator => locator.evaluate(element => element.dispatchEvent(new MouseEvent('contextmenu', {
     bubbles: true, cancelable: true, button: 2, clientX: 80, clientY: 90,
   })))
   await contextClick(page.getByRole('button', { name: 'DeepSeek Harness', exact: true }))
-  assert.equal(await page.locator('.world-context-menu [data-role="open"]').count(), 1)
+  assert.deepEqual(await page.locator('.world-context-menu button').evaluateAll(nodes => nodes.map(node => node.dataset.role)),
+    ['open', 'settings', 'plugins', 'launch-shortcut', 'reposition', 'rearrange'])
   assert.equal(await page.locator('.world-context-menu [data-role="uninstall"]').count(), 0)
   assert.match(await page.locator('.world-context-menu [data-role="protected"]').textContent(), /不可卸载/)
   await page.keyboard.press('Escape')
@@ -970,14 +1227,19 @@ try {
   await checkAssistantConversation(browser, bundle.outputFiles[0].text)
   await checkJournal(browser, bundle.outputFiles[0].text, root)
   await checkTasks(browser, bundle.outputFiles[0].text, root)
+  await checkTasksFilter(browser, bundle.outputFiles[0].text, process.env.WORLD_TASKS_SHOTS_DIR)
   await checkWalkerMotion(browser, bundle.outputFiles[0].text)
   await checkIconDrag(browser, bundle.outputFiles[0].text)
   await checkStartSearch(browser, bundle.outputFiles[0].text)
+  await checkNotices(browser, bundle.outputFiles[0].text, process.env.WORLD_NOTICE_SHOTS_DIR)
+  await checkPowerMenu(browser, bundle.outputFiles[0].text)
+  await checkConfirmDialog(browser, bundle.outputFiles[0].text, process.env.WORLD_CONFIRM_SHOTS_DIR)
   await checkDesktopItems(browser, bundle.outputFiles[0].text)
   await checkDesktopScreenshot(browser, bundle.outputFiles[0].text)
   await checkWorkbenchSetup(browser, bundle.outputFiles[0].text)
   await checkPersonalization(browser, bundle.outputFiles[0].text)
   await checkDesktopTools(page, desktopBridge, brain)
+  await checkLaunchImmersive(browser, bundle.outputFiles[0].text)
   await checkDesktopControl(page, desktopBridge, root, brain)
   await page.evaluate(() => window.__worldTesting.dispose())
   assert.equal(await page.locator('#root').evaluate(rootElement => rootElement.inert), false)
@@ -985,11 +1247,24 @@ try {
   assert.equal(await page.locator('style[data-plugin="dsh-world"]').count(), 0)
   assert.equal(await page.locator('.world-desktop-titlebar').count(), 0)
   console.log('Browser interactions passed: desktop, root box, drag, maximize, minimize/restore, close, start menu, plugin windows, taskbar restore, dialog ownership, built-in LAN chat app, .worldapp drop install, context-menu uninstall, main-app protection, 3D depth toggle, flat icons, cursor-following mascot, cleanup.')
-  await checkPhoneDesktop(browser, bundle.outputFiles[0].text)
+  await checkWindowEdges(browser, bundle.outputFiles[0].text)
+  await checkPhoneDesktop(browser, bundle.outputFiles[0].text, process.env.WORLD_PHONE_SHOTS_DIR)
   await checkBrowserWindow(browser, root, bundle.outputFiles[0].text)
+  await checkBrowserHomeSearch(browser, bundle.outputFiles[0].text)
   await checkTerminal(browser, bundle.outputFiles[0].text)
+  await checkPhoneTerminal(browser, bundle.outputFiles[0].text)
+  await checkTerminalIme(browser, bundle.outputFiles[0].text, process.env.WORLD_TERMINAL_IME_SHOTS_DIR)
   await checkTerminalSsh(browser, bundle.outputFiles[0].text)
   await checkPluginRoots(browser, bundle.outputFiles[0].text)
+  await checkPickerOverflow(browser, bundle.outputFiles[0].text)
+  await checkReplaceDraft(browser, bundle.outputFiles[0].text)
+  await checkSaveDraft(browser, bundle.outputFiles[0].text, process.env.WORLD_SAVE_SHOTS_DIR)
+  await checkVscodeFormats(browser, bundle.outputFiles[0].text, process.env.WORLD_FORMATS_SHOTS_DIR)
+  await checkProcesses(browser, bundle.outputFiles[0].text, process.env.WORLD_PROCESS_SHOTS_DIR)
+  await checkStorage(browser, bundle.outputFiles[0].text, process.env.WORLD_PROCESS_SHOTS_DIR)
+  await checkUpdates(browser, bundle.outputFiles[0].text, process.env.WORLD_UPDATE_SHOTS_DIR)
+  await checkQuickOpen(browser, bundle.outputFiles[0].text, process.env.WORLD_QUICK_OPEN_SHOTS_DIR)
+  await checkBatchStart(browser, bundle.outputFiles[0].text)
   await checkLanChatInput(browser, root)
 } finally {
   desktopBridge.dispose()

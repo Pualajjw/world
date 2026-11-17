@@ -285,6 +285,42 @@ export async function checkBrowserWindow(browser, root, bundleText) {
   }
 }
 
+/** 起始页输入：像网址就直接导航，不像网址就落到腾讯搜索。 */
+export async function checkBrowserHomeSearch(browser, bundleText) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
+  const errors = []
+  page.on('pageerror', error => errors.push(error.message))
+  try {
+    await page.setContent(HOST_HTML)
+    await page.evaluate(installBrowserProbe)
+    await page.addScriptTag({ content: bundleText })
+    await page.waitForFunction(() => document.body.dataset.worldWindow === 'closed')
+    await page.locator('[data-world-browser-icon]').dblclick()
+    await page.waitForSelector('[data-world-browser-home]')
+
+    const submitHome = async value => {
+      await page.locator('.world-browser-home-form input').fill(value)
+      await page.locator('.world-browser-home-form button[type="submit"]').click()
+    }
+    const searchUrl = 'https://so.qq.com/isearch?query=%E5%A6%82%E4%BD%95%E5%A4%84%E7%90%86%E5%86%85%E5%AE%B9'
+    await submitHome('如何处理内容')
+    await page.waitForFunction(url => window.__worldBrowserProbe.acquired.length === 1
+      && document.querySelector('[data-world-fake-webview]')?.dataset.loadUrl === url, searchUrl)
+    assert.equal(await page.locator('[data-world-browser-address]').inputValue(), searchUrl)
+    assert.equal(await page.locator('[data-world-browser-home]').count(), 0)
+
+    // 真正的网址仍按原规则补 https 并打开，不要被搜索抢走
+    await page.locator('[data-world-browser-add]').click()
+    await submitHome('example.com')
+    await page.waitForFunction(() => document.querySelectorAll('[data-world-fake-webview]').length === 2
+      && [...document.querySelectorAll('[data-world-fake-webview]')].some(node => node.dataset.loadUrl === 'https://example.com/'))
+    assert.deepEqual(errors, [])
+    console.log('Browser home search passed: 非网址 → 腾讯搜索，网址 → 直接导航')
+  } finally {
+    await page.close()
+  }
+}
+
 /** A dead renderer must stay stopped until the user explicitly retries. */
 async function checkBrowserCrashRecovery(browser, bundleText, shots) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })

@@ -20,6 +20,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { createStateStore } from './store.mjs'
+import { createChatAccess } from './access.mjs'
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url))
 const DEFAULT_PORT = Number(process.env.LAN_CHAT_PORT || 53317)
@@ -35,6 +36,12 @@ const BOT_MAX_CONCURRENT = 3
 const BOT_REFRESH_INTERVAL = 30_000
 const MAX_BOTS_PER_MESSAGE = 4
 const MAX_MESSAGES = 300                 // 每个会话在内存 / 磁盘里保留的条数
+const MAX_NETWORK_ENTRIES = 16           // 跨网段种子 / 额外广播地址各自的上限
+const NEIGHBOR_PROBE_INTERVAL = 60_000   // 同一台设备 60 秒内只交换一次邻居表，避免环路和广播风暴
+
+/** 跨网段配置：优先由文件（聊天窗口里保存）+ 环境变量合并，文件里的条目在前。 */
+const ENV_SEEDS = String(process.env.LAN_CHAT_PEERS || '').trim()
+const ENV_BROADCASTS = String(process.env.LAN_CHAT_BROADCASTS || '').trim()
 
 const STATIC = {
   '/': 'app.html', '/index.html': 'app.html', '/app.html': 'app.html',
@@ -45,6 +52,50 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=u
 function intOf(ip) { return ip.split('.').reduce((acc, part) => ((acc << 8) | Number(part)) >>> 0, 0) }
 function ipOf(value) { return [24, 16, 8, 0].map(shift => (value >>> shift) & 255).join('.') }
 function broadcastOf(address, netmask) { return ipOf((intOf(address) & intOf(netmask)) | (~intOf(netmask) >>> 0)) }
+function isIpv4(value) {
+  const parts = String(value == null ? '' : value).trim().split('.')
+  return parts.length === 4 && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+}
+function maskOfPrefix(prefix) { return prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0 }
+function cidrOf(address, netmask) {
+  const prefix = intOf(netmask).toString(2).split('1').length - 1
+  return ipOf((intOf(address) & intOf(netmask)) >>> 0) + '/' + prefix
+}
+function sameSubnetAs(address, item) {
+  const mask = intOf(item.netmask)
+  return ((intOf(address) & mask) >>> 0) === ((intOf(item.address) & mask) >>> 0)
+}
+
+/** 把「192.168.2.50」「192.168.2.50:53317」「http://192.168.2.50:53317/」统一成种子设备。 */
+function parseSeed(value, defaultPort) {
+  let text = String(value == null ? '' : value).trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '')
+  if (!text) return null
+  const match = text.match(/^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?$/)
+  if (!match || !isIpv4(match[1])) return null
+  const port = match[2] ? Number(match[2]) : Number(defaultPort)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null
+  return { ip: match[1], port, text: port === Number(defaultPort) ? match[1] : match[1] + ':' + port }
+}
+
+/** 额外广播地址接受 IPv4 广播地址，也接受 CIDR（192.168.2.0/24 → 192.168.2.255）。 */
+function parseBroadcast(value) {
+  const text = String(value == null ? '' : value).trim()
+  if (!text) return ''
+  const slash = text.indexOf('/')
+  if (slash > 0) {
+    const address = text.slice(0, slash).trim()
+    const prefix = Number(text.slice(slash + 1))
+    if (!isIpv4(address) || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return ''
+    return broadcastOf(address, ipOf(maskOfPrefix(prefix)))
+  }
+  return isIpv4(text) ? text : ''
+}
+
+/** 逗号 / 分号 / 空白分隔的条目，数组和字符串都接受。 */
+function entryList(value) {
+  const list = Array.isArray(value) ? value : [value]
+  return list.flatMap(item => String(item == null ? '' : item).split(/[\s,;]+/)).filter(Boolean)
+}
 
 function localInterfaces() {
   const result = []
@@ -64,6 +115,8 @@ function isLan(remote) {
   const ip = String(remote || '').replace(/^::ffff:/, '')
   return ip === '::1' || ip === '127.0.0.1' || /^192\.168\./.test(ip) || /^10\./.test(ip)
     || /^172\.(1[6-9]|2\d|3[01])\./.test(ip) || /^169\.254\./.test(ip)
+    // 100.64.0.0/10 是共享地址段（CGNAT / Tailscale）：同样不可公网路由，跨网段时经常用它
+    || /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip)
 }
 
 /** 探测本机是否装了 world 插件：优先看同目录的上一级（源码 / 安装目录），再看常见 profile 位置。 */
@@ -192,6 +245,7 @@ export function createLanChatServer(options = {}) {
   const world = detectWorld()
   // Host 注入的「本机模型好友」桥接：独立模式（start.cmd）没有宿主时为 null，功能自动缺席。
   const friends = options.models || null
+  const access = createChatAccess()
   let me = null
   let peers = []
   let bots = []
@@ -202,6 +256,7 @@ export function createLanChatServer(options = {}) {
   let server = null
   let port = 0
   let started = false
+  let starting = null, stopping = null
   let disposed = false
   const sse = new Set()
   const timers = []
@@ -213,6 +268,10 @@ export function createLanChatServer(options = {}) {
   let botRunning = 0
   let botsRefreshing = false
   let announceTicks = 0
+  // 跨网段：文件里的配置（可由聊天窗口修改）+ 环境变量合并成生效条目。
+  let fileNetwork = { seeds: [], broadcasts: [] }
+  const multi = { seeds: [], seedList: [], broadcasts: [] }
+  const probedAt = new Map()            // peerId -> 上次交换邻居表的时间
   // 发现通道的健康度：UDP 收不到广播时，HTTP 在线通知仍可兜底，并把原因写进诊断。
   const net = {
     startedAt: 0,
@@ -227,6 +286,73 @@ export function createLanChatServer(options = {}) {
     getState: () => persistable(),
     onWarning: error => { if (options.onWarning) options.onWarning('会话存储: ' + String(error?.message || error)) },
   })
+
+  /* ------------------------- 跨网段发现配置 ------------------------- */
+
+  function networkPath() { return path.join(homeDir(), 'lan-chat', 'network.json') }
+
+  /** 文件配置优先，环境变量作为补充；两边都去重，坏条目直接忽略。 */
+  function applyNetwork() {
+    const seeds = [], seedList = [], seenSeeds = new Set()
+    for (const value of [...fileNetwork.seeds, ...entryList(ENV_SEEDS)]) {
+      const seed = parseSeed(value, DEFAULT_PORT)
+      if (!seed) continue
+      const key = seed.ip + ':' + seed.port
+      if (seenSeeds.has(key)) continue
+      seenSeeds.add(key)
+      seeds.push(seed.text)
+      seedList.push(seed)
+    }
+    const broadcasts = [], seenBroadcasts = new Set()
+    for (const value of [...fileNetwork.broadcasts, ...entryList(ENV_BROADCASTS)]) {
+      const address = parseBroadcast(value)
+      if (!address || seenBroadcasts.has(address)) continue
+      seenBroadcasts.add(address)
+      broadcasts.push(address)
+    }
+    multi.seeds = seeds
+    multi.seedList = seedList
+    multi.broadcasts = broadcasts
+  }
+
+  async function loadNetwork() {
+    try {
+      const raw = JSON.parse(await fsp.readFile(networkPath(), 'utf8'))
+      fileNetwork = {
+        seeds: entryList(raw?.seeds).map(value => parseSeed(value, DEFAULT_PORT)?.text || '').filter(Boolean)
+          .filter((value, index, list) => list.indexOf(value) === index).slice(0, MAX_NETWORK_ENTRIES),
+        broadcasts: entryList(raw?.broadcasts).map(parseBroadcast).filter(Boolean)
+          .filter((value, index, list) => list.indexOf(value) === index).slice(0, MAX_NETWORK_ENTRIES),
+      }
+    } catch {}
+    applyNetwork()
+  }
+
+  async function saveNetworkFile() {
+    const target = networkPath()
+    await fsp.mkdir(path.dirname(target), { recursive: true })
+    const temporary = target + '.' + process.pid + '.tmp'
+    await fsp.writeFile(temporary, JSON.stringify({ version: 1, seeds: fileNetwork.seeds, broadcasts: fileNetwork.broadcasts, updatedAt: now() }, null, 2), 'utf8')
+    await fsp.rename(temporary, target)
+  }
+
+  function sameSubnet(address) {
+    if (!isIpv4(address)) return false
+    return localInterfaces().some(item => sameSubnetAs(address, item))
+  }
+
+  function networkConfigSnapshot() {
+    return {
+      seeds: [...fileNetwork.seeds],
+      broadcasts: [...fileNetwork.broadcasts],
+      envSeeds: entryList(ENV_SEEDS),
+      envBroadcasts: entryList(ENV_BROADCASTS),
+      effectiveSeeds: [...multi.seeds],
+      effectiveBroadcasts: [...multi.broadcasts],
+      subnets: localInterfaces().map(item => ({ ...item, cidr: cidrOf(item.address, item.netmask) })),
+      crossSubnetPeers: peers.filter(peer => peer.online && now() - peer.lastSeen < PEER_TTL && !sameSubnet(peer.ip)).length,
+    }
+  }
 
   function hello() {
     return {
@@ -334,7 +460,8 @@ export function createLanChatServer(options = {}) {
     for (const [id, list] of Object.entries(messages)) seen[id] = list.slice(-MAX_MESSAGES)
     return {
       me: { ...me },
-      peers: peers.map(peer => ({ ...peer, online: peer.online && now() - peer.lastSeen < PEER_TTL })),
+      peers: peers.map(peer => ({ ...peer, online: peer.online && now() - peer.lastSeen < PEER_TTL,
+        sameSubnet: sameSubnet(peer.ip) })),
       network: networkSnapshot(),
       bots: bots.map(bot => ({ ...bot, sessionId: bindings[bot.id] || '' })).map(bot => ({ ...bot })),
       bindings: { ...bindings },
@@ -547,7 +674,7 @@ export function createLanChatServer(options = {}) {
   function sendJson(res, code, body) {
     const text = JSON.stringify(body)
     res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(text),
-      'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' })
+      'Cache-Control': 'no-store' })
     res.end(text)
   }
   async function readJson(req) {
@@ -669,15 +796,24 @@ export function createLanChatServer(options = {}) {
     announceTicks++
     net.udp.lastSentAt = now()
     const body = Buffer.from(JSON.stringify(hello()))
-    const targets = new Set(['255.255.255.255', ...localInterfaces().map(item => item.broadcast)])
+    // 本网段用广播；其它网段靠「额外广播地址」和「种子设备」的单播把 hello 送过去。
+    const targets = new Set(['255.255.255.255', ...localInterfaces().map(item => item.broadcast), ...multi.broadcasts])
     for (const target of targets) {
       try {
         net.udp.announced++
         udp.send(body, discoveryPort, target, error => { if (error) net.udp.lastError = String(error?.message || error) })
       } catch (error) { net.udp.lastError = String(error?.message || error) }
     }
+    for (const seed of multi.seedList) {
+      try {
+        net.udp.announced++
+        udp.send(body, discoveryPort, seed.ip, error => { if (error) net.udp.lastError = String(error?.message || error) })
+      } catch (error) { net.udp.lastError = String(error?.message || error) }
+    }
     // 对方防火墙只拦 UDP 入站时，广播永远到不了；每两次广播用 HTTP 再把「我在」推给已认识的设备。
+    // 种子设备每轮都推：跨网段通常拿不到 UDP 广播，HTTP 才是主要发现通道。
     if (announceTicks % 2 === 0) for (const peer of peers) pushPresence(peer)
+    for (const seed of multi.seedList) pushPresence({ ip: seed.ip, port: seed.port })
   }
 
   function upsertPeer(record) {
@@ -724,6 +860,50 @@ export function createLanChatServer(options = {}) {
     req.end(body)
   }
 
+  /** 邻居表里的条目没有 hello 信封，单独做一次清洗；只接受私网 IPv4 和合法端口。 */
+  function neighborRecord(raw) {
+    if (!raw || typeof raw !== 'object') return null
+    const id = cleanText(raw.id, 80)
+    const ip = String(raw.ip || '').replace(/^::ffff:/, '')
+    const portNumber = Number(raw.port)
+    if (!id || id === me?.id || !isLan(ip) || !Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) return null
+    return {
+      id, name: cleanText(raw.name, 24) || '未命名设备', machine: cleanText(raw.machine, 60) || ip,
+      ip, port: portNumber, world: cleanText(raw.world, 60) || '@local/dsh-world',
+      worldInstalled: Boolean(raw.worldInstalled), online: true, lastSeen: now(), via: 'peer',
+    }
+  }
+
+  /**
+   * 跨多个网段时，中间设备是唯一同时认识两边的节点：
+   * 向它要一份邻居表，把没见过的设备加进来（标记 via: 'peer'）。
+   * 每台设备最多 60 秒问一次，且只对直接联系上的设备发起，避免环路。
+   */
+  function probeNeighbors(peer) {
+    if (!peer?.ip || !peer?.port || !peer?.id) return
+    const last = probedAt.get(peer.id) || 0
+    if (now() - last < NEIGHBOR_PROBE_INTERVAL) return
+    probedAt.set(peer.id, now())
+    const req = http.get({ host: peer.ip, port: peer.port, path: '/api/neighbors', timeout: 1500 }, res => {
+      let raw = ''
+      res.on('data', chunk => { raw += chunk; if (raw.length > 96 * 1024) req.destroy() })
+      res.on('end', () => {
+        if (res.statusCode !== 200) return
+        let data
+        try { data = JSON.parse(raw) } catch { return }
+        for (const item of Array.isArray(data?.peers) ? data.peers.slice(0, 64) : []) {
+          const record = neighborRecord(item)
+          if (!record || peers.some(row => row.id === record.id)) continue
+          upsertPeer(record)
+          // 反向确认：对方如果还不认识我，会立刻回推 presence；不回也没关系，TTL 到期自然离线。
+          pushPresence(record)
+        }
+      })
+    })
+    req.on('error', () => {})
+    req.on('timeout', () => req.destroy())
+  }
+
   function onUdpMessage(buffer, rinfo) {
     let packet
     try { packet = JSON.parse(buffer.toString('utf8')) } catch { net.rejected.malformed++; return }
@@ -746,6 +926,7 @@ export function createLanChatServer(options = {}) {
     if (!previous) {
       try { udp.send(Buffer.from(JSON.stringify(hello())), discoveryPort, record.ip) } catch {}
       pushPresence(record)
+      probeNeighbors(record)
     }
   }
 
@@ -758,12 +939,16 @@ export function createLanChatServer(options = {}) {
     if (!net.udp.bound) {
       warnings.push(`本机 UDP ${discoveryPort} 未绑定成功${net.udp.lastError ? `：${net.udp.lastError}` : ''}；请检查端口是否被另一个实例占用，或运行账号是否有权限。`)
     } else if (net.startedAt && now() - inboundAt() > 15000) {
-      warnings.push(`启动后还没收到局域网广播。请确认防火墙放行 UDP ${discoveryPort} 入站（Kylin 安全中心 / Windows 防火墙），并确认双方在同一网段。`)
+      warnings.push(`启动后还没收到局域网广播。请确认防火墙放行 UDP ${discoveryPort} 入站（Kylin 安全中心 / Windows 防火墙），并确认双方在同一网段；跨网段时在右栏「跨网段设置」里填入对方网段的种子设备。`)
     }
     if (peers.length > 0 && net.http.pushed === 0 && net.http.pushFailed > 0) {
       warnings.push(`已发现设备，但 HTTP 在线通知一直失败；请检查对方 TCP ${basePort} 入站是否放行。`)
     }
     return warnings
+  }
+
+  function crossSubnetPeers() {
+    return peers.filter(peer => peer.online && now() - peer.lastSeen < PEER_TTL && !sameSubnet(peer.ip)).length
   }
 
   function networkSnapshot() {
@@ -772,6 +957,9 @@ export function createLanChatServer(options = {}) {
       lastInboundAt: inboundAt() || null, lastUdpAt: net.udp.lastReceivedAt || null, lastHttpAt: net.http.lastReceivedAt || null,
       announced: net.udp.announced, httpPushed: net.http.pushed, httpPushFailed: net.http.pushFailed,
       onlinePeers: peers.filter(peer => peer.online && now() - peer.lastSeen < PEER_TTL).length,
+      crossSubnetPeers: crossSubnetPeers(),
+      seeds: multi.seeds.length, broadcasts: multi.broadcasts.length,
+      subnets: localInterfaces().map(item => cidrOf(item.address, item.netmask)),
       warnings: networkWarnings(),
     }
   }
@@ -779,14 +967,34 @@ export function createLanChatServer(options = {}) {
   function diagnostics() {
     return {
       generatedAt: now(), startedAt: net.startedAt, id: me?.id || '', nickname: me?.nickname || '',
-      machine: os.hostname(), ips: localInterfaces().map(item => ({ name: item.name, address: item.address, broadcast: item.broadcast })),
+      machine: os.hostname(), ips: localInterfaces().map(item => ({ ...item, cidr: cidrOf(item.address, item.netmask) })),
       discoveryPort, httpPort: port, udp: { ...net.udp }, http: { ...net.http }, rejected: { ...net.rejected },
-      peers: peers.map(peer => ({ ...peer, online: peer.online && now() - peer.lastSeen < PEER_TTL })),
+      multiSegment: { seeds: [...multi.seeds], broadcasts: [...multi.broadcasts] },
+      peers: peers.map(peer => ({ ...peer, online: peer.online && now() - peer.lastSeen < PEER_TTL,
+        sameSubnet: sameSubnet(peer.ip) })),
       warnings: networkWarnings(),
     }
   }
 
   async function handleApi(req, res, url) {
+    const peer = ['/api/ping', '/api/neighbors', '/api/presence', '/api/receive'].includes(url.pathname)
+    if (peer) {
+      if (!isLan(req.socket.remoteAddress) || req.headers.origin || req.headers['sec-fetch-site'] === 'cross-site')
+        return sendJson(res, 403, { error: '只接受设备间的局域网请求' })
+    } else {
+      if (!access.sameOrigin(req)) return sendJson(res, 403, { error: '不接受跨站聊天管理请求' })
+      if (url.pathname === '/api/auth' && req.method === 'POST') {
+        if (!/^application\/json(?:;|$)/iu.test(req.headers['content-type'] || ''))
+          return sendJson(res, 415, { error: '需要 JSON 请求' })
+        let body
+        try { body = await readJson(req) } catch { return sendJson(res, 400, { error: '无效请求' }) }
+        return access.pair(body.token, port, res)
+          ? sendJson(res, 200, { ok: true }) : sendJson(res, 401, { error: '聊天授权已失效，请从 world 重新打开聊天' })
+      }
+      if (!access.authenticated(req, port)) return sendJson(res, 401, { error: '请从 world 或本机授权链接打开聊天' })
+      if (req.method === 'POST' && !/^application\/json(?:;|$)/iu.test(req.headers['content-type'] || ''))
+        return sendJson(res, 415, { error: '需要 JSON 请求' })
+    }
     if (req.method === 'GET' && url.pathname === '/api/state') {
       void refreshBots()   // 打开窗口 / 点「刷新」时顺带同步模型目录，完成后由 SSE 推新状态
       return sendJson(res, 200, snapshot())
@@ -798,9 +1006,25 @@ export function createLanChatServer(options = {}) {
       if (!isLan(req.socket.remoteAddress)) return sendJson(res, 403, { error: '只接受局域网请求' })
       return sendJson(res, 200, diagnostics())
     }
+    // 跨网段设置：聊天窗口读取 / 保存种子设备与额外广播地址
+    if (req.method === 'GET' && url.pathname === '/api/network') {
+      if (!isLan(req.socket.remoteAddress)) return sendJson(res, 403, { error: '只接受局域网请求' })
+      return sendJson(res, 200, networkConfigSnapshot())
+    }
+    // 邻居交换：跨网段时让中间设备把它认识的两边设备告诉对方（只读，不转发消息）
+    if (req.method === 'GET' && url.pathname === '/api/neighbors') {
+      if (!isLan(req.socket.remoteAddress)) return sendJson(res, 403, { error: '只接受局域网请求' })
+      return sendJson(res, 200, {
+        id: me.id,
+        peers: peers.filter(peer => peer.online && now() - peer.lastSeen < PEER_TTL).slice(0, 64).map(peer => ({
+          id: peer.id, name: peer.name, machine: peer.machine, ip: peer.ip, port: peer.port,
+          world: peer.world, worldInstalled: Boolean(peer.worldInstalled),
+        })),
+      })
+    }
     if (req.method === 'GET' && url.pathname === '/api/events') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform',
-        Connection: 'keep-alive', 'Access-Control-Allow-Origin': '*' })
+        Connection: 'keep-alive' })
       res.write(': connected\n\n')
       sse.add(res)
       const keep = setInterval(() => { try { res.write(': ping\n\n') } catch {} }, 15000)
@@ -824,13 +1048,48 @@ export function createLanChatServer(options = {}) {
     let body
     try { body = await readJson(req) } catch (error) { return sendJson(res, 400, { error: error.message }) }
 
+    // 保存跨网段配置：种子设备（其它网段里任意一台运行中的聊天服务）与额外广播地址。
+    if (url.pathname === '/api/network') {
+      const invalid = []
+      const seeds = []
+      for (const value of entryList(body.seeds)) {
+        const seed = parseSeed(value, DEFAULT_PORT)
+        if (!seed) { invalid.push(value); continue }
+        if (!seeds.includes(seed.text)) seeds.push(seed.text)
+      }
+      const broadcasts = []
+      for (const value of entryList(body.broadcasts)) {
+        const address = parseBroadcast(value)
+        if (!address) { invalid.push(value); continue }
+        if (!broadcasts.includes(address)) broadcasts.push(address)
+      }
+      if (invalid.length) return sendJson(res, 400, { error: '无法识别：' + invalid.slice(0, 6).join('、') })
+      if (seeds.length > MAX_NETWORK_ENTRIES || broadcasts.length > MAX_NETWORK_ENTRIES) {
+        return sendJson(res, 400, { error: '种子设备与广播地址各最多 ' + MAX_NETWORK_ENTRIES + ' 条' })
+      }
+      fileNetwork = { seeds, broadcasts }
+      applyNetwork()
+      try { await saveNetworkFile() } catch (error) {
+        if (options.onWarning) options.onWarning('跨网段配置: ' + String(error?.message || error))
+      }
+      announce()
+      for (const seed of multi.seedList) pushPresence({ ip: seed.ip, port: seed.port })
+      stateChanged()
+      return sendJson(res, 200, { ok: true, ...networkConfigSnapshot() })
+    }
+
     // HTTP 在线通知：UDP 广播被对端防火墙拦截时，已发现设备仍可通过 TCP 看到「我在」。
     if (url.pathname === '/api/presence') {
       const record = peerRecord(body, req.socket.remoteAddress, 'http')
       if (!record) return sendJson(res, 400, { error: '在线通知无效' })
       net.http.received++
       net.http.lastReceivedAt = now()
-      upsertPeer(record)
+      const { previous } = upsertPeer(record)
+      // 对方是第一次见到的设备（种子 / 跨网段）：立刻回推一次，双方都不用等下一轮广播。
+      if (!previous) {
+        pushPresence(record)
+        probeNeighbors(record)
+      }
       return sendJson(res, 200, { ok: true, id: me.id, port, nickname: me.nickname })
     }
 
@@ -996,8 +1255,19 @@ export function createLanChatServer(options = {}) {
       const fromId = cleanText(from.id, 80)
       const fromLabel = cleanText(from.nickname || from.name, 24) || '新成员'
       if (!fromId || fromId === me.id) return sendJson(res, 400, { error: '来源无效' })
+      // Peers may describe their own models, but cannot invite ours or enable
+      // permission on a group owned by this computer through an incoming packet.
+      const incomingConversation = (candidate, fallbackId = '') => {
+        const existing = conversations.find(conv => conv.id === (candidate?.id || fallbackId))
+        return { ...candidate,
+          botMembers: botMembersOf(candidate?.botMembers).filter(bot => bot.ownerId !== me.id),
+          ...(existing?.ownerId === me.id ? { allowOthersMention: existing.allowOthersMention,
+            settingsVersion: existing.settingsVersion, ownerId: me.id } : {}),
+        }
+      }
       if (body.type === 'message' && body.message) {
-        const incoming = body.conversation && typeof body.conversation === 'object' ? body.conversation : {}
+        const incoming = incomingConversation(body.conversation && typeof body.conversation === 'object' ? body.conversation : {},
+          cleanText(body.message.conversationId, 80))
         // 私聊会话在接收方要以「发消息的人」命名，而不是发送方给这个会话起的名字
         const candidate = incoming.kind === 'group' ? incoming
           : { ...incoming, name: fromLabel || '新成员', peerId: fromId, localOnly: true }
@@ -1011,7 +1281,7 @@ export function createLanChatServer(options = {}) {
           if (isGroup) void handleBotMentions(conv, String(body.message.text || ''), { remote: true, sender: fromLabel })
         }
       } else if (body.type === 'conversation' && body.conversation) {
-        const conv = upsertConversation(body.conversation, '')
+        const conv = upsertConversation(incomingConversation(body.conversation), '')
         if (conv && body.message) appendMessage(conv, { ...body.message, from: fromId, fromName: fromLabel })
       } else return sendJson(res, 400, { error: '未知的事件类型' })
       stateChanged()
@@ -1021,6 +1291,8 @@ export function createLanChatServer(options = {}) {
   }
 
   const httpHandler = (req, res) => {
+    res.setHeader('Referrer-Policy', 'no-referrer')
+    res.setHeader('X-Content-Type-Options', 'nosniff')
     let url
     try { url = new URL(req.url, 'http://localhost') } catch { return sendJson(res, 400, { error: '无效 URL' }) }
     if (url.pathname.startsWith('/api/')) { handleApi(req, res, url).catch(error => sendJson(res, 500, { error: error.message })); return }
@@ -1029,7 +1301,7 @@ export function createLanChatServer(options = {}) {
     if (!file) return sendJson(res, 404, { error: '未找到' })
     fsp.readFile(path.join(ROOT, file)).then(content => {
       res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
-        'Cache-Control': 'no-cache', 'Access-Control-Allow-Origin': '*' })
+        'Cache-Control': 'no-cache' })
       res.end(content)
     }).catch(() => sendJson(res, 404, { error: '文件不存在' }))
   }
@@ -1048,10 +1320,21 @@ export function createLanChatServer(options = {}) {
     })
   }
 
-  async function start() {
-    if (started) return { port, world: me.world, installed: world.installed, bots: bots.length }
+  const info = () => ({ port, world: me.world, installed: world.installed, bots: bots.length,
+    crossSegment: { seeds: multi.seeds.length, broadcasts: multi.broadcasts.length }, ...access.info(port) })
+  const checkStarting = () => { if (disposed) throw new Error('聊天服务已停止') }
+  function start() {
+    if (stopping) return stopping.then(start)
+    if (starting) return starting
+    if (started) return Promise.resolve(info())
     disposed = false
+    starting = initialize().catch(async error => { await closeResources(); throw error })
+      .finally(() => { starting = null })
+    return starting
+  }
+  async function initialize() {
     const saved = await loadIdentity()
+    checkStarting()
     identity.id = saved.id
     identity.nickname = saved.nickname
     // 同一台机器可能同时跑多个 dsh / 独立服务：让端口参与身份，否则双方会把自己发出的 hello 当成自己而忽略
@@ -1060,6 +1343,9 @@ export function createLanChatServer(options = {}) {
 
     // 先把上次的会话 / 消息 / 模型绑定接回来，再对外提供服务
     await restore()
+    // 跨网段配置也要在第一次 announce 之前就位
+    await loadNetwork()
+    checkStarting()
 
     server = http.createServer(httpHandler)
     try { port = await listen(server, basePort) } catch (error) { server = null; throw error }
@@ -1067,6 +1353,7 @@ export function createLanChatServer(options = {}) {
     me.port = port
     ensureLobby()
     await refreshBots()
+    checkStarting()
 
     net.startedAt = now()
     Object.assign(net.udp, { bound: false, address: '', port: discoveryPort, announced: 0, received: 0, lastSentAt: 0, lastReceivedAt: 0, lastError: '' })
@@ -1093,6 +1380,7 @@ export function createLanChatServer(options = {}) {
         resolve()
       })
     })
+    checkStarting()
 
     announce()
     localProbe()
@@ -1109,25 +1397,43 @@ export function createLanChatServer(options = {}) {
     }, 2000))
     // 先把模型目录填好，端口 RPC 第一次返回就能带上正确的模型好友数量（标题栏徽标不等 30 秒）
     await refreshBots()
+    checkStarting()
     started = true
-    return { port, world: me.world, installed: world.installed, bots: bots.length }
+    return info()
   }
 
-  async function stop() {
-    if (!started) return
+  function stop() {
+    if (stopping) return stopping
+    disposed = true
+    stopping = (async () => {
+      await starting?.catch(() => {})
+      await closeResources()
+    })().finally(() => { stopping = null })
+    return stopping
+  }
+  async function closeResources() {
     started = false
     disposed = true
     botQueue.length = 0
     for (const controller of botSignals) { try { controller.abort(new Error('聊天服务已停止')) } catch {} }
     for (const timer of timers) clearInterval(timer)
     timers.length = 0
-    try { udp?.send(Buffer.from(JSON.stringify({ ...hello(), type: 'bye' })), discoveryPort, '255.255.255.255') } catch {}
-    await new Promise(resolve => { try { udp?.close(resolve) } catch { resolve() } })
+    // 告别也发给跨网段的种子设备/广播地址，别让对方多等一个 TTL。
+    try {
+      const bye = Buffer.from(JSON.stringify({ ...hello(), type: 'bye' }))
+      const targets = new Set(['255.255.255.255', ...multi.broadcasts, ...multi.seedList.map(seed => seed.ip)])
+      for (const target of targets) udp?.send(bye, discoveryPort, target)
+    } catch {}
+    await new Promise(resolve => { if (!udp) return resolve(); try { udp.close(resolve) } catch { resolve() } })
     udp = null
     net.udp.bound = false
     for (const res of sse) { try { res.end() } catch {} }
     sse.clear()
-    await new Promise(resolve => { if (!server) return resolve(); server.close(() => resolve()) })
+    await new Promise(resolve => {
+      if (!server) return resolve()
+      server.close(() => resolve())
+      server.closeAllConnections?.()
+    })
     server = null
     // 停服前把挂起的改动落盘，下次启动才能接着看
     try { await store.flush() } catch {}
@@ -1192,13 +1498,16 @@ async function startStandalone() {
   console.log('局域网聊天已启动')
   console.log('  world 插件：' + info.world + (info.installed ? '（已检测到）' : '（未在本机检测到安装痕迹）'))
   console.log('  本机地址：' + primaryAddress() + ':' + info.port)
-  console.log('  界面：http://127.0.0.1:' + info.port + '/')
+  console.log('  本机授权界面：' + info.url)
   console.log('  原型：http://127.0.0.1:' + info.port + '/prototype.html')
   console.log('  模型好友：' + info.bots + ' 个（独立模式没有宿主，需由 dsh 启动才会出现）')
   console.log('  发现端口：UDP ' + DISCOVERY_PORT + '（需要在防火墙里放行）')
+  console.log('  跨网段：' + (info.crossSegment.seeds || info.crossSegment.broadcasts
+    ? `种子设备 ${info.crossSegment.seeds} 个、额外广播 ${info.crossSegment.broadcasts} 个`
+    : '未配置（只发现本网段；可运行后在聊天窗口右栏「跨网段设置」里添加）'))
   if (process.env.LAN_CHAT_OPEN === '1') {
     const opener = process.platform === 'win32' ? 'start ""' : process.platform === 'darwin' ? 'open' : 'xdg-open'
-    exec(opener + ' "http://127.0.0.1:' + info.port + '/"', { windowsHide: true }, () => {})
+    exec(opener + ' "' + info.url + '"', { windowsHide: true }, () => {})
   }
   const shutdown = () => { service.stop().then(() => process.exit(0)) }
   process.on('SIGINT', shutdown)

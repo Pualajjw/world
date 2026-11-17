@@ -63,9 +63,13 @@ export async function checkDesktopItems(browser, bundleText) {
     // Deleting a shortcut only removes the desktop record.
     await docsIcon.click({ button: 'right' })
     await page.locator('.world-context-menu').getByRole('button', { name: '删除快捷方式', exact: true }).click()
+    const removeCard = page.locator('[data-world-confirm-card]')
+    await removeCard.waitFor()
+    assert.equal(await removeCard.locator('.world-confirm-title').textContent(), '从桌面移除')
+    assert.match(await removeCard.locator('.world-confirm-detail').textContent(), /磁盘上的文件不会删除/)
+    await page.locator('[data-world-confirm] [data-role="confirm"]').click()
     await page.waitForFunction(() => ![...document.querySelectorAll('.world-icon-label')].some(el => el.textContent === 'docs'))
     assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('dsh.world.fileLinks') || '[]').length), 1)
-    assert.match(dialogs.at(-1), /不会删除磁盘上的文件/)
 
     await dropFiles(['docs'], 700, 470)
     await page.waitForFunction(() => document.querySelectorAll('[data-world-icon-kind="directory"]').length === 1)
@@ -140,6 +144,7 @@ export async function checkDesktopItems(browser, bundleText) {
     assert.equal(await page.locator('.world-desktop-icon').filter({ hasText: 'docs' }).count(), 1)
     assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('dsh.world.holders') || '[]').length), 0)
 
+    assert.deepEqual(dialogs, [], '确认走世界内卡片，不再弹原生框')
     assert.deepEqual(errors, [])
     console.log('Desktop items passed: file links (path only), shortcut delete, merge into holder, rename, VSCode collection tree with save, move-out dissolve.')
   } finally {

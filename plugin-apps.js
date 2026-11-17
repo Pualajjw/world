@@ -1,6 +1,7 @@
 import React from 'react'
 import { fitSavedDesktopRect } from './responsive.js'
 import { PLUGIN_SLOT, createPluginCatalog } from './plugin-catalog.js'
+import { PinGlyph, pinLabel } from './window-pin.js'
 
 export { PLUGIN_SLOT, createPluginCatalog }
 
@@ -108,7 +109,7 @@ function Cap({ label, title, onClick, children }) {
 }
 
 /** One independent virtual window hosting a registered whole-page plugin. */
-export function PluginWindow({ app, win, active, renderSlot, children, onActivate, onMinimize, onToggleMaximize, onClose, onDragStart, onDragMove, onDragEnd, onResizeStart }) {
+export function PluginWindow({ app, win, active, renderSlot, children, zIndex, pinned = false, onTogglePin, onActivate, onMinimize, onToggleMaximize, onClose, onDragStart, onDragMove, onDragEnd, onResizeStart }) {
   const minimized = win.state === 'min'
   const maximized = win.state === 'max'
   const stateClass = minimized ? ' is-min' : maximized ? ' is-max' : ''
@@ -120,7 +121,7 @@ export function PluginWindow({ app, win, active, renderSlot, children, onActivat
     style: {
       '--plugin-x': `${win.rect.x}vw`, '--plugin-y': `${win.rect.y}vh`,
       '--plugin-w': `${win.rect.w}vw`, '--plugin-h': `${win.rect.h}vh`,
-      zIndex: active ? 6 : 2,
+      zIndex,
     },
     onPointerDown: onActivate,
   },
@@ -132,6 +133,10 @@ export function PluginWindow({ app, win, active, renderSlot, children, onActivat
     h('div', { className: 'world-plugin-title' },
       h(PluginGlyph, { icon: app.icon, size: 16 }), h('span', null, app.label)),
     h('div', { className: 'world-window-controls' },
+      h('button', {
+        className: `world-cap world-pin-cap${pinned ? ' is-pinned' : ''}`, type: 'button',
+        title: pinLabel(pinned), 'aria-label': pinLabel(pinned), 'aria-pressed': pinned, onClick: onTogglePin,
+      }, h(PinGlyph, { size: 12, filled: pinned })),
       h(Cap, { label: '最小化', title: '最小化', onClick: onMinimize },
         h('svg', { width: 10, height: 10, viewBox: '0 0 10 10', 'aria-hidden': true }, h('path', { d: 'M0 5h10', stroke: 'currentColor', strokeWidth: 1 }))),
       h(Cap, { label: maximized ? '还原' : '最大化', title: maximized ? '还原' : '最大化', onClick: onToggleMaximize },

@@ -125,6 +125,8 @@ export async function checkDesktopControl(page, bridge, root, brain) {
     frame.style.cssText = 'position:fixed;left:10px;top:130px;width:420px;height:400px;z-index:110'
     document.body.append(frame)
   })
+  // 420px 宽会进入手机式两级页面：先点开会话，输入框才会出现。
+  await page.frameLocator('[data-input-check]').locator('.lc-row[data-conv]').first().click()
   await page.frameLocator('[data-input-check]').locator('#lcInput').waitFor()
   await grant()
   await page.evaluate(() => window.postMessage({ type: 'world-human-input' }, '*'))

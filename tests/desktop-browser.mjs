@@ -93,7 +93,7 @@ export async function checkDesktopTools(page, bridge, brain) {
   // A different editor's last pointer ownership must not receive this editor's shortcuts.
   // 同一个文件夹只有一个窗口，第二个编辑器改用子目录（换文件夹才开新窗口）。
   await page.keyboard.press('Escape')
-  await window.locator('.world-vscode-title-btn').click()
+  await window.locator('.world-vscode-title-btn[aria-label="打开文件夹"]').click()
   await page.locator('.world-vscode-picker').waitFor()
   await page.locator('.world-vscode-picker-row').filter({ hasText: 'src' }).click()
   await page.locator('.world-vscode-picker').getByRole('button', { name: '在新窗口打开' }).click()
@@ -104,10 +104,10 @@ export async function checkDesktopTools(page, bridge, brain) {
   const sidebar = window.locator('.world-vscode-sidebar')
   const otherSidebar = other.locator('.world-vscode-sidebar')
   assert.equal(await sidebar.count(), 1)
-  await page.keyboard.press('Control+b')
+  await page.keyboard.press('Control+Shift+b')
   assert.equal(await sidebar.count(), 0, 'the handed-off editor owns Ctrl+B')
   assert.equal(await otherSidebar.count(), 1, 'the other editor is unaffected')
-  await page.keyboard.press('Control+b')
+  await page.keyboard.press('Control+Shift+b')
   await act({ action: 'focus_window', windowId: `vscode:${await other.getAttribute('data-world-vscode-key')}` })
   // The full conversation panel intentionally covers the right edge; explicitly take over first.
   await page.locator('[data-world-takeover]').click()

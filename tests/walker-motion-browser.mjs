@@ -10,6 +10,9 @@ export async function checkWalkerMotion(browser, bundleText) {
     await page.addScriptTag({ content: bundleText })
     await page.waitForFunction(() => document.body.dataset.worldWindow === 'closed')
     assert.equal(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), true)
+    // 0.2.95 起默认是平面桌面，机器人只站在 3D 地面上；这个页面的 localStorage 不可用（setContent），点按钮打开。
+    await page.locator('.world-depth-toggle').click()
+    await page.waitForFunction(() => document.body.dataset.worldDepth === 'on')
     await page.evaluate(() => {
       window.__walkerSamples = []
       const tick = () => {

@@ -3,6 +3,7 @@ import { captureDesktopScreenshot } from '../desktop-shot.js'
 import { createRoot } from 'react-dom/client'
 import { apply } from '../client-src.js'
 import { createConversationFixture } from './conversation-fixture.js'
+import { worldConfirm } from '../world-confirm.js'
 
 const effects = []
 let overlay
@@ -13,14 +14,51 @@ let conversationFixture
 const source = 'const value = 1\n'
 const BIG_TEXT = Array.from({ length: 50000 }, (_, index) => `line ${index} ${'x'.repeat(20)}`).join('\n')
 const calls = []
+const runJobs = new Map()
 const savedFiles = new Map([['/workspace/src/main.js', source]])
 let mainSessionId = 'session-1'
 const mainSessionListeners = new Set()
+/** 会话列表夹具：VSCode 对话按 cwd 筛选；新建会真的往里加一行。 */
+const sessionRows = {
+  'session-1': {
+    id: 'session-1', title: '工作区会话', displayTitle: '工作区会话', cwd: '/workspace',
+    updatedAt: 1, blank: false, running: false, retainedBy: { mainView: 1 },
+  },
+}
+const sessionListListeners = new Set()
+const sessionCreates = []
+const projectionRefreshes = []
+let nextSessionId = 2
+let sessionSnapshot = null
+const publishSessions = () => {
+  sessionSnapshot = null
+  for (const listener of sessionListListeners) listener()
+}
 const sessions = {
   list: {
-    getSnapshot: () => ({ byId: { [mainSessionId]: { id: mainSessionId, cwd: '/workspace', retainedBy: { mainView: 1 } } } }),
-    subscribe: listener => { mainSessionListeners.add(listener); return () => mainSessionListeners.delete(listener) },
+    getSnapshot: () => {
+      if (!sessionSnapshot) {
+        const byId = { ...sessionRows }
+        if (!byId[mainSessionId])
+          byId[mainSessionId] = { id: mainSessionId, displayTitle: mainSessionId, cwd: '/workspace', updatedAt: 1, blank: false, running: false, retainedBy: { mainView: 1 } }
+        sessionSnapshot = { ids: Object.keys(byId), byId, phase: 'ready' }
+      }
+      return sessionSnapshot
+    },
+    subscribe: listener => { sessionListListeners.add(listener); return () => sessionListListeners.delete(listener) },
   },
+  async create({ cwd, workspaceId } = {}) {
+    const id = `session-${nextSessionId++}`
+    const root = cwd || (workspaceId === 'ws-main' ? '/workspace' : '')
+    sessionRows[id] = {
+      id, title: `新建会话 ${id}`, displayTitle: `新建会话 ${id}`, cwd: root,
+      updatedAt: Date.now(), blank: true, running: false, retainedBy: {},
+    }
+    sessionCreates.push({ id, ...(workspaceId ? { workspaceId } : { cwd }) })
+    publishSessions()
+    return id
+  },
+  async refreshProjections(id) { projectionRefreshes.push(id) },
 }
 const remote = { workspaceFiles: { async list(sessionId, path) {
   return { ok: true, value: { entries: path.endsWith('/src') ? [
@@ -49,6 +87,18 @@ function cancellable(promise, signal) {
 
 const rpc = { async call(_base, method, payload, signal) {
   calls.push({ method, payload })
+  if (method === 'world-internet/connection' && !window.__worldInternetCall)
+    return { ok: true, value: { connected: false, ipv4: '', peerCount: 0 } }
+  if (method.startsWith('world-internet/') && window.__worldInternetCall)
+    return cancellable(window.__worldInternetCall(method.slice('world-internet/'.length), payload), signal)
+  if (method.startsWith('world-update/')) {
+    if (window.__worldUpdateCall) return cancellable(window.__worldUpdateCall(method.slice('world-update/'.length), payload), signal)
+    return { ok: true, value: { currentVersion: '0.2.145', dshVersion: '0.2.2-rc.3', source: 'github', canInstall: false, job: { state: 'idle' } } }
+  }
+  if (method.startsWith('world-storage/') && window.__worldStorageCall)
+    return cancellable(window.__worldStorageCall(method.slice('world-storage/'.length), payload), signal)
+  if (method.startsWith('world-processes/') && window.__worldProcessesCall)
+    return cancellable(window.__worldProcessesCall(method.slice('world-processes/'.length), payload), signal)
   if (method.startsWith('world-journal/') && window.__worldJournalCall) return window.__worldJournalCall(method.slice('world-journal/'.length), payload)
   if (method.startsWith('world-tasks/') && window.__worldTasksCall) return window.__worldTasksCall(method.slice('world-tasks/'.length), payload)
   if (method.startsWith('workflow-studio/') && window.__worldWorkflowCall) return window.__worldWorkflowCall(method.slice('workflow-studio/'.length), payload)
@@ -62,6 +112,10 @@ const rpc = { async call(_base, method, payload, signal) {
   if (method.startsWith('world-ssh/') && window.__worldSshCall) {
     return cancellable(window.__worldSshCall(method.slice('world-ssh/'.length), payload), signal)
   }
+  if (method.startsWith('world-power/') && window.__worldPowerCall) {
+    try { return { ok: true, value: await window.__worldPowerCall(method.slice('world-power/'.length), payload) } }
+    catch (error) { return { ok: false, error: { message: error.message, code: error.code } } }
+  }
   if (method.startsWith('world-workbench/') && window.__worldWorkbenchCall) {
     try { return { ok: true, value: await window.__worldWorkbenchCall(method.slice('world-workbench/'.length), payload) } }
     catch (error) { return { ok: false, error: { message: error.message, code: error.code } } }
@@ -71,6 +125,15 @@ const rpc = { async call(_base, method, payload, signal) {
     catch (error) { return { ok: false, error: { message: error.message } } }
   }
   if (method === 'world-lan-chat/port') return { ok: true, value: { port: 53317 } }
+  if (method === 'world-launch/ready') return { ok: true, value: { ready: true, services: { sessions: true, subprocess: true } } }
+  if (method === 'world-launch/poll') {
+    if (!window.__worldLaunchPoll) return { ok: true, value: { intent: null } }
+    return { ok: true, value: { intent: await window.__worldLaunchPoll() } }
+  }
+  if (method === 'world-launch/shortcut' && window.__worldLaunchShortcut) {
+    try { return { ok: true, value: await window.__worldLaunchShortcut(payload) } }
+    catch (error) { return { ok: false, error: { message: error.message, code: error.code } } }
+  }
   if (method === 'world-vscode-source/probe') {
     const path = String(payload.path || '')
     const name = path.split('/').filter(Boolean).at(-1) || path
@@ -78,11 +141,15 @@ const rpc = { async call(_base, method, payload, signal) {
     return { ok: true, value: { path, type: directory ? 'directory' : 'file', name } }
   }
   if (method === 'world-vscode-source/open') {
+    if (window.__worldSourceOpen) return cancellable(window.__worldSourceOpen(payload), signal)
     // 大文件故意慢一点：加载态需要能被子测试看到
     if (payload.path.endsWith('big.txt')) {
       return new Promise(resolve => setTimeout(() => resolve({
         ok: true, value: { path: payload.path, source: BIG_TEXT, version: 'v1', eol: 'LF', bom: false },
       }), 900))
+    }
+    if (payload.path.endsWith('build.bat')) {
+      return { ok: true, value: { path: payload.path, source: '@echo off\r\necho hello from batch\r\n', version: 'v1', eol: 'CRLF', bom: false } }
     }
     return { ok: true, value: { path: payload.path, source: savedFiles.get(payload.path) || '', version: 'v1', eol: 'LF', bom: false } }
   }
@@ -109,16 +176,19 @@ const rpc = { async call(_base, method, payload, signal) {
       { name: 'main.js', type: 'file' }, { name: 'big.txt', type: 'file' },
     ], truncated: false } }
     if (path === '/workspace') return { ok: true, value: { path, parent: '/', entries: [
-      { name: 'src', type: 'directory' }, { name: 'README.md', type: 'file' },
+      { name: 'src', type: 'directory' }, { name: 'README.md', type: 'file' }, { name: 'build.bat', type: 'file' },
     ], truncated: false } }
     return { ok: true, value: { path, parent: '', entries: [], truncated: false } }
   }
   if (method === 'world-vscode-source/save') {
+    if (window.__worldSourceSave) return window.__worldSourceSave(payload)
     savedFiles.set(payload.path, payload.source)
     return { ok: true, value: { path: payload.path, source: payload.source, version: 'v2' } }
   }
   if (method === 'world-vscode-source/reveal') return { ok: true, value: { path: payload.path } }
   if (method.startsWith('world-vscode-git/')) return gitRpc(method.slice('world-vscode-git/'.length), payload)
+  if (method === 'world-vscode-sessions/resolve')
+    return { ok: true, value: { workspaceId: payload.root === '/workspace' ? 'ws-main' : '' } }
   if (method === 'world-vscode-search/find') {
     const query = String(payload.query || '').toLowerCase()
     const files = [
@@ -134,6 +204,42 @@ const rpc = { async call(_base, method, payload, signal) {
       },
     }
   }
+  if (method === 'world-vscode-search/files') {
+    if (window.__worldFileSearch) return cancellable(window.__worldFileSearch(payload), signal)
+    const query = String(payload.query || '').toLowerCase().replaceAll('\\', '/')
+    const files = ['src/main.js', 'README.md'].filter(path => path.toLowerCase().includes(query)).map(path => ({ path }))
+    return { ok: true, value: { root: payload.root || '/workspace', query: payload.query, files,
+      fileCount: files.length, scanned: 2, skipped: 0, truncated: false, tookMs: 1 } }
+  }
+  if (method === 'world-vscode-search/replace') {
+    const paths = Array.isArray(payload.paths) ? payload.paths : []
+    return {
+      ok: true,
+      value: {
+        root: '/workspace', query: payload.query, replacement: payload.replacement,
+        files: paths.map(path => ({ path, replacements: 1 })), fileCount: paths.length,
+        replacements: paths.length, skipped: [], tookMs: 2,
+      },
+    }
+  }
+  if (method === 'world-terminal/run') {
+    const jobId = `run-${runJobs.size + 1}`
+    runJobs.set(jobId, 0)
+    return { ok: true, value: { jobId, cwd: payload.cwd, startedAt: Date.now(), shell: 'cmd' } }
+  }
+  if (method === 'world-terminal/poll') {
+    const polls = runJobs.get(payload.jobId) || 0
+    runJobs.set(payload.jobId, polls + 1)
+    return polls === 0
+      ? { ok: true, value: { chunk: 'hello from batch\r\n', offset: 18, lossy: false, running: true,
+        exitCode: null, signal: null, cancelled: false, error: '', durationMs: 12 } }
+      : polls < 3
+        ? { ok: true, value: { chunk: '', offset: 18, lossy: false, running: true,
+          exitCode: null, signal: null, cancelled: false, error: '', durationMs: 12 + polls * 220 } }
+        : { ok: true, value: { chunk: '', offset: 18, lossy: false, running: false,
+          exitCode: 0, signal: null, cancelled: false, error: '', durationMs: 24 + polls * 220 } }
+  }
+  if (method === 'world-terminal/cancel') return { ok: true, value: { cancelled: true } }
   return { ok: false, error: { message: `Unknown method ${method}` } }
 } }
 
@@ -161,8 +267,29 @@ const setStaged = (paths, staged) => {
     return { ...file, index: ' ', worktree: file.index === 'A' ? '?' : 'M', untracked: file.index === 'A', staged: false, unstaged: true }
   })
 }
+const gitCommits = [
+  { hash: 'abcdef0123456789012345678901234567890123', shortHash: 'abcdef0', subject: '完善提交历史', body: '完善提交历史\n\n支持中文说明\n以及多行详情', author: 'World Tester', date: '2026-11-16T09:00:00+08:00' },
+  { hash: '1234567890123456789012345678901234567890', shortHash: '1234567', subject: '初始提交', body: '初始提交', author: 'World Tester', date: '2026-11-15T09:00:00+08:00' },
+]
 function gitRpc(operation, payload) {
+  if (operation === 'log') return window.__worldGitLog
+    ? window.__worldGitLog(payload)
+    : { ok: true, value: { commits: gitCommits.map(commit => ({ ...commit })), truncated: false } }
   if (operation === 'status') return { ok: true, value: gitSnapshot() }
+  if (operation === 'diff') {
+    const path = payload.paths?.at(-1) || ''
+    const scope = payload.staged ? 'index' : 'worktree'
+    const patch = payload.untracked
+      ? `diff --git a/${path} b/${path}\nnew file mode 100644\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,1 @@\n+${path} untracked\n`
+      : `diff --git a/${path} b/${path}\nindex 1111111..2222222 100644\n--- a/${path}\n+++ b/${path}\n@@ -1,2 +1,2 @@\n unchanged\n-removed line\n+added ${scope} line\n`
+    return {
+      ok: true,
+      value: {
+        paths: payload.paths, staged: payload.staged === true, untracked: payload.untracked === true,
+        patch, truncated: false,
+      },
+    }
+  }
   if (operation === 'stage' || operation === 'unstage') {
     setStaged(payload.paths, operation === 'stage')
     return { ok: true, value: { status: gitSnapshot(), output: '' } }
@@ -171,6 +298,7 @@ function gitRpc(operation, payload) {
     if (!gitState.files.some(file => file.staged))
       return { ok: false, error: { code: 'GIT_NOTHING_STAGED', message: '没有已暂存的更改，先暂存文件再提交。' } }
     gitState.files = gitState.files.filter(file => !file.staged)
+    gitCommits.unshift({ hash: 'fedcba9876543210012345678901234567890123', shortHash: 'fedcba9', subject: payload.message, body: payload.message, author: 'World Tester', date: new Date().toISOString() })
     return { ok: true, value: { status: gitSnapshot(), output: `[main 1a2b3c4] ${payload.message}` } }
   }
   if (operation === 'pull') return { ok: true, value: { status: gitSnapshot(), output: 'Already up to date.' } }
@@ -216,7 +344,7 @@ apply({
     inject(name, resolve) {
       const value = resolve()
       if (name === 'shell.overlay') overlay = value
-      if (typeof value === 'function' && name === 'world.app.page') effects.push(value)
+      if (typeof value === 'function' && ['world.app.page', 'world.vscode.document'].includes(name)) effects.push(value)
       return value
     },
     register(options, component) {
@@ -248,9 +376,14 @@ window.__worldTesting = {
   layoutCalls,
   files: () => Object.fromEntries(savedFiles),
   capture: options => captureDesktopScreenshot(options),
+  // 确认框的队列是模块级的，测试直接拿同一个函数就能验证键盘 / 焦点 / 手机布局。
+  confirm: options => worldConfirm(options),
   conversation: conversationFixture,
+  sessionCreates,
+  sessionRows,
+  projectionRefreshes,
   renderPlugin(key, component) { pluginFixtures.set(key, component) },
   setFile(path, source) { savedFiles.set(path, source) },
-  switchMain(id) { mainSessionId = id; for (const listener of mainSessionListeners) listener() },
+  switchMain(id) { mainSessionId = id; for (const listener of mainSessionListeners) listener(); publishSessions() },
   dispose() { root.unmount(); conversationFixture.dispose(); effects.forEach(cleanup => cleanup()) },
 }

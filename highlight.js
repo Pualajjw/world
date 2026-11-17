@@ -73,7 +73,14 @@ const SQL_CONTROL = new Set([
 ])
 const SQL_KEYWORD = new Set(['null', 'true', 'false', 'primary', 'key', 'foreign', 'references', 'default', 'unique', 'index', 'view'])
 
+const PB_CONTROL = new Set(('if then else elseif end for to step next do loop while until choose case return exit continue try catch finally throw halt goto on event call trigger select from where into using connect disconnect commit rollback fetch declare cursor open close execute prepare describe').split(' '))
+const PB_KEYWORD = new Set(('global local shared public private protected type within forward prototypes variables function subroutine library alias system rpc ref readonly autoinstantiate and or not mod create destroy this super parent ancestor throws dynamic sqlsa sqlca true false null').split(' '))
+const PB_TYPES = new Set(('any blob boolean byte char character date datetime decimal dec double integer int long longlong longptr real string time uint unsignedinteger ulong unsignedlong window userobject application transaction datawindow datastore commandbutton statictext singlelineedit multilineedit').split(' '))
+
 const CODE_SPECS = {
+  powerbuilder: { line: ['//'], block: [['/*', '*/']], quotes: '\'"', control: PB_CONTROL, keyword: PB_KEYWORD,
+    types: PB_TYPES, insensitive: true, escape: '~', enums: true, functions: true,
+    metadata: /(?:@[^\n]*|\$PBExport(?:Header|Comments)\$[^\n]*)/iy },
   javascript: { line: ['//'], block: [['/*', '*/']], quotes: '\'"`', control: JS_CONTROL, keyword: JS_KEYWORD, constant: JS_CONSTANT },
   typescript: { line: ['//'], block: [['/*', '*/']], quotes: '\'"`', control: JS_CONTROL, keyword: JS_KEYWORD, constant: JS_CONSTANT },
   clike: { line: ['//'], block: [['/*', '*/']], quotes: '\'"', control: JS_CONTROL, keyword: JS_KEYWORD, constant: JS_CONSTANT },
@@ -110,6 +117,9 @@ const EXTENSIONS = {
   c: 'clike', h: 'clike', cc: 'clike', cpp: 'clike', cxx: 'clike', hpp: 'clike', hh: 'clike',
   java: 'clike', cs: 'clike', go: 'clike', rs: 'clike', php: 'clike', swift: 'clike',
   kt: 'clike', kts: 'clike', scala: 'clike', dart: 'clike', m: 'clike', mm: 'clike',
+  sra: 'powerbuilder', sru: 'powerbuilder', srw: 'powerbuilder', srd: 'powerbuilder', srm: 'powerbuilder',
+  srf: 'powerbuilder', srs: 'powerbuilder', srq: 'powerbuilder', srp: 'powerbuilder',
+  pb: 'powerbuilder', pbtest: 'powerbuilder', powerscript: 'powerbuilder',
 }
 const FILENAMES = {
   dockerfile: 'shell', makefile: 'shell', '.bashrc': 'shell', '.zshrc': 'shell', '.profile': 'shell',
@@ -120,12 +130,12 @@ const LANGUAGE_LABEL = {
   javascript: 'JavaScript', typescript: 'TypeScript', json: 'JSON', css: 'CSS', html: 'HTML',
   xml: 'XML', markdown: 'Markdown', python: 'Python', ruby: 'Ruby', lua: 'Lua', sql: 'SQL',
   shell: 'Shell', batch: 'Batch', powershell: 'PowerShell', yaml: 'YAML', toml: 'TOML',
-  ini: 'INI', clike: 'C-like',
+  ini: 'INI', clike: 'C-like', powerbuilder: 'PowerBuilder',
 }
 
 /** Language id for a path, or null when the editor should not colour it. */
 export function languageOf(path) {
-  const name = String(path || '').split('/').pop().toLowerCase()
+  const name = String(path || '').split(/[\\/]/u).pop().toLowerCase()
   if (!name) return null
   if (FILENAMES[name]) return FILENAMES[name]
   const dot = name.lastIndexOf('.')
@@ -167,6 +177,12 @@ function scanCode(source, spec) {
     const code = source.charCodeAt(index)
     if (code === 10) { builder.text('punc', '\n'); index++; continue }
 
+    if (spec.metadata && atLineHead(source, index)) {
+      spec.metadata.lastIndex = index
+      const match = spec.metadata.exec(source)
+      if (match) { builder.text('meta', match[0]); index = spec.metadata.lastIndex; continue }
+    }
+
     // section headers: [table] in TOML / INI
     if (spec.sections && code === 91 && atLineHead(source, index)) {
       const end = source.indexOf(']', index)
@@ -200,14 +216,14 @@ function scanCode(source, spec) {
       }
     }
 
-    if (code === 34 || code === 39 || code === 96) {
+    if (spec.quotes.includes(source[index])) {
       const triple = spec.triples?.find(marker => source.startsWith(marker, index))
       const quote = triple ?? source[index]
       const multiLine = Boolean(triple) || quote === '`'
       let cursor = index + quote.length
       while (cursor < length) {
         const current = source[cursor]
-        if (current === '\\' && source[cursor + 1] !== '\n') { cursor += 2; continue }
+        if (current === (spec.escape || '\\') && source[cursor + 1] !== '\n') { cursor += 2; continue }
         if (source.startsWith(quote, cursor)) { cursor += quote.length; break }
         if (current === '\n' && !multiLine) break
         cursor++
@@ -243,10 +259,14 @@ function scanCode(source, spec) {
       let probe = cursor
       while (probe < length && source[probe] === ' ') probe++
       let type = 'punc'
+      if (spec.enums && source[cursor] === '!') {
+        builder.text('num', source.slice(index, cursor + 1)); index = cursor + 1; continue
+      }
       if (constant?.has(folded)) type = 'num'
       else if (control?.has(folded)) type = 'ctl'
       else if (keyword?.has(folded)) type = 'kw'
-      else if (source[probe] === '(' && !spec.insensitive) type = 'fn'
+      else if (spec.types?.has(folded)) type = 'type'
+      else if (source[probe] === '(' && (!spec.insensitive || spec.functions)) type = 'fn'
       else if (/^[A-Z][a-z]/u.test(word)) type = 'type'
       else if (/^[A-Z][A-Z0-9_]{2,}$/u.test(word)) type = 'var'
       builder.text(type, word)

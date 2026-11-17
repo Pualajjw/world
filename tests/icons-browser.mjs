@@ -14,6 +14,8 @@ export async function checkIconDrag(browser, bundleText) {
     await page.route('http://127.0.0.1/world-icons-fixture', route => route.fulfill({ contentType: 'text/html; charset=utf-8',
       body: '<!doctype html><html style="--dsh-windows-titlebar-height:40px"><head><style>body{margin:0}#root{height:100vh;width:100vw}.app-frame{position:relative;height:100%}#host-ui{position:absolute;inset:40px 0 0}</style></head><body><div id="root"><div class="app-frame"><main id="host-ui"></main><div id="overlay-root" data-shell-overlay></div></div></div></body></html>' }))
     await page.goto('http://127.0.0.1/world-icons-fixture')
+    // 0.2.95 起默认是平面桌面；这一组检查的「拖近变大 + 深度坐标独立存档」只在 3D 下有，先替用户打开。
+    await page.evaluate(() => localStorage.setItem('dsh.world.depth.choice', 'on'))
     await page.addScriptTag({ content: bundleText })
     await open()
     // 设置 / 日记 / 待办只在开始菜单里（0.2.73 起），拖拽用桌面上的 DSH 图标验证。

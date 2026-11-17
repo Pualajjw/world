@@ -6,6 +6,7 @@
  * 聊天服务的 iframe：服务由 world 的 Host 入口 index.js 启动，端口经 RPC 查询。
  */
 import React from 'react'
+import { PinGlyph, pinLabel } from './window-pin.js'
 
 const h = React.createElement
 const RESIZE_EDGES = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']
@@ -28,23 +29,25 @@ function unwrap(result) {
   return result?.ok === true && Object.hasOwn(result, 'value') ? result.value : result
 }
 
-function Cap({ label, onClick, close, children }) {
+function Cap({ label, onClick, close, className, pressed, children }) {
   return h('button', {
-    type: 'button', className: `world-lanchat-cap${close ? ' world-lanchat-close' : ''}`,
-    title: label, 'aria-label': label, onClick,
+    type: 'button', className: `world-lanchat-cap${close ? ' world-lanchat-close' : ''}${className ? ` ${className}` : ''}`,
+    title: label, 'aria-label': label, 'aria-pressed': pressed, onClick,
   }, children)
 }
 
 export function LanChatWindow({
-  rect, state, rpc, onActivate, onClose, onMinimize, onToggleMaximize,
+  rect, state, rpc, zIndex, pinned = false, onTogglePin,
+  onActivate, onClose, onMinimize, onToggleMaximize,
   onDragStart, onDragMove, onDragEnd, onResizeStart,
 }) {
   const [port, setPort] = React.useState(null)
+  const [ownerUrl, setOwnerUrl] = React.useState('')
   const [error, setError] = React.useState('')
   const [attempt, setAttempt] = React.useState(0)
   const [botCount, setBotCount] = React.useState(0)
   const frameUrl = port ? globalThis.__WORLD_MOBILE_ACCESS__
-    ? new URL('/_world_mobile/lan-chat/', window.location.href).href : `http://127.0.0.1:${port}/` : ''
+    ? new URL('/_world_mobile/lan-chat/', window.location.href).href : ownerUrl || `http://127.0.0.1:${port}/` : ''
   const frameRef = React.useRef(null)
   const sendThemeRef = React.useRef(() => {})
 
@@ -79,6 +82,7 @@ export function LanChatWindow({
     let alive = true
     setError('')
     setPort(null)
+    setOwnerUrl('')
     setBotCount(0)
     if (!rpc || typeof rpc.call !== 'function') {
       setError('当前宿主没有提供 RPC 通道。')
@@ -87,7 +91,7 @@ export function LanChatWindow({
     Promise.resolve(rpc.call('/api', 'world-lan-chat/port', {})).then(unwrap).then(value => {
       if (!alive) return
       if (Number.isInteger(value?.bots)) setBotCount(Math.max(0, value.bots))
-      if (value?.port) setPort(value.port)
+      if (value?.port) { setOwnerUrl(value.url || ''); setPort(value.port) }
       else setError('聊天服务没有返回可用端口。')
     }).catch(cause => {
       if (alive) setError(String(cause?.message || cause))
@@ -99,9 +103,9 @@ export function LanChatWindow({
   const maximized = state === 'max'
   const style = maximized
     ? { '--vscode-x': '0vw', '--vscode-y': '0vh', '--vscode-w': '100vw',
-      '--vscode-h': 'calc(100vh - var(--world-desktop-top) - var(--world-taskbar-height))' }
+      '--vscode-h': 'calc(100vh - var(--world-desktop-top) - var(--world-taskbar-height))', zIndex }
     : { '--vscode-x': `${rect.x}vw`, '--vscode-y': `${rect.y}vh`,
-      '--vscode-w': `${rect.w}vw`, '--vscode-h': `${rect.h}vh` }
+      '--vscode-w': `${rect.w}vw`, '--vscode-h': `${rect.h}vh`, zIndex }
   if (minimized) style.display = 'none'
 
   return h('section', {
@@ -122,6 +126,10 @@ export function LanChatWindow({
           '🤖 ' + botCount + ' 模型好友')
         : null),
     h('div', { className: 'world-vscode-controls' },
+      h(Cap, {
+        label: pinLabel(pinned), onClick: onTogglePin, pressed: pinned,
+        className: `world-pin-cap${pinned ? ' is-pinned' : ''}`,
+      }, h(PinGlyph, { size: 12, filled: pinned })),
       h(Cap, { label: '最小化', onClick: onMinimize },
         h('svg', { width: 10, height: 10, viewBox: '0 0 10 10', 'aria-hidden': true },
           h('path', { d: 'M0 5h10', stroke: 'currentColor', strokeWidth: 1 }))),

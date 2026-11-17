@@ -1,4 +1,4 @@
-/** Session-authorized UTF-8 source editing through DSH's composed filesystem. */
+/** Session-authorized UTF-8 editing and read-only GBK viewing through DSH's filesystem. */
 import { dirname } from 'node:path'
 
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024
@@ -75,16 +75,20 @@ export function createVscodeSourceEditor(ctx, { FsError, writableRoots, reveal }
     const bytes = await ctx.fs.readBytes(target, signal, MAX_SOURCE_BYTES)
     const after = await ctx.fs.stat(target, signal)
     if (after?.version !== before.version) fail('读取时文件被改动，请重试。', 'FS_STALE_VERSION')
-    let raw
+    let raw, encoding = 'UTF-8'
     try { raw = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) }
-    catch (error) { if (!(error instanceof TypeError)) throw error; fail('编辑器只支持 UTF-8 文本文件。', 'FS_NOT_TEXT') }
+    catch (error) {
+      if (!(error instanceof TypeError)) throw error
+      try { raw = new TextDecoder('gbk', { fatal: true }).decode(bytes); encoding = 'GBK' }
+      catch (cause) { if (!(cause instanceof TypeError)) throw cause; fail('文件不是有效的 UTF-8 或 GBK 文本。', 'FS_NOT_TEXT') }
+    }
     if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/u.test(raw)) fail('二进制文件不能当文本编辑。', 'FS_NOT_TEXT')
     const bom = raw.startsWith('\uFEFF') ? '\uFEFF' : ''
     if (bom) raw = raw.slice(1)
     const endings = new Map()
     for (const [ending] of raw.matchAll(/\r\n|\r|\n/gu)) endings.set(ending, (endings.get(ending) ?? 0) + 1)
     const newline = [...endings].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '\n'
-    return { source: raw.replace(/\r\n?/gu, '\n'), version: before.version, bom, newline }
+    return { source: raw.replace(/\r\n?/gu, '\n'), version: before.version, bom, newline, encoding }
   }
 
   /** Files and folders under one directory: the tree and the "open folder" dialog share this. */
@@ -148,6 +152,7 @@ export function createVscodeSourceEditor(ctx, { FsError, writableRoots, reveal }
           // 状态栏要显示真实换行符/BOM：保存时会按原样写回，不是假装统一成 LF
           eol: opened.newline === '\r\n' ? 'CRLF' : opened.newline === '\r' ? 'CR' : 'LF',
           bom: Boolean(opened.bom),
+          encoding: opened.encoding, readOnly: opened.encoding !== 'UTF-8',
         }
       }
       if (operation !== 'save') fail('不支持的编辑器操作。', 'FS_INVALID_PATH')
@@ -163,6 +168,7 @@ export function createVscodeSourceEditor(ctx, { FsError, writableRoots, reveal }
       }
       const current = await read(target, active)
       if (current.version !== payload.version) fail('文件在打开后被改动过，请重新打开再保存。', 'FS_STALE_VERSION')
+      if (current.encoding !== 'UTF-8') fail('GBK 文件当前仅供查看；宿主不支持按原编码写入，已保留原文件。', 'FS_ENCODING_READ_ONLY')
       const normalized = payload.source.replace(/\r\n?/gu, '\n')
       const content = current.bom + normalized.replace(/\n/gu, current.newline)
       if (Buffer.byteLength(content, 'utf8') > MAX_SOURCE_BYTES) fail('文件超过 16 MiB，编辑器打不开。', 'FS_TOO_LARGE')
@@ -172,6 +178,7 @@ export function createVscodeSourceEditor(ctx, { FsError, writableRoots, reveal }
         version: saved.version,
         eol: current.newline === '\r\n' ? 'CRLF' : current.newline === '\r' ? 'CR' : 'LF',
         bom: Boolean(current.bom),
+        encoding: current.encoding, readOnly: false,
       }
     })()
     pending.add(task)

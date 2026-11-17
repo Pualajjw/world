@@ -1,6 +1,7 @@
 import React from 'react'
 import { createPortal } from 'react-dom'
-import { VscodeGlyph, VscodeWindow } from './vscode-app.js'
+import { VscodeGlyph, VscodeWindow, lastOpenedFolder } from './vscode-app.js'
+import { DOCUMENT_SLOT, mirrorNativeDocuments } from './native-document.js'
 import { LanChatGlyph, LanChatWindow } from './lan-chat-app.js'
 import { BrowserGlyph, BrowserWindow } from './browser-app.js'
 import { TerminalGlyph, TerminalWindow } from './terminal-app.js'
@@ -25,14 +26,21 @@ import { UI_ACTIONS } from './desktop-ui-protocol.js'
 import { createJournalClient } from './journal-client.js'
 import { JOURNAL_APPS, JournalPage } from './journal-app.js'
 import { TASK_APPS, TasksPage } from './task-app.js'
+import { PROCESS_APPS, ProcessesPage } from './process-manager-app.js'
+import { INTERNET_APPS, InternetPage, InternetTaskbar } from './internet-app.js'
 import { FileLinkGlyph, HolderGlyph, HolderPage, RenameDialog } from './holder-app.js'
 import { openNativeSettings } from './native-settings.js'
 import { HOST_PANELS, openHostPanel } from './host-panels.js'
 import { version as WORLD_VERSION } from './package.json'
+import { WorldVersion } from './update-panel.js'
 import { PHONE_BREAKPOINT, isPhoneViewport, fitSavedDesktopRect } from './responsive.js'
+import { WINDOW_Z_BASE, dropWindows, orderByPin, raiseWindow, topWindow } from './window-stack.js'
+import { PinGlyph, pinLabel } from './window-pin.js'
+import { createKeyboardSettle, KEYBOARD_MIN } from './soft-keyboard.js'
 import { WorkbenchSetup } from './workbench-setup.js'
 import { readWallpaper, saveWallpaper, wallpaperFor, wallpaperStyle, wallpaperTone } from './wallpaper.js'
 import { WallpaperPanel } from './wallpaper-panel.js'
+import { ConfirmHost, worldConfirm } from './world-confirm.js'
 import { MobileConnect, MobileGlyph } from './mobile-connect.js'
 import { activityTiming } from './assistant-activity.js'
 import { createConversationSeat } from './conversation-seat.js'
@@ -53,7 +61,10 @@ const BROWSER_STORAGE_KEY = 'dsh.world.browser.window'
 const TERMINAL_STORAGE_KEY = 'dsh.world.terminal.window'
 const BROWSER_MIGRATION_KEY = 'dsh.world.browser.migrated'
 const TERMINAL_MIGRATION_KEY = 'dsh.world.terminal.migrated'
-const DEPTH_STORAGE_KEY = 'dsh.world.depth'
+// 0.2.95 起默认是平面桌面（原来的「普通桌面」），这个键只在你亲手打开过 3D 时才是 'on'。
+// 旧键 dsh.world.depth 是「默认开」那几版每次挂载都会自动写下的 on，分不清是你的选择还是默认，
+// 所以换键重来一次：升级后先进平面桌面，想要景深再点任务栏的 3D。
+const DEPTH_STORAGE_KEY = 'dsh.world.depth.choice'
 const ICON_POSITIONS_KEY = 'dsh.world.iconPositions'
 const FILE_LINKS_KEY = 'dsh.world.fileLinks'
 const HOLDERS_KEY = 'dsh.world.holders'
@@ -64,12 +75,14 @@ const MIN_WINDOW_WIDTH = 720
 const MIN_WINDOW_HEIGHT = 480
 /** 甩到桌面顶边多近算「要最大化」（CSS 像素）。 */
 const TOP_SNAP_SLACK = 6
+/** 甩到桌面左右边多近算「要占半边」。指针到边上本来就有一两个像素的死区，给宽一点。 */
+const SIDE_SNAP_SLACK = 8
 const DEFAULT_POSITION = { x: 20, y: 9, w: 60, h: 68 }
 const EMPTY_APPS = []
 const NOOP_SUBSCRIBE = () => () => {}
 const EMPTY_CATALOG = { subscribe: NOOP_SUBSCRIBE, getSnapshot: () => EMPTY_APPS }
-/** 设置、日记、待办只在开始菜单里出现；桌面上不摆这三个图标。 */
-const DESKTOP_HIDDEN = new Set(['settings', 'plugins', 'plugin:world-diary', 'plugin:world-tasks'])
+/** 设置、日记、待办和进程管理器只在开始菜单里出现。 */
+const DESKTOP_HIDDEN = new Set(['settings', 'plugins', 'plugin:world-diary', 'plugin:world-tasks', 'plugin:world-processes', 'plugin:world-internet'])
 const KIND_HINTS = { app: '应用', external: '外部应用', file: '文件', directory: '文件夹', holder: '收纳盒' }
 const DIALOG_ROLES = '[role="dialog"],[role="alertdialog"],[role="menu"],[role="listbox"],[role="tooltip"]'
 
@@ -117,9 +130,8 @@ function saveInstalledApps(apps) {
 // 3D 景深默认开启；关掉后退回原来的平面壁纸（视差与地面透视全部停止）。
 function readDepth() {
   try {
-    const value = window.localStorage.getItem(DEPTH_STORAGE_KEY)
-    return value === null ? true : value === 'on'
-  } catch { return true }
+    return window.localStorage.getItem(DEPTH_STORAGE_KEY) === 'on'
+  } catch { return false }
 }
 
 function saveDepth(on) {
@@ -253,7 +265,10 @@ function folderName(path) {
 
 /** 文件夹身份：统一分隔符、去掉结尾斜杠；Windows 盘符 / UNC 路径大小写不敏感。 */
 function vscodeFolderKey(path) {
-  const text = String(path || '').replace(/\\/g, '/').replace(/\/+$/u, '')
+  const normalized = String(path || '').replace(/\\/g, '/')
+  if (normalized === '/') return '/'
+  if (/^[a-zA-Z]:\/*$/u.test(normalized)) return `${normalized[0].toLowerCase()}:/`
+  const text = normalized.replace(/\/+$/u, '')
   return /^[a-zA-Z]:\//u.test(text) || text.startsWith('//') ? text.toLowerCase() : text
 }
 
@@ -296,6 +311,71 @@ function clampRect(rect) {
 function droppedOnTopEdge(event) {
   const top = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--dsh-windows-titlebar-height')) || 0
   return event.clientY <= top + TOP_SNAP_SLACK
+}
+
+/** 指针在桌面左/右边缘松手：占这半边（和甩到顶边是一套 Windows 手感）。 */
+function droppedOnSideEdge(event) {
+  const width = window.innerWidth || 0
+  if (!width) return null
+  if (event.clientX <= SIDE_SNAP_SLACK) return 'left'
+  if (event.clientX >= width - SIDE_SNAP_SLACK) return 'right'
+  return null
+}
+
+/** 半屏的矩形（百分比）：左边 0~50，右边 50~100，高度铺满桌面。 */
+function sideSnapRect(side) {
+  return { x: side === 'left' ? 0 : 50, y: 0, w: 50, h: 100 }
+}
+
+/**
+ * 拖动中指针落在哪条边上（顶边 = 最大化，左右边 = 半屏）。
+ * 松手时才真吸附，这个只用来画「将要占到哪儿」的预览。
+ */
+function snapTargetFor(event) {
+  if (droppedOnTopEdge(event)) return 'top'
+  return droppedOnSideEdge(event)
+}
+
+/**
+ * 松手落点在这半屏就把它变成矩形。返回 true 表示已经处理完，调用方不必再落盘拖动中的位置。
+ * 顶边优先于左右（顶边是最大化，角落也照 Windows 走最大化）。
+ */
+function applySideSnap(event, drag, clamp, commit) {
+  if (drag.kind !== 'move' || !dragTraveled(event, drag)) return false
+  const side = droppedOnSideEdge(event)
+  if (!side) return false
+  commit(clamp(sideSnapRect(side)))
+  return true
+}
+
+/**
+ * 最大化状态下开始拖标题栏时，把窗口还原成原来的大小，并让它落在光标下面。
+ * 光标原来落在最大化窗口横向的哪个比例上，还原后就还落在那个比例上（Windows 就是这样跟手的）；
+ * 纵向固定让光标停在标题栏中间，不然窗口会一半在桌面顶栏上面。
+ */
+function restoreUnderPointer(rect, event) {
+  const width = window.innerWidth || 1
+  const height = window.innerHeight || 1
+  const wPx = width * (Number(rect?.w) || 0) / 100
+  const ratio = Math.min(1, Math.max(0, event.clientX / width))
+  const x = (event.clientX - wPx * ratio) / width * 100
+  const y = (event.clientY - 20) / height * 100
+  return { x, y, w: rect.w, h: rect.h }
+}
+
+/**
+ * 各种窗口通用的「最大化也能拖」：第一次行程 ≥ 4px 时把窗口还原成原来大小、落到光标下面，
+ * 并把拖动基点重置到当前光标（否则这一段的位移会被重复算一次）。
+ * 返回 true 表示这一帧刚还原过，调用方照常按 drag.rect 继续算就行。
+ */
+function restoreMaxForDrag(event, drag, clamp, apply) {
+  if (!drag?.maxed || !dragTraveled(event, drag)) return false
+  drag.maxed = false
+  drag.rect = clamp(restoreUnderPointer(drag.rect, event))
+  drag.x = event.clientX
+  drag.y = event.clientY
+  apply(drag.rect)
+  return true
 }
 
 /**
@@ -425,6 +505,64 @@ function useHostSidebar() {
   return sidebar
 }
 
+/**
+ * 手机软键盘：键盘吃掉多少高度，手机窗口就收多少，别让正在编辑的那一行躲在键盘下面。
+ *
+ * 高度算一次要「等键盘动画结束」再写（soft-keyboard.js 里那道闸），不跟着每一帧跳：
+ * 跟着跳的话，整个桌面会在一两百毫秒里被重排十几次，看着就是界面在抽。
+ * 桌面布局、以及不吃键盘的浏览器里 overlap 恒为 0，这个 effect 等于没开。
+ */
+function useSoftKeyboard(phone) {
+  React.useEffect(() => {
+    if (!phone || typeof window === 'undefined' || !window.visualViewport) return undefined
+    const viewport = window.visualViewport
+    const root = document.documentElement
+    let frame = 0
+    let motion = 0
+    /* 过渡只在键盘这段里生效：布局切换（桌面↔手机）必须瞬时到位，
+       所以不能把 transition 写死在手机窗口那条规则上。改成提前挂 class。 */
+    const armMotion = on => {
+      window.clearTimeout(motion)
+      if (on) document.body.classList.add('is-keyboard-motion')
+      else motion = window.setTimeout(() => document.body.classList.remove('is-keyboard-motion'), 260)
+    }
+    const write = height => {
+      root.style.setProperty('--world-keyboard', `${height}px`)
+      if (!height) armMotion(false)
+      // 键盘把版面顶起来时，浏览器顺手也滚了一下文档——固定定位的窗口不受它影响，
+      // 但视觉视口会跟着偏，下一次算出来的高度就变，于是自己跟自己打架。按回去。
+      if (window.scrollX || window.scrollY) window.scrollTo(0, 0)
+    }
+    const settle = createKeyboardSettle({ commit: write })
+    const measure = () => {
+      frame = 0
+      // 捏合放大时视觉视口也会变矮，那不是键盘。
+      const overlap = viewport.scale > 1.01 ? 0 : window.innerHeight - viewport.height - (viewport.offsetTop || 0)
+      // 先挂过渡再改高度：两件事同一帧发生的话，浏览器看不到「起点值」，过渡等于没有。
+      // 反过来：键盘没开就摘掉——包括「挂上 class 之后又缩回去、一个高度都没提交」那种半路取消，
+      // 否则这个 class 会一直留在 body 上，把桌面↔手机的布局切换也变成 160ms 动画。
+      if (overlap >= KEYBOARD_MIN) armMotion(true)
+      else if (!settle.value) armMotion(false)
+      settle.push(overlap)
+    }
+    const schedule = () => { if (!frame) frame = window.requestAnimationFrame(measure) }
+    measure()
+    viewport.addEventListener('resize', schedule)
+    viewport.addEventListener('scroll', schedule)
+    // 少数安卓浏览器只在 window 上发 resize：两条都听着，多算一次不花钱（同值不会重复提交）
+    window.addEventListener('resize', schedule)
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame)
+      window.clearTimeout(motion)
+      document.body.classList.remove('is-keyboard-motion')
+      viewport.removeEventListener('resize', schedule)
+      viewport.removeEventListener('scroll', schedule)
+      window.removeEventListener('resize', schedule)
+      root.style.setProperty('--world-keyboard', '0px')
+    }
+  }, [phone])
+}
+
 /** Keep background apps mounted, but remove them from phone input and keyboard navigation. */
 function usePhoneWindows(phone, activeWindow) {
   React.useLayoutEffect(() => {
@@ -491,9 +629,13 @@ function DshMark({ size = 48 }) {
     h('path', { d: 'M23 30.5h11', stroke: '#062b47', strokeWidth: 4, strokeLinecap: 'round' }))
 }
 
-function WindowControls({ state, onMinimize, onToggleMaximize, onClose }) {
+function WindowControls({ state, pinned, onTogglePin, onMinimize, onToggleMaximize, onClose }) {
   const maximized = state === 'max'
   return h('div', { className: 'world-window-controls' },
+    h('button', {
+      className: `world-cap world-pin-cap${pinned ? ' is-pinned' : ''}`, type: 'button',
+      title: pinLabel(pinned), 'aria-label': pinLabel(pinned), 'aria-pressed': pinned, onClick: onTogglePin,
+    }, h(PinGlyph, { size: 12, filled: pinned })),
     h('button', { className: 'world-cap', type: 'button', title: '最小化', 'aria-label': '最小化', onClick: onMinimize },
       h('svg', { width: 10, height: 10, viewBox: '0 0 10 10', 'aria-hidden': true }, h('path', { d: 'M0 5h10', stroke: 'currentColor', strokeWidth: 1 }))),
     h('button', { className: 'world-cap', type: 'button', title: maximized ? '还原' : '最大化', 'aria-label': maximized ? '还原' : '最大化', onClick: onToggleMaximize },
@@ -521,6 +663,14 @@ function ControlGlyph() {
     width: 20, height: 20, viewBox: '0 0 20 20', fill: 'none', 'aria-hidden': true,
     stroke: 'currentColor', strokeWidth: 1.5, strokeLinejoin: 'round', strokeLinecap: 'round',
   }, h('path', { d: 'M4 2.5v14l3.8-3.8 2.8 5.3 2.7-1.4-2.7-5.1 5.4-.6L4 2.5z' }))
+}
+
+/** 电源：一条竖线加一圈开口的弧，和 Win11 开始菜单右下角那颗一致。 */
+function PowerGlyph({ size = 16 }) {
+  return h('svg', {
+    width: size, height: size, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': true,
+    stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round',
+  }, h('path', { d: 'M12 3.4v8.2' }), h('path', { d: 'M7.6 6.3a7.4 7.4 0 1 0 8.8 0' }))
 }
 
 function AssistantActivity({ activity, control }) {
@@ -568,10 +718,15 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       startSearchRef.current?.blur()
       return
     }
-    startSearchRef.current?.focus()
+    // 桌面上开菜单把光标放进搜索框：想搜直接打字。手机上不能这么做——一开菜单软键盘就弹起来，
+    // 半边屏幕连同底下的应用一起被盖住，还得先收键盘才能点。手机上等手指点头那个框再说。
+    // 这里只能用 isPhoneViewport()：phone 这个 state 在下面才声明，放进依赖数组会撞上暂时性死区。
+    if (!isPhoneViewport()) startSearchRef.current?.focus()
   }, [startOpen])
   const [position, setPosition] = React.useState(readPosition)
   const [installedApps, setInstalledApps] = React.useState(readInstalledApps)
+  const installedAppsRef = React.useRef(installedApps)
+  installedAppsRef.current = installedApps
   const [vscodeWindows, setVscodeWindows] = React.useState([])
   const [vscodeDirty, setVscodeDirty] = React.useState(() => new Set())
   const [lanChatOpen, setLanChatOpen] = React.useState(false)
@@ -580,6 +735,13 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const [browserOpen, setBrowserOpen] = React.useState(false)
   const [browserState, setBrowserState] = React.useState('normal')
   const [browserRect, setBrowserRect] = React.useState(readBrowserRect)
+  const [browserLaunch, setBrowserLaunch] = React.useState(null)
+  const [immersive, setImmersive] = React.useState(null)
+  const [launchReady, setLaunchReady] = React.useState(false)
+  const immersiveRef = React.useRef(immersive)
+  immersiveRef.current = immersive
+  const immersiveRestoreRef = React.useRef(null)
+  const launchHandlerRef = React.useRef(null)
   const [terminalOpen, setTerminalOpen] = React.useState(false)
   const [terminalState, setTerminalState] = React.useState('normal')
   const [terminalRect, setTerminalRect] = React.useState(readTerminalRect)
@@ -589,13 +751,56 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const [holders, setHolders] = React.useState(readHolders)
   const [rename, setRename] = React.useState(null)
   const holderApps = holders.map(holder => ({ key: holder.id, label: holder.name, icon: HolderGlyph, description: '收纳盒' }))
-  const windowApps = [...JOURNAL_APPS, ...TASK_APPS, ...holderApps, ...pluginApps]
+  const windowApps = [...JOURNAL_APPS, ...TASK_APPS, ...PROCESS_APPS, ...INTERNET_APPS, ...holderApps, ...pluginApps]
   const [contextMenu, setContextMenu] = React.useState(null)
+  const [powerMenu, setPowerMenu] = React.useState(null)
+  const [powerBusy, setPowerBusy] = React.useState(false)
   const [dropActive, setDropActive] = React.useState(false)
   const [notice, setNotice] = React.useState('')
+  const [noticeErrors, setNoticeErrors] = React.useState([])
   const [pluginWindows, setPluginWindows] = React.useState([])
   const [session, setSession] = React.useState(() => currentMainSession(sessions))
-  const [activeWindow, setActiveWindow] = React.useState('dsh')
+  /**
+   * 窗口叠放：从底到顶记录最近一次激活顺序。最小化 / 关闭出栈，前台交给栈里剩下的最上面一个。
+   * 钉住集合只影响渲染时的分组排序（钉住的永远在未钉住之上），不写 localStorage。
+   */
+  const [windowStack, setWindowStack] = React.useState([])
+  const windowStackRef = React.useRef(windowStack)
+  windowStackRef.current = windowStack
+  const [pinnedWindows, setPinnedWindows] = React.useState(() => new Set())
+  const pinnedWindowsRef = React.useRef(pinnedWindows)
+  pinnedWindowsRef.current = pinnedWindows
+  const [activeWindow, setActiveWindowState] = React.useState('dsh')
+  /** 所有「把窗口拿到前台」都走这里：既切前台，也真的把它提到叠放栈顶。 */
+  const setActiveWindow = id => {
+    if (id && id !== 'desktop') setWindowStack(stack => raiseWindow(stack, id))
+    setActiveWindowState(id)
+  }
+  /** 最小化 / 关闭：出栈；关闭时连钉住一起清掉，最小化保留（还原后还钉着）。 */
+  const dropVirtualWindows = (ids, { keepPinned = false } = {}) => {
+    const gone = ids instanceof Set ? ids : new Set(Array.isArray(ids) ? ids : [ids])
+    setWindowStack(stack => dropWindows(stack, gone))
+    if (!keepPinned) {
+      setPinnedWindows(current => {
+        let changed = false
+        const next = new Set(current)
+        for (const id of gone) if (next.delete(id)) changed = true
+        return changed ? next : current
+      })
+    }
+    if (gone.has(activeWindowRef.current)) setActiveWindowState(topWindow(dropWindows(windowStackRef.current, gone)))
+  }
+  const toggleWindowPin = id => {
+    const pin = !pinnedWindowsRef.current.has(id)
+    setPinnedWindows(current => {
+      const next = new Set(current)
+      if (pin) next.add(id)
+      else next.delete(id)
+      return next
+    })
+    // 刚钉住的窗口排到钉住组的最上面；取消钉住就退回未钉住组原来的位置。
+    if (pin) setWindowStack(stack => raiseWindow(stack, id))
+  }
   const [phone, setPhone] = React.useState(isPhoneViewport)
   const [phoneRecent, setPhoneRecent] = React.useState(false)
   const desktopFocusRef = React.useRef('dsh')
@@ -606,6 +811,44 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const [wallpaper, setWallpaper] = React.useState(readWallpaper)
   const [wallpaperOpen, setWallpaperOpen] = React.useState(false)
   const [mobileOpen, setMobileOpen] = React.useState(false)
+  /**
+   * 拖动中「松手会吸到哪儿」的预览：null / 'left' / 'right' / 'top'。
+   * 吸附本身只在松手时算，这个只负责在拖动途中把目标位置画出来——不然用户根本发现不了
+   * 窗口可以甩到边上。用 ref 记住上一次的值，只有变了才 setState：拖动是每帧一次事件，
+   * 每次 setState 都会重渲染整个桌面。
+   */
+  const [snapPreview, setSnapPreview] = React.useState(null)
+  const snapPreviewRef = React.useRef('')
+  /**
+   * @param clamp 这个窗口自己的约束函数——预览必须和松手后的实际矩形一致。
+   *   半屏不是死板的 50vw：主窗口有 720px 最小宽度，1280 宽的屏上会收成 56.25vw。
+   *   预览画成 50vw 而结果变 56.25vw，等于在骗用户。
+   */
+  const updateSnapPreview = (event, drag, clamp) => {
+    const side = drag.kind === 'move' && dragTraveled(event, drag) ? snapTargetFor(event) : null
+    const rect = side && side !== 'top' && clamp ? clamp(sideSnapRect(side)) : null
+    const key = side ? `${side}:${rect ? `${rect.x}/${rect.w}` : ''}` : ''
+    if (snapPreviewRef.current === key) return
+    snapPreviewRef.current = key
+    setSnapPreview(side ? { side, rect } : null)
+  }
+  const hideSnapPreview = () => {
+    if (!snapPreviewRef.current) return
+    snapPreviewRef.current = ''
+    setSnapPreview(null)
+  }
+  // 兜底：万一某个窗口的 pointerup / pointercancel 没走到自己的 end 处理（比如拖动中途被系统取消），
+  // 也不能把高亮留在桌面上。只在预览存在时挂监听，拖完就摘。
+  React.useEffect(() => {
+    if (!snapPreview) return undefined
+    const clear = () => hideSnapPreview()
+    window.addEventListener('pointerup', clear, true)
+    window.addEventListener('pointercancel', clear, true)
+    return () => {
+      window.removeEventListener('pointerup', clear, true)
+      window.removeEventListener('pointercancel', clear, true)
+    }
+  }, [snapPreview])
 
   React.useEffect(() => {
     const syncTheme = () => {
@@ -651,6 +894,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const suppressIconClickRef = React.useRef(false)
   const suppressIconTimerRef = React.useRef(0)
   const noticeTimer = React.useRef(0)
+  React.useEffect(() => () => window.clearTimeout(noticeTimer.current), [])
   const activeWindowRef = React.useRef(activeWindow)
   const pluginWindowsRef = React.useRef(pluginWindows)
   const externalAppsRef = React.useRef(externalApps)
@@ -705,7 +949,10 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     const media = window.matchMedia(`(max-width: ${PHONE_BREAKPOINT}px)`)
     const sync = () => {
       if (media.matches) desktopFocusRef.current = activeWindowRef.current
-      else if (activeWindowRef.current === 'desktop') setActiveWindow(desktopFocusRef.current)
+      else if (activeWindowRef.current === 'desktop') {
+        const last = desktopFocusRef.current
+        setActiveWindowState(windowStackRef.current.includes(last) ? last : topWindow(windowStackRef.current))
+      }
       setPhone(media.matches)
       setPhoneRecent(false)
     }
@@ -724,6 +971,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     }
   }, [phone, position, browserRect, terminalRect, lanChatRect, vscodeWindows, pluginWindows])
   usePhoneWindows(phone, phoneRecent ? 'desktop' : activeWindow)
+  useSoftKeyboard(phone)
   React.useEffect(() => {
     if (!phoneRecent) return
     recentRef.current?.querySelector('button')?.focus()
@@ -736,6 +984,11 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     setNotice(message)
     window.clearTimeout(noticeTimer.current)
     noticeTimer.current = window.setTimeout(() => setNotice(''), 2600)
+  }
+  // Errors stay until dismissed; unrelated successes and later errors must not erase them.
+  const showError = message => {
+    const text = String(message || '操作失败，请重试。')
+    setNoticeErrors(errors => errors.includes(text) ? errors : [...errors, text])
   }
   const rootReady = useHostWindow(phone && (activeWindow !== 'dsh' || phoneRecent) && state !== 'closed' ? 'min' : state, position)
   const brainCall = async (operation, payload, signal) => {
@@ -754,13 +1007,53 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     if (!result?.ok) throw desktopError(result?.error?.message || '无法调整自动推进。', result?.error?.code)
     return result.value
   }
+  // 关机 / 重启：动的是 DSH 主程序，world 只负责按钮和确认。
+  const powerCall = async operation => {
+    const result = await rpc.call('/api', `world-power/${operation}`, {})
+    if (!result?.ok) throw desktopError(result?.error?.message || '无法操作 DSH 主程序。', result?.error?.code)
+    return result.value
+  }
+  const openPowerMenu = async event => {
+    if (powerBusy) return
+    if (powerMenu) { setPowerMenu(null); return }
+    const rect = event.currentTarget.getBoundingClientRect()
+    setPowerBusy(true)
+    try {
+      const info = await powerCall('probe')
+      if (!info.supported) { showError(info.reason || '当前环境不支持关机。'); return }
+      // 贴着按钮往左上展开：菜单 176px 宽、两行约 100px 高，别顶出视口。
+      const width = 176, height = 100
+      setPowerMenu({
+        x: Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)),
+        y: Math.max(8, rect.top - height - 8),
+      })
+    } catch (error) { showError(error.message) }
+    finally { setPowerBusy(false) }
+  }
+  const requestPower = async action => {
+    setStartOpen(false)
+    setPowerMenu(null)
+    const label = action === 'restart' ? '重启' : '关机'
+    const what = action === 'restart' ? '关闭并重新打开 DSH 主程序' : '让 DSH 主程序立即退出'
+    const ok = await worldConfirm({
+      title: `${label} DSH 主程序`,
+      message: `${label}会${what}，正在进行的回合会被中断。`,
+      confirmLabel: label,
+      danger: true,
+    })
+    if (!ok) return
+    try {
+      await powerCall(action)
+      showNotice(`正在${label}…`)
+    } catch (error) { showError(error.message) }
+  }
   const paused = Boolean(assistantActivity?.paused)
   const [pauseBusy, setPauseBusy] = React.useState(false)
   const togglePause = async () => {
     if (pauseBusy) return
     setPauseBusy(true)
     try { await workbenchCall(paused ? 'resume' : 'pause') }
-    catch (error) { showNotice(error.message) }
+    catch (error) { showError(error.message) }
     finally { setPauseBusy(false) }
   }
   const closePersonalization = () => {
@@ -936,11 +1229,11 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       const files = Array.from(event.dataTransfer?.files || [])
       const appFile = files.find(item => APP_FILE_PATTERN.test(item.name))
       if (appFile) {
-        if (appFile.size > 64 * 1024) return showNotice('应用包超过 64 KB')
+        if (appFile.size > 64 * 1024) return showError('应用包超过 64 KB')
         let parsed
         try { parsed = parseWorldApp(await appFile.text(), appFile.size) }
-        catch { return showNotice('读取应用包失败') }
-        if (!parsed.ok) return showNotice(parsed.error)
+        catch { return showError('读取应用包失败') }
+        if (!parsed.ok) return showError(parsed.error)
         const app = parsed.app
         const exists = externalAppsRef.current.some(item => item.id === app.id)
         const next = exists
@@ -954,9 +1247,9 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       }
       if (!files.length) return
       const pathFor = window.__DSH_HOST_PATHS__?.pathFor
-      if (typeof pathFor !== 'function') return showNotice('当前环境拿不到文件的绝对路径，请在桌面版里拖入文件')
+      if (typeof pathFor !== 'function') return showError('当前环境拿不到文件的绝对路径，请在桌面版里拖入文件')
       const paths = files.map(file => { try { return pathFor(file) || file.path || '' } catch { return '' } }).filter(Boolean)
-      if (!paths.length) return showNotice('没有拿到拖入文件的绝对路径')
+      if (!paths.length) return showError('没有拿到拖入文件的绝对路径')
       const known = new Set(fileLinksRef.current.map(link => slashPath(link.path).toLowerCase()))
       const fresh = paths.filter(path => !known.has(slashPath(path).toLowerCase()))
       if (!fresh.length) return showNotice('这些文件已经在桌面上了')
@@ -1016,7 +1309,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
 
   React.useEffect(() => {
     const onKeyDown = event => {
-      if (event.key === 'Escape') { setStartOpen(false); setContextMenu(null) }
+      if (event.key === 'Escape') { setStartOpen(false); setContextMenu(null); setPowerMenu(null) }
     }
     const onPointerDown = event => {
       const pluginWindow = event.target.closest?.('.world-plugin-window')
@@ -1031,6 +1324,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       else if (event.target.closest?.('.world-window-frame')
         || (['normal', 'max'].includes(document.body.dataset.worldWindow) && event.target.closest?.('#root'))) setActiveWindow('dsh')
       if (!event.target.closest?.('.world-start, .world-start-button')) setStartOpen(false)
+      if (!event.target.closest?.('.world-power-menu, .world-start-power')) setPowerMenu(null)
       if (!event.target.closest?.('.world-desktop-icon')) setSelected(false)
       if (!event.target.closest?.('.world-context-menu')) setContextMenu(null)
     }
@@ -1098,7 +1392,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   }, [])
 
   React.useEffect(() => {
-    // CSS 用 data-world-active-kind 判断「哪一类窗口在最前」；完整 id 留给需要区分第几个窗口的地方
+    // data-world-active-kind 留给 3D 抬高、终端 accent 这类按类别生效的样式；层级由叠放栈决定
     const kind = activeWindow.startsWith('vscode:') ? 'vscode'
       : activeWindow.startsWith('plugin:') ? 'plugin'
         : activeWindow.startsWith('ext:') ? 'external' : activeWindow
@@ -1167,6 +1461,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     if (state === 'normal' || state === 'max') {
       lastOpenState.current = state
       setState('min')
+      dropVirtualWindows('dsh', { keepPinned: true })
     }
   }
   const toggleMaximize = () => {
@@ -1177,6 +1472,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     lastOpenState.current = 'normal'
     setState('closed')
     setStartOpen(false)
+    dropVirtualWindows('dsh')
   }
 
   const focusPlugin = key => setActiveWindow(`plugin:${key}`)
@@ -1190,8 +1486,11 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     })
     focusPlugin(key)
   }
-  const minimizePlugin = key => setPluginWindows(list => list.map(win => win.key === key
-    ? { ...win, lastOpen: win.state === 'max' ? 'max' : 'normal', state: 'min' } : win))
+  const minimizePlugin = key => {
+    setPluginWindows(list => list.map(win => win.key === key
+      ? { ...win, lastOpen: win.state === 'max' ? 'max' : 'normal', state: 'min' } : win))
+    dropVirtualWindows(`plugin:${key}`, { keepPinned: true })
+  }
   const toggleMaximizePlugin = key => setPluginWindows(list => list.map(win => {
     if (win.key !== key) return win
     if (win.state === 'max') return { ...win, state: 'normal', lastOpen: 'normal' }
@@ -1199,7 +1498,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   }))
   const closePlugin = key => {
     setPluginWindows(list => list.filter(win => win.key !== key))
-    if (activeWindowRef.current === `plugin:${key}`) setActiveWindow('dsh')
+    dropVirtualWindows(`plugin:${key}`)
   }
   const restoreWindow = id => {
     setPhoneRecent(false)
@@ -1255,7 +1554,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     setContextMenu(null)
     openWindow()
     const opened = typeof openSettings === 'function' ? openSettings() : false
-    if (!opened) showNotice('没能打开设置：当前宿主没有暴露原生设置面板。')
+    if (!opened) showError('没能打开设置：当前宿主没有暴露原生设置面板。')
   }
 
   /** 插件管理页声明了自己的子槽位，搬不进虚拟窗口，所以和设置一样：立起 DSH 窗口再切面板。 */
@@ -1264,19 +1563,20 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     openWindow()
     const opened = typeof openPanel === 'function' ? openPanel(id) : false
     const page = HOST_PANELS.find(item => item.id === id)
-    if (!opened) showNotice(`没能打开${page?.label || id}页：当前宿主没有这个面板。`)
+    if (!opened) showError(`没能打开${page?.label || id}页：当前宿主没有这个面板。`)
   }
 
   const beginPluginDrag = key => event => {
     if (isPhoneViewport()) return
     if (event.target.closest('button')) return
     const win = pluginWindowsRef.current.find(item => item.key === key)
-    if (!win || win.state !== 'normal') return
+    // 最大化也能拖：拖起来先还原（和主窗口、VSCode 一致），别让整条标题栏成为死区
+    if (!win || (win.state !== 'normal' && win.state !== 'max')) return
     phoneDesktopRects.current.delete(`plugin:${key}`)
     focusPlugin(key)
     pluginDragRef.current = {
       kind: 'move', key, pointerId: event.pointerId,
-      x: event.clientX, y: event.clientY, rect: win.rect,
+      x: event.clientX, y: event.clientY, rect: win.rect, maxed: win.state === 'max',
     }
     event.currentTarget.setPointerCapture?.(event.pointerId)
     event.preventDefault()
@@ -1297,6 +1597,10 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const movePluginDrag = event => {
     const drag = pluginDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
+    updateSnapPreview(event, drag, clampPluginRect)
+    restoreMaxForDrag(event, drag, clampPluginRect, rect => {
+      setPluginWindows(list => list.map(win => win.key === drag.key ? { ...win, state: 'normal', rect } : win))
+    })
     const dx = (event.clientX - drag.x) / (window.innerWidth || 1) * 100
     const dy = (event.clientY - drag.y) / (window.innerHeight || 1) * 100
     const next = { ...drag.rect }
@@ -1314,6 +1618,8 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const endPluginDrag = event => {
     const drag = pluginDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
+    // 松手（无论落在哪儿）先把预览撤掉，再按落点决定怎么吸
+    hideSnapPreview()
     pluginDragRef.current = null
     // 甩到顶边：把矩形退回拖动前再最大化，还原时才不会贴在标题栏下面
     if (drag.kind === 'move' && dragTraveled(event, drag) && droppedOnTopEdge(event)) {
@@ -1321,6 +1627,10 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
         ? { ...win, rect: drag.rect, state: 'max', lastOpen: 'max' } : win))
       return
     }
+    if (applySideSnap(event, drag, clampPluginRect, next => {
+      setPluginWindows(list => list.map(win => win.key === drag.key ? { ...win, rect: next, state: 'normal' } : win))
+      savePluginRect(drag.key, next)
+    })) return
     if (drag.next) savePluginRect(drag.key, drag.next)
   }
 
@@ -1353,10 +1663,11 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     })
   }
 
-  /** 同一个文件夹只保留一个实例：把它拿到前台（最小化的还原），返回已有窗口的 key。 */
-  const focusVscodeFolder = (folder, excludeKey) => {
+  /** 目录窗口按目录复用；默认启动也可查找唯一的空白窗口。 */
+  const focusVscodeFolder = (folder, excludeKey, allowEmpty = false) => {
     const key = vscodeFolderKey(folder)
-    const existing = vscodeWindowsRef.current.find(win => win.key !== excludeKey && vscodeFolderKey(win.rootPath) === key)
+    if (!key && !allowEmpty) return ''
+    const existing = vscodeWindowsRef.current.find(win => !win.collectionId && win.key !== excludeKey && vscodeFolderKey(win.rootPath) === key)
     if (!existing) return ''
     setVscodeWindows(list => list.map(win => win.key === existing.key && win.state === 'min'
       ? { ...win, state: win.lastOpen === 'max' ? 'max' : 'normal' } : win))
@@ -1366,26 +1677,38 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
 
   const openVscode = (rootPath, owner = session) => {
     setStartOpen(false)
-    // 从事件处理直接调用时第一个参数是事件对象，只认字符串
+    // 从事件处理直接调用时第一个参数是事件对象，只认字符串。
+    // 默认打开最近目录；该目录已打开时，打开或还原唯一的空白窗口。
+    // 显式指定目录则始终激活唯一的目录窗口。
     const folder = typeof rootPath === 'string' ? rootPath : ''
-    const root = folder || owner?.cwd || ''
-    const focused = focusVscodeFolder(root)
-    if (focused) return `vscode:${focused}`
+    if (folder) {
+      const focused = focusVscodeFolder(folder)
+      if (focused) return `vscode:${focused}`
+    }
+    const recent = folder || lastOpenedFolder() || owner?.cwd || ''
+    const root = !folder && vscodeWindowsRef.current.some(win => !win.collectionId && vscodeFolderKey(win.rootPath) === vscodeFolderKey(recent)) ? '' : recent
+    if (!root) {
+      const focused = focusVscodeFolder('', undefined, true)
+      if (focused) return `vscode:${focused}`
+    }
     const key = `win${++nextVscodeKey.current}`
-    setVscodeWindows(list => [...list, {
+    const created = {
       key,
       session: owner,
       rootPath: root,
-      rect: nextVscodeRect(list.length),
+      rect: nextVscodeRect(vscodeWindowsRef.current.length),
       state: 'normal',
-    }])
+    }
+    // Reserve the folder before React renders so two launch requests in one turn cannot duplicate it.
+    vscodeWindowsRef.current = [...vscodeWindowsRef.current, created]
+    setVscodeWindows(list => [...list, created])
     setActiveWindow(`vscode:${key}`)
     return `vscode:${key}`
   }
 
   /** Open a real file in a VSCode window rooted at its folder, reusing that folder's window. */
   const openVscodeFile = filePath => {
-    if (!installedApps.has('vscode')) { showNotice('先从开始菜单安装 VSCode'); return }
+    if (!installedApps.has('vscode')) { showError('先从开始菜单安装 VSCode'); return }
     setStartOpen(false)
     const dir = dirNameOf(filePath)
     const owner = sessionRef.current
@@ -1397,16 +1720,18 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       return `vscode:${focused}`
     }
     const key = `win${++nextVscodeKey.current}`
-    setVscodeWindows(list => [...list, {
+    const created = {
       key, session: owner, rootPath: root, openRequest: { path: filePath, nonce: 1 },
-      rect: nextVscodeRect(list.length), state: 'normal',
-    }])
+      rect: nextVscodeRect(vscodeWindowsRef.current.length), state: 'normal',
+    }
+    vscodeWindowsRef.current = [...vscodeWindowsRef.current, created]
+    setVscodeWindows(list => [...list, created])
     setActiveWindow(`vscode:${key}`)
     return `vscode:${key}`
   }
 
   const openVscodeCollection = holder => {
-    if (!installedApps.has('vscode')) { showNotice('先从开始菜单安装 VSCode'); return }
+    if (!installedApps.has('vscode')) { showError('先从开始菜单安装 VSCode'); return }
     setStartOpen(false)
     setContextMenu(null)
     const entries = holder.items.map(id => fileLinksRef.current.find(link => link.id === id)).filter(Boolean)
@@ -1430,15 +1755,24 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const minimizeVscode = key => {
     setVscodeWindows(list => list.map(win => win.key === key
       ? { ...win, state: 'min', lastOpen: win.state === 'max' ? 'max' : 'normal' } : win))
-    if (activeWindowRef.current === `vscode:${key}`) setActiveWindow('dsh')
+    dropVirtualWindows(`vscode:${key}`, { keepPinned: true })
   }
 
   const toggleMaximizeVscode = key => setVscodeWindows(list => list.map(win => win.key === key
     ? { ...win, state: win.state === 'max' ? 'normal' : 'max' } : win))
 
-  const closeVscode = key => {
-    if (vscodeDirtyRef.current.has(key) && !window.confirm('这个 VSCode 窗口有未保存的修改。仍要关闭吗？')) return
+  const closeVscode = async key => {
+    if (vscodeDirtyRef.current.has(key)) {
+      const ok = await worldConfirm({
+        title: '关闭 VSCode 窗口',
+        message: '这个窗口里还有未保存的修改，关闭后就没了。',
+        confirmLabel: '仍然关闭',
+        danger: true,
+      })
+      if (!ok) return
+    }
     const remaining = vscodeWindowsRef.current.filter(win => win.key !== key)
+    vscodeWindowsRef.current = remaining
     setVscodeWindows(remaining)
     setVscodeDirty(current => {
       if (!current.has(key)) return current
@@ -1446,23 +1780,33 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       next.delete(key)
       return next
     })
-    if (activeWindowRef.current === `vscode:${key}`) {
-      // 关掉的正好是前台：把前台交给还开着的那一个，而不是一律退回 DSH 桌面
-      const fallback = [...remaining].reverse().find(win => win.state !== 'min')
-      setActiveWindow(fallback ? `vscode:${fallback.key}` : 'dsh')
-    }
+    dropVirtualWindows(`vscode:${key}`)
   }
 
-  const uninstallVscode = () => {
-    if (vscodeDirtyRef.current.size && !window.confirm('VSCode 中有未保存的修改。卸载会关闭所有窗口并放弃修改，继续吗？')) return
+  const uninstallVscode = async () => {
+    if (vscodeDirtyRef.current.size) {
+      const ok = await worldConfirm({
+        title: '卸载 VSCode',
+        message: `有 ${vscodeDirtyRef.current.size} 个窗口还有未保存的修改。卸载会关掉所有 VSCode 窗口并放弃这些修改。`,
+        confirmLabel: '卸载',
+        danger: true,
+      })
+      if (!ok) return
+    }
     uninstallApp('vscode')
+    const closingIds = vscodeWindowsRef.current.map(win => `vscode:${win.key}`)
+    vscodeWindowsRef.current = []
     setVscodeWindows([])
     setVscodeDirty(new Set())
-    if (activeWindowRef.current.startsWith('vscode:')) setActiveWindow('dsh')
+    dropVirtualWindows(closingIds)
   }
 
-  const updateVscodeRoot = (key, rootPath) => setVscodeWindows(list => list
-    .map(win => win.key === key ? { ...win, rootPath } : win))
+  const updateVscodeRoot = (key, rootPath) => {
+    if (focusVscodeFolder(rootPath, key)) return
+    const update = list => list.map(win => win.key === key ? { ...win, rootPath } : win)
+    vscodeWindowsRef.current = update(vscodeWindowsRef.current)
+    setVscodeWindows(update)
+  }
 
   const setVscodeWindowDirty = (key, dirty) => setVscodeDirty(current => {
     if (current.has(key) === dirty) return current
@@ -1478,7 +1822,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     uninstallApp('lanchat')
     setLanChatOpen(false)
     setLanChatState('normal')
-    if (activeWindowRef.current === 'lanchat') setActiveWindow('dsh')
+    dropVirtualWindows('lanchat')
   }
   const openLanChat = () => {
     setStartOpen(false)
@@ -1489,12 +1833,13 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const closeLanChat = () => {
     setLanChatOpen(false)
     setLanChatState('normal')
-    if (activeWindowRef.current === 'lanchat') setActiveWindow('dsh')
+    dropVirtualWindows('lanchat')
   }
   const minimizeLanChat = () => {
     if (lanChatState === 'normal' || lanChatState === 'max') {
       lastLanChatOpenState.current = lanChatState
       setLanChatState('min')
+      dropVirtualWindows('lanchat', { keepPinned: true })
     }
   }
   const toggleMaximizeLanChat = () => setLanChatState(current => current === 'max' ? 'normal' : 'max')
@@ -1505,7 +1850,8 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     uninstallApp('browser')
     setBrowserOpen(false)
     setBrowserState('normal')
-    if (activeWindowRef.current === 'browser') setActiveWindow('dsh')
+    setBrowserLaunch(null)
+    dropVirtualWindows('browser')
   }
   const openBrowser = () => {
     setStartOpen(false)
@@ -1516,12 +1862,14 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const closeBrowser = () => {
     setBrowserOpen(false)
     setBrowserState('normal')
-    if (activeWindowRef.current === 'browser') setActiveWindow('dsh')
+    setBrowserLaunch(null)
+    dropVirtualWindows('browser')
   }
   const minimizeBrowser = () => {
     if (browserState === 'normal' || browserState === 'max') {
       lastBrowserOpenState.current = browserState
       setBrowserState('min')
+      dropVirtualWindows('browser', { keepPinned: true })
     }
   }
   const toggleMaximizeBrowser = () => setBrowserState(current => current === 'max' ? 'normal' : 'max')
@@ -1532,7 +1880,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     uninstallApp('terminal')
     setTerminalOpen(false)
     setTerminalState('normal')
-    if (activeWindowRef.current === 'terminal') setActiveWindow('dsh')
+    dropVirtualWindows('terminal')
   }
   const openTerminal = () => {
     setStartOpen(false)
@@ -1543,21 +1891,25 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const closeTerminal = () => {
     setTerminalOpen(false)
     setTerminalState('normal')
-    if (activeWindowRef.current === 'terminal') setActiveWindow('dsh')
+    dropVirtualWindows('terminal')
   }
   const minimizeTerminal = () => {
     if (terminalState === 'normal' || terminalState === 'max') {
       lastTerminalOpenState.current = terminalState
       setTerminalState('min')
+      dropVirtualWindows('terminal', { keepPinned: true })
     }
   }
   const toggleMaximizeTerminal = () => setTerminalState(current => current === 'max' ? 'normal' : 'max')
   const beginTerminalDrag = event => {
     if (isPhoneViewport()) return
-    if (event.target.closest('button') || terminalState !== 'normal') return
+    if (event.target.closest('button') || (terminalState !== 'normal' && terminalState !== 'max')) return
     phoneDesktopRects.current.delete('terminal')
     setActiveWindow('terminal')
-    terminalDragRef.current = { kind: 'move', pointerId: event.pointerId, x: event.clientX, y: event.clientY, rect: terminalRect }
+    terminalDragRef.current = {
+      kind: 'move', pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+      rect: terminalRect, maxed: terminalState === 'max',
+    }
     event.currentTarget.setPointerCapture?.(event.pointerId)
     event.preventDefault()
   }
@@ -1573,6 +1925,8 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const moveTerminal = event => {
     const drag = terminalDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
+    updateSnapPreview(event, drag, clampVscodeRect)
+    restoreMaxForDrag(event, drag, clampVscodeRect, rect => { setTerminalRect(rect); setTerminalState('normal') })
     const dx = (event.clientX - drag.x) / (window.innerWidth || 1) * 100
     const dy = (event.clientY - drag.y) / (window.innerHeight || 1) * 100
     const next = { ...drag.rect }
@@ -1589,20 +1943,29 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const endTerminalDrag = event => {
     const drag = terminalDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
+    // 松手（无论落在哪儿）先把预览撤掉，再按落点决定怎么吸
+    hideSnapPreview()
     terminalDragRef.current = null
     if (drag.kind === 'move' && dragTraveled(event, drag) && droppedOnTopEdge(event)) {
       setTerminalRect(drag.rect)
       toggleMaximizeTerminal()
       return
     }
+    if (applySideSnap(event, drag, clampVscodeRect, next => {
+      setTerminalRect(next)
+      saveRect(TERMINAL_STORAGE_KEY, next)
+    })) return
     saveRect(TERMINAL_STORAGE_KEY, drag.next || terminalRect)
   }
   const beginBrowserDrag = event => {
     if (isPhoneViewport()) return
-    if (event.target.closest('button') || browserState !== 'normal') return
+    if (event.target.closest('button') || (browserState !== 'normal' && browserState !== 'max')) return
     phoneDesktopRects.current.delete('browser')
     setActiveWindow('browser')
-    browserDragRef.current = { kind: 'move', pointerId: event.pointerId, x: event.clientX, y: event.clientY, rect: browserRect }
+    browserDragRef.current = {
+      kind: 'move', pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+      rect: browserRect, maxed: browserState === 'max',
+    }
     event.currentTarget.setPointerCapture?.(event.pointerId)
     event.preventDefault()
   }
@@ -1618,6 +1981,8 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const moveBrowser = event => {
     const drag = browserDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
+    updateSnapPreview(event, drag, clampVscodeRect)
+    restoreMaxForDrag(event, drag, clampVscodeRect, rect => { setBrowserRect(rect); setBrowserState('normal') })
     const dx = (event.clientX - drag.x) / (window.innerWidth || 1) * 100
     const dy = (event.clientY - drag.y) / (window.innerHeight || 1) * 100
     const next = { ...drag.rect }
@@ -1634,12 +1999,18 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const endBrowserDrag = event => {
     const drag = browserDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
+    // 松手（无论落在哪儿）先把预览撤掉，再按落点决定怎么吸
+    hideSnapPreview()
     browserDragRef.current = null
     if (drag.kind === 'move' && dragTraveled(event, drag) && droppedOnTopEdge(event)) {
       setBrowserRect(drag.rect)
       toggleMaximizeBrowser()
       return
     }
+    if (applySideSnap(event, drag, clampVscodeRect, next => {
+      setBrowserRect(next)
+      saveRect(BROWSER_STORAGE_KEY, next)
+    })) return
     saveRect(BROWSER_STORAGE_KEY, drag.next || browserRect)
   }
 
@@ -1647,11 +2018,14 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     if (isPhoneViewport()) return
     if (event.target.closest('button')) return
     const win = vscodeWindowsRef.current.find(item => item.key === key)
-    // 最大化时标题栏不给拖：先还原再拖（和 Windows 一致）比拖着一个全屏窗口跑更不容易出怪动作
-    if (!win || win.state !== 'normal') return
+    // 最大化也能拖：拖起来先还原成原来大小再跟手（Windows 的手感），否则整条标题栏是死区
+    if (!win || (win.state !== 'normal' && win.state !== 'max')) return
     phoneDesktopRects.current.delete(`vscode:${key}`)
     setActiveWindow(`vscode:${key}`)
-    appDragRef.current = { key, kind: 'move', pointerId: event.pointerId, x: event.clientX, y: event.clientY, rect: win.rect }
+    appDragRef.current = {
+      key, kind: 'move', pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+      rect: win.rect, maxed: win.state === 'max',
+    }
     event.currentTarget.setPointerCapture?.(event.pointerId)
     event.preventDefault()
   }
@@ -1668,6 +2042,15 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const moveVscode = event => {
     const drag = appDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
+    updateSnapPreview(event, drag, clampVscodeRect)
+    // 最大化状态下开始拖：先还原成原来大小并落到光标下面，再跟着走
+    if (drag.maxed && dragTraveled(event, drag)) {
+      drag.maxed = false
+      drag.rect = clampVscodeRect(restoreUnderPointer(drag.rect, event))
+      drag.x = event.clientX
+      drag.y = event.clientY
+      setVscodeWindows(list => list.map(win => win.key === drag.key ? { ...win, state: 'normal', rect: drag.rect } : win))
+    }
     const dx = (event.clientX - drag.x) / (window.innerWidth || 1) * 100
     const dy = (event.clientY - drag.y) / (window.innerHeight || 1) * 100
     const next = { ...drag.rect }
@@ -1684,21 +2067,30 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const endVscodeDrag = event => {
     const drag = appDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
+    // 松手（无论落在哪儿）先把预览撤掉，再按落点决定怎么吸
+    hideSnapPreview()
     appDragRef.current = null
     if (drag.kind === 'move' && dragTraveled(event, drag) && droppedOnTopEdge(event)) {
       setVscodeWindows(list => list.map(win => win.key === drag.key
         ? { ...win, rect: drag.rect, state: 'max' } : win))
       return
     }
+    if (applySideSnap(event, drag, clampVscodeRect, next => {
+      setVscodeWindows(list => list.map(win => win.key === drag.key ? { ...win, rect: next, state: 'normal' } : win))
+      saveRect(VSCODE_STORAGE_KEY, next)
+    })) return
     if (drag.next) saveRect(VSCODE_STORAGE_KEY, drag.next)
   }
 
   const beginLanChatDrag = event => {
     if (isPhoneViewport()) return
-    if (event.target.closest('button') || lanChatState !== 'normal') return
+    if (event.target.closest('button') || (lanChatState !== 'normal' && lanChatState !== 'max')) return
     phoneDesktopRects.current.delete('lanchat')
     setActiveWindow('lanchat')
-    lanChatDragRef.current = { kind: 'move', pointerId: event.pointerId, x: event.clientX, y: event.clientY, rect: lanChatRect }
+    lanChatDragRef.current = {
+      kind: 'move', pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+      rect: lanChatRect, maxed: lanChatState === 'max',
+    }
     event.currentTarget.setPointerCapture?.(event.pointerId)
     event.preventDefault()
   }
@@ -1714,6 +2106,8 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const moveLanChat = event => {
     const drag = lanChatDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
+    updateSnapPreview(event, drag, clampVscodeRect)
+    restoreMaxForDrag(event, drag, clampVscodeRect, rect => { setLanChatRect(rect); setLanChatState('normal') })
     const dx = (event.clientX - drag.x) / (window.innerWidth || 1) * 100
     const dy = (event.clientY - drag.y) / (window.innerHeight || 1) * 100
     const next = { ...drag.rect }
@@ -1730,12 +2124,18 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const endLanChatDrag = event => {
     const drag = lanChatDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
+    // 松手（无论落在哪儿）先把预览撤掉，再按落点决定怎么吸
+    hideSnapPreview()
     lanChatDragRef.current = null
     if (drag.kind === 'move' && dragTraveled(event, drag) && droppedOnTopEdge(event)) {
       setLanChatRect(drag.rect)
       toggleMaximizeLanChat()
       return
     }
+    if (applySideSnap(event, drag, clampVscodeRect, next => {
+      setLanChatRect(next)
+      saveRect(LANCHAT_STORAGE_KEY, next)
+    })) return
     saveRect(LANCHAT_STORAGE_KEY, drag.next || lanChatRect)
   }
 
@@ -1747,7 +2147,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     setExternalApps(next)
     setExternalWindows(list => list.filter(win => win.id !== id))
     removeExternalRect(id)
-    if (activeWindowRef.current === `ext:${id}`) setActiveWindow('dsh')
+    dropVirtualWindows(`ext:${id}`)
     showNotice('已卸载应用')
   }
   const openExternalApp = id => {
@@ -1762,21 +2162,194 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     })
     setActiveWindow(`ext:${id}`)
   }
+
+  /** 退出沉浸：先撤 CSS，再把窗口状态还原到进沉浸前的那一档。 */
+  const exitImmersive = () => {
+    const restore = immersiveRestoreRef.current
+    immersiveRestoreRef.current = null
+    setImmersive(null)
+    try { restore?.() } catch { /* 窗口可能已经被用户关掉，还原失败不影响退出 */ }
+  }
+
+  const enterImmersive = (target, restore) => {
+    immersiveRestoreRef.current = restore
+    setImmersive({ target })
+  }
+
+  /**
+   * 消费快捷方式的启动意图：打开应用、强制最大化、进入 world 沉浸模式。
+   * 不碰 DSH 原生窗口，只把 world 自己的任务栏 / 窗口标题栏收起来，铺满 DSH 内容区。
+   */
+  const applyLaunchIntent = intent => {
+    if (!intent || typeof intent.app !== 'string' || !intent.app) return
+    if (immersiveRef.current) exitImmersive()
+    const app = intent.app
+    const arg = typeof intent.arg === 'string' ? intent.arg : ''
+    const argKind = typeof intent.argKind === 'string' ? intent.argKind : 'folder'
+
+    if (app === 'dsh') {
+      const previous = state
+      openWindow()
+      setState('max')
+      enterImmersive('dsh', () => setState(current => current === 'closed' ? current : (previous === 'min' || previous === 'closed') ? 'normal' : previous))
+      return
+    }
+
+    if (app === 'vscode') {
+      if (!installedAppsRef.current.has('vscode')) { showError('VSCode 还没有安装'); return }
+      const id = argKind === 'file' && arg ? openVscodeFile(arg) : openVscode(arg || undefined)
+      const key = typeof id === 'string' && id.startsWith('vscode:') ? id.slice('vscode:'.length) : ''
+      if (!key) return
+      const previous = vscodeWindowsRef.current.find(win => win.key === key)?.state || 'normal'
+      setVscodeWindows(list => list.map(win => win.key === key ? { ...win, state: 'max', lastOpen: 'max' } : win))
+      setActiveWindow(`vscode:${key}`)
+      enterImmersive(`vscode:${key}`, () => setVscodeWindows(list => list.map(win => win.key === key
+        ? { ...win, state: previous === 'min' ? 'normal' : previous } : win)))
+      return
+    }
+
+    if (app === 'browser') {
+      if (!installedAppsRef.current.has('browser')) { showError('浏览器还没有安装'); return }
+      const previous = browserState
+      setBrowserOpen(true)
+      setBrowserState('max')
+      setActiveWindow('browser')
+      setBrowserLaunch(arg && argKind === 'url' ? { url: arg, nonce: intent.nonce } : null)
+      enterImmersive('browser', () => setBrowserState(previous === 'min' ? 'normal' : previous))
+      return
+    }
+
+    if (app === 'terminal') {
+      if (!installedAppsRef.current.has('terminal')) { showError('终端还没有安装'); return }
+      const previous = terminalState
+      setTerminalOpen(true)
+      setTerminalState('max')
+      setActiveWindow('terminal')
+      enterImmersive('terminal', () => setTerminalState(previous === 'min' ? 'normal' : previous))
+      return
+    }
+
+    if (app === 'lanchat') {
+      if (!installedAppsRef.current.has('lanchat')) { showError('局域网聊天还没有安装'); return }
+      const previous = lanChatState
+      setLanChatOpen(true)
+      setLanChatState('max')
+      setActiveWindow('lanchat')
+      enterImmersive('lanchat', () => setLanChatState(previous === 'min' ? 'normal' : previous))
+      return
+    }
+
+    if (app.startsWith('plugin:')) {
+      const key = app.slice('plugin:'.length)
+      if (!key) return
+      const previous = pluginWindowsRef.current.find(win => win.key === key)?.state || 'normal'
+      openPlugin(key)
+      setPluginWindows(list => list.map(win => win.key === key ? { ...win, state: 'max', lastOpen: 'max' } : win))
+      enterImmersive(`plugin:${key}`, () => setPluginWindows(list => list.map(win => win.key === key
+        ? { ...win, state: previous === 'min' ? 'normal' : previous } : win)))
+      return
+    }
+
+    const externalId = app.startsWith('ext:') ? app.slice('ext:'.length)
+      : externalAppsRef.current.some(item => item.id === app) ? app : ''
+    if (externalId) {
+      if (!externalAppsRef.current.some(item => item.id === externalId)) { showError('这个外部应用已经不在桌面上'); return }
+      const previous = externalWindowsRef.current.find(win => win.id === externalId)?.state || 'normal'
+      openExternalApp(externalId)
+      setExternalWindows(list => list.map(win => win.id === externalId ? { ...win, state: 'max', lastOpen: 'max' } : win))
+      enterImmersive(`ext:${externalId}`, () => setExternalWindows(list => list.map(win => win.id === externalId
+        ? { ...win, state: previous === 'min' ? 'normal' : previous } : win)))
+      return
+    }
+
+    showError(`不是可启动的桌面应用：${app}`)
+  }
+  launchHandlerRef.current = applyLaunchIntent
+
+  React.useEffect(() => {
+    const body = document.body
+    if (immersive) body.dataset.worldImmersive = 'true'
+    else delete body.dataset.worldImmersive
+    return () => { delete body.dataset.worldImmersive }
+  }, [immersive])
+
+  React.useEffect(() => {
+    if (!immersive) return undefined
+    const onKey = event => {
+      if (event.key !== 'F11' || event.isComposing) return
+      event.preventDefault()
+      event.stopPropagation()
+      exitImmersive()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [immersive])
+
+  // 冷启动：界面可能先出来，sessions / 子进程服务还没齐。先等宿主就绪再取意图，
+  // 否则 VSCode 这类应用会先画出空 UI，之后也不会自己补数据。
+  React.useEffect(() => {
+    if (launchReady || !portal || !rpc?.call) return undefined
+    let stopped = false
+    let timer = 0
+    const started = Date.now()
+    const check = async () => {
+      let backendReady = false
+      try {
+        const reply = await rpc.call('/api', 'world-launch/ready', {})
+        backendReady = reply?.ok === true && reply.value?.ready === true
+      } catch { /* 宿主还没注册这个 RPC 时继续等 */ }
+      const list = sessions?.list?.getSnapshot?.()
+      const sessionReady = list?.phase === 'ready' || Boolean(currentMainSession(sessions)?.id)
+        || Object.keys(list?.byId || {}).length > 0
+      if (!stopped && backendReady && sessionReady) { setLaunchReady(true); return }
+      // 没有会话 / 宿主确实没有子进程服务时不能永远不开，给一个兜底时间。
+      if (!stopped && Date.now() - started >= 12_000) { setLaunchReady(true); return }
+      if (!stopped) timer = window.setTimeout(() => { void check() }, 500)
+    }
+    void check()
+    return () => { stopped = true; window.clearTimeout(timer) }
+  }, [launchReady, portal, rpc, sessions])
+
+  // 启动器写入文件；这里轮询取走。poll 本身就是一次性的，多开 window 时只有第一个请求会启动应用。
+  React.useEffect(() => {
+    // 只有 DSH 原生桌面（preload 标了 data-platform）消费快捷方式意图；
+    // 手机页面和普通浏览器里的 world 不抢电脑上的启动动作。
+    if (!launchReady || !portal || !rpc?.call || !document.documentElement.dataset.platform || globalThis.__WORLD_MOBILE_ACCESS__) return undefined
+    let stopped = false
+    let timer = 0
+    const tick = async () => {
+      try {
+        const reply = await rpc.call('/api', 'world-launch/poll', {})
+        if (!stopped && reply?.ok === true && reply.value?.intent) {
+          launchHandlerRef.current?.(reply.value.intent)
+        }
+      } catch { /* 宿主还没有这个 RPC 时保持安静，下一轮再试 */ }
+      if (!stopped) timer = window.setTimeout(() => { void tick() }, 1000)
+    }
+    void tick()
+    return () => { stopped = true; window.clearTimeout(timer) }
+  }, [launchReady, portal, rpc])
   const closeExternalApp = id => {
     setExternalWindows(list => list.filter(win => win.id !== id))
-    if (activeWindowRef.current === `ext:${id}`) setActiveWindow('dsh')
+    dropVirtualWindows(`ext:${id}`)
   }
-  const minimizeExternalApp = id => setExternalWindows(list => list.map(win => win.id === id && win.state !== 'min'
-    ? { ...win, state: 'min', lastOpen: win.state === 'max' ? 'max' : 'normal' } : win))
+  const minimizeExternalApp = id => {
+    setExternalWindows(list => list.map(win => win.id === id && win.state !== 'min'
+      ? { ...win, state: 'min', lastOpen: win.state === 'max' ? 'max' : 'normal' } : win))
+    dropVirtualWindows(`ext:${id}`, { keepPinned: true })
+  }
   const toggleMaximizeExternalApp = id => setExternalWindows(list => list.map(win => win.id === id
     ? { ...win, state: win.state === 'max' ? 'normal' : 'max' } : win))
   const beginExternalDrag = id => event => {
     if (isPhoneViewport()) return
     if (event.target.closest('button')) return
-    const win = externalWindowsRef.current.find(item => item.id === id && item.state === 'normal')
+    const win = externalWindowsRef.current.find(item => item.id === id && (item.state === 'normal' || item.state === 'max'))
     if (!win) return
     setActiveWindow(`ext:${id}`)
-    externalDragRef.current = { id, kind: 'move', pointerId: event.pointerId, x: event.clientX, y: event.clientY, rect: win.rect }
+    externalDragRef.current = {
+      id, kind: 'move', pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+      rect: win.rect, maxed: win.state === 'max',
+    }
     event.currentTarget.setPointerCapture?.(event.pointerId)
     event.preventDefault()
   }
@@ -1792,6 +2365,10 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const moveExternalDrag = event => {
     const drag = externalDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
+    updateSnapPreview(event, drag, clampAppRect)
+    restoreMaxForDrag(event, drag, clampAppRect, rect => {
+      setExternalWindows(list => list.map(win => win.id === drag.id ? { ...win, state: 'normal', rect } : win))
+    })
     const dx = (event.clientX - drag.x) / (window.innerWidth || 1) * 100
     const dy = (event.clientY - drag.y) / (window.innerHeight || 1) * 100
     const next = { ...drag.rect }
@@ -1808,12 +2385,18 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const endExternalDrag = event => {
     const drag = externalDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
+    // 松手（无论落在哪儿）先把预览撤掉，再按落点决定怎么吸
+    hideSnapPreview()
     externalDragRef.current = null
     if (drag.kind === 'move' && dragTraveled(event, drag) && droppedOnTopEdge(event)) {
       setExternalWindows(list => list.map(win => win.id === drag.id
         ? { ...win, rect: drag.rect, state: 'max' } : win))
       return
     }
+    if (applySideSnap(event, drag, clampAppRect, next => {
+      setExternalWindows(list => list.map(win => win.id === drag.id ? { ...win, rect: next, state: 'normal' } : win))
+      saveExternalRect(drag.id, next)
+    })) return
     if (drag.next) saveExternalRect(drag.id, drag.next)
   }
 
@@ -1846,12 +2429,33 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   }
   const menuUninstall = id => {
     setContextMenu(null)
-    if (id === 'dsh' || JOURNAL_APPS.some(app => `plugin:${app.key}` === id) || TASK_APPS.some(app => `plugin:${app.key}` === id)) return
+    if (id === 'dsh' || [...JOURNAL_APPS, ...TASK_APPS, ...PROCESS_APPS, ...INTERNET_APPS].some(app => `plugin:${app.key}` === id)) return
     if (id === 'vscode') uninstallVscode()
     else     if (id === 'lanchat') uninstallLanChat()
     else if (id === 'browser') uninstallBrowser()
     else if (id === 'terminal') uninstallTerminal()
     else uninstallExternalApp(id)
+  }
+  /** 右键桌面应用：生成一个桌面快捷方式，双击后直接以沉浸模式打开这个应用。 */
+  const createLaunchShortcut = async id => {
+    setContextMenu(null)
+    const entry = entryById(id)
+    if (!entry || !rpc?.call) { showError('当前宿主不支持创建快捷方式'); return }
+    const app = entry.kind === 'external' ? `ext:${entry.id}` : id
+    let arg = ''
+    let argKind = 'folder'
+    if (id === 'vscode') arg = lastOpenedFolder() || sessionRef.current?.cwd || ''
+    else if (id === 'browser') argKind = 'url'
+    try {
+      const reply = await rpc.call('/api', 'world-launch/shortcut', { app, arg, argKind, label: entry.label })
+      if (reply?.ok !== true) throw new Error(reply?.error?.message || '创建快捷方式失败')
+      const value = reply.value || {}
+      if (value.shortcut) showNotice(`已创建快捷方式：${value.shortcut}`)
+      else if (value.shortcutError) showError(`启动器已生成：${value.wrapper}。快捷方式失败：${value.shortcutError}`)
+      else showNotice(`启动器已生成：${value.wrapper}`)
+    } catch (error) {
+      showError(`创建快捷方式失败：${String(error?.message || error)}`)
+    }
   }
 
   // 桌面图标拖动：松手后把位置写进本机；3D 下脚底跟着地面交点走，带深度缩放。
@@ -1989,6 +2593,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     else {
       commitHolders(holdersRef.current.filter(item => item.id !== holder.id))
       setPluginWindows(list => list.filter(win => win.key !== holder.id))
+      dropVirtualWindows(`plugin:${holder.id}`)
       const positions = iconPositionsRef.current
       delete positions.flat[holder.id]
       delete positions.depth[holder.id]
@@ -2000,10 +2605,17 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     applyHolderItems(holder, holder.items.filter(id => id !== itemId))
     if (holder.items.length > 2) showNotice('已移出收纳盒')
   }
-  const dissolveHolder = holder => {
-    if (!window.confirm(`解散「${holder.name}」？里面的 ${holder.items.length} 个项目会回到桌面。`)) return
+  const dissolveHolder = async holder => {
+    const ok = await worldConfirm({
+      title: '解散收纳盒',
+      message: `「${holder.name}」里的 ${holder.items.length} 个项目会回到桌面。`,
+      confirmLabel: '解散',
+      danger: true,
+    })
+    if (!ok) return
     commitHolders(holdersRef.current.filter(item => item.id !== holder.id))
     setPluginWindows(list => list.filter(win => win.key !== holder.id))
+    dropVirtualWindows(`plugin:${holder.id}`)
     const positions = iconPositionsRef.current
     delete positions.flat[holder.id]
     delete positions.depth[holder.id]
@@ -2065,8 +2677,15 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     if (link.type === 'directory') openVscode(link.path)
     else openVscodeFile(link.path)
   }
-  const deleteFileLink = link => {
-    if (!window.confirm(`从桌面移除「${link.name}」？只移除桌面记录，不会删除磁盘上的文件。`)) return
+  const deleteFileLink = async link => {
+    const ok = await worldConfirm({
+      title: '从桌面移除',
+      message: `移走「${link.name}」的桌面图标？`,
+      detail: '只移除桌面记录，磁盘上的文件不会删除。',
+      confirmLabel: '移除',
+      danger: true,
+    })
+    if (!ok) return
     commitFileLinks(fileLinksRef.current.filter(item => item.id !== link.id))
     const positions = iconPositionsRef.current
     delete positions.flat[link.id]
@@ -2094,10 +2713,14 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
 
   const beginDrag = event => {
     if (isPhoneViewport()) return
-    if (state !== 'normal' || event.target.closest('button')) return
+    // 最大化也能拖：拖一下先还原（和 Windows 一致），否则窗口铺满时这一整条标题栏是块死区
+    if ((state !== 'normal' && state !== 'max') || event.target.closest('button')) return
     phoneDesktopRects.current.delete('dsh')
     setActiveWindow('dsh')
-    dragRef.current = { kind: 'move', pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, position, moved: false }
+    dragRef.current = {
+      kind: 'move', pointerId: event.pointerId, startX: event.clientX, startY: event.clientY,
+      position, moved: false, maxed: state === 'max',
+    }
     document.body.dataset.worldAdjusting = 'true'
     event.currentTarget.setPointerCapture?.(event.pointerId)
     event.preventDefault()
@@ -2105,6 +2728,16 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const moveDrag = event => {
     const drag = dragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
+    updateSnapPreview(event, drag, clampRect)
+    // 最大化状态下开始拖：先把窗口还原成原来大小、落到光标下面，再跟着走
+    if (drag.maxed && dragTraveled(event, drag)) {
+      drag.maxed = false
+      drag.position = clampRect(restoreUnderPointer(drag.position, event))
+      drag.startX = event.clientX
+      drag.startY = event.clientY
+      drag.moved = true
+      setState('normal')
+    }
     const width = window.innerWidth || 1, height = window.innerHeight || 1
     const dx = ((event.clientX - drag.startX) / width) * 100
     const dy = ((event.clientY - drag.startY) / height) * 100
@@ -2129,10 +2762,14 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   const endDrag = event => {
     const drag = dragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
+    // 松手（无论落在哪儿）先把预览撤掉，再按落点决定怎么吸
+    hideSnapPreview()
     // 甩到桌面顶边就地最大化：位置一个字节都不记，还原时窗口回到拖动前的地方
     const snapped = drag.kind === 'move' && dragTraveled(event, drag) && droppedOnTopEdge(event)
     if (snapped) {
       toggleMaximize()
+    } else if (applySideSnap(event, drag, clampRect, next => { setPosition(next); savePosition(next) })) {
+      // 左右边缘：占这半边，记进位置里，下次打开还是半屏
     } else if (drag.moved && drag.next) {
       setPosition(drag.next)
       savePosition(drag.next)
@@ -2216,6 +2853,21 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     setActiveWindow('desktop'); setStartOpen(false); setPhoneRecent(false); setContextMenu(null)
     document.activeElement?.blur?.()
   }
+
+  /**
+   * 窗口的 z-index 只由叠放栈决定：未钉住的按激活先后排在 10 起，钉住的永远接在后面；
+   * 主窗口的 #root / 标题栏框也读同一个序号（CSS 变量 --world-z-dsh），所以 DSH 也能被
+   * 真正压到应用窗口下面，而不是只换了个任务栏高亮。
+   */
+  const orderedWindows = orderByPin(windowStack, pinnedWindows)
+  const stackedIndex = id => orderedWindows.indexOf(id)
+  const zIndexOf = id => WINDOW_Z_BASE + Math.max(0, stackedIndex(id))
+  const dshStackIndex = stackedIndex('dsh')
+  React.useEffect(() => {
+    if (dshStackIndex < 0) document.body.style.removeProperty('--world-z-dsh')
+    else document.body.style.setProperty('--world-z-dsh', String(WINDOW_Z_BASE + dshStackIndex))
+  }, [dshStackIndex])
+  const isPinned = id => pinnedWindows.has(id)
 
   const desktopState = () => ({
     title: document.title || 'world',
@@ -2338,7 +2990,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
         const wasControlling = control.getSnapshot().owner === 'assistant'
         setAssistantActivity(null)
         control.takeOver()
-        if (wasControlling) showNotice('助手连接已断开，桌面已交还给你。')
+        if (wasControlling) showError('助手连接已断开，桌面已交还给你。')
       } })
     return () => client.dispose()
   }, [portal, rpc, control])
@@ -2389,6 +3041,10 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       attrs: { 'data-world-journal-icon': app.key }, open: () => openPlugin(app.key) })),
     ...TASK_APPS.map(app => ({ id: `plugin:${app.key}`, label: app.label, icon: app.icon, kind: 'app',
       attrs: { 'data-world-task-icon': app.key }, open: () => openPlugin(app.key) })),
+    ...PROCESS_APPS.map(app => ({ id: `plugin:${app.key}`, label: app.label, icon: app.icon, kind: 'app',
+      attrs: { 'data-world-processes-icon': app.key }, open: () => openPlugin(app.key) })),
+    ...INTERNET_APPS.map(app => ({ id: `plugin:${app.key}`, label: app.label, icon: app.icon, kind: 'app',
+      attrs: { 'data-world-internet-icon': app.key }, open: () => openPlugin(app.key) })),
     ...externalApps.map(app => ({ id: app.id, label: app.name, kind: 'external', app,
       attrs: { 'data-world-external-icon': app.id },
       icon: () => h(ExternalAppGlyph, { app }), open: () => openExternalApp(app.id) })),
@@ -2408,10 +3064,18 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
   })
   // 开始菜单的搜索：应用、文件、收纳盒和整页插件都在同一张表里，按名字和用途匹配。
   const noteOf = id => id === 'settings' ? '原生设置面板'
-    : ([...JOURNAL_APPS, ...TASK_APPS].find(app => `plugin:${app.key}` === id)?.description || '')
+    : ([...JOURNAL_APPS, ...TASK_APPS, ...PROCESS_APPS, ...INTERNET_APPS].find(app => `plugin:${app.key}` === id)?.description || '')
+  // 手机页面上不给关机/重启：那一按会把连着手机的服务一起关掉，而手机又没法把它开回来。
+  const powerRows = phone || globalThis.__WORLD_MOBILE_ACCESS__ ? [] : [
+    { key: 'power:shutdown', label: '关机', note: '退出 DSH 主程序', hint: '电源',
+      icon: () => h(PowerGlyph, { size: 20 }), open: () => { void requestPower('shutdown') } },
+    { key: 'power:restart', label: '重启', note: '重新打开 DSH 主程序', hint: '电源',
+      icon: () => h(PowerGlyph, { size: 20 }), open: () => { void requestPower('restart') } },
+  ]
   const searchCatalog = [
     ...globalThis.__WORLD_MOBILE_ACCESS__ ? [] : [{ key: 'mobile', label: '手机连接', note: '扫码打开 world', hint: '应用',
       icon: () => h(MobileGlyph, { size: 22 }), open: () => { setStartOpen(false); setMobileOpen(true) } }],
+    ...powerRows,
     ...allEntries.map(entry => ({ key: entry.id, label: entry.label, note: entry.note || entry.path || entry.app?.description || noteOf(entry.id),
       hint: KIND_HINTS[entry.kind] || '应用', icon: entry.icon, open: entry.open })),
     ...pluginApps.map(app => ({ key: `page:${app.key}`, label: app.label, note: '', hint: '整页插件',
@@ -2516,6 +3180,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     h('section', {
       className: `world-window-frame${state === 'closed' ? ' is-closed' : ''}${state === 'min' ? ' is-min' : ''}${state === 'max' ? ' is-max' : ''}`,
       'aria-label': 'DeepSeek Harness 窗口', 'aria-hidden': state === 'closed' || state === 'min',
+      style: { zIndex: zIndexOf('dsh') },
     },
     h('header', {
       className: 'world-titlebar', onPointerDown: beginDrag, onPointerMove: moveDrag,
@@ -2530,7 +3195,8 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       }, h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': true },
         h('rect', { x: 3, y: 4, width: 18, height: 16, rx: 2 }), h('path', { d: 'M9 4v16' }))),
       h('div', { className: `world-title${sidebarControl ? ' has-sidebar-control' : ''}` }, h(DshMark, { size: 16 }), h('span', null, 'DeepSeek Harness')),
-      h(WindowControls, { state, onMinimize: minimize, onToggleMaximize: toggleMaximize, onClose: closeWindow })),
+      h(WindowControls, { state, pinned: isPinned('dsh'), onTogglePin: () => toggleWindowPin('dsh'),
+        onMinimize: minimize, onToggleMaximize: toggleMaximize, onClose: closeWindow })),
     state === 'normal' ? ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'].map(edge => h('div', {
       key: edge, className: `world-resize-handle world-resize-${edge}`, 'aria-hidden': true,
       onPointerDown: beginResize(edge), onPointerMove: moveDrag, onPointerUp: endDrag, onPointerCancel: endDrag,
@@ -2610,7 +3276,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
             h('span', { className: 'world-app-card-icon' }, h(app.icon, { size: 34 })),
             h('div', { className: 'world-app-card-info' }, h('strong', null, app.label), h('span', null, app.description)),
             h('button', { type: 'button', className: 'world-app-open', onClick: () => openPlugin(app.key) }, '打开'))),
-          ...TASK_APPS.map(app => h('div', {
+          ...[...TASK_APPS, ...PROCESS_APPS, ...INTERNET_APPS].map(app => h('div', {
             key: app.key, className: 'world-app-card', 'data-world-app-card': app.key,
             onClick: event => openCard(event, () => openPlugin(app.key)),
           },
@@ -2723,13 +3389,23 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
           h('path', { d: 'M4 7h10M18 7h2M4 17h4M12 17h8' }),
           h('circle', { cx: 16, cy: 7, r: 2.2 }), h('circle', { cx: 10, cy: 17, r: 2.2 })),
         '助手个性化'),
-        h('span', { className: 'world-start-hint' }, startTerm ? 'Enter 打开 · Esc 清空' : '方向键选择 · Enter 打开'))),
+        h('div', { className: 'world-start-foot-right' },
+          h('span', { className: 'world-start-hint' }, startTerm ? 'Enter 打开 · Esc 清空' : '方向键选择 · Enter 打开'),
+          powerRows.length
+            ? h('button', {
+              type: 'button', className: `world-start-power${powerMenu ? ' on' : ''}`,
+              'data-world-power': true, title: '关机 / 重启 DSH 主程序', 'aria-label': '电源',
+              'aria-haspopup': 'menu', 'aria-expanded': Boolean(powerMenu),
+              onClick: openPowerMenu,
+            }, h(PowerGlyph, { size: 16 }))
+            : null))),
     h('div', { className: 'world-phone-status', 'aria-hidden': !phone }, h('span', null, 'world'),
       phone && h('div', { className: 'world-clock', ref: clockRef },
         h('div', { 'data-world-time': true }, clock?.time || ''), h('div', { className: 'world-date', 'data-world-date': true }, clock?.date || ''))),
     phone && phoneRecent && h('section', { className: 'world-phone-switcher', 'aria-label': '应用切换', ref: recentRef },
       h('header', null, h('strong', null, '运行中的应用'),
-        h('button', { type: 'button', onClick: () => setPhoneRecent(false), 'aria-label': '收起应用切换' }, '完成')),
+        // 无障碍名字里必须带上可见的「完成」：否则语音输入喊「完成」匹配不上（WCAG 2.5.3）
+        h('button', { type: 'button', onClick: () => setPhoneRecent(false), 'aria-label': '完成，收起应用切换' }, '完成')),
       h('div', { className: 'world-phone-running' },
         taskbarWindows.length ? taskbarWindows.map(item => h('button', {
           key: item.id, type: 'button', 'data-world-phone-window': item.id,
@@ -2744,7 +3420,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
         h('button', { type: 'button', 'aria-label': '返回桌面', onClick: showPhoneHome }, h(PhoneGlyph, { kind: 'home' })),
         h('button', { type: 'button', 'aria-label': '切换应用', 'aria-expanded': phoneRecent,
           onClick: () => { setStartOpen(false); setPhoneRecent(open => !open) } }, h(PhoneGlyph, { kind: 'recent' }))),
-      h('span', { className: 'world-version', 'data-world-version': WORLD_VERSION }, `world v${WORLD_VERSION}`),
+      h(WorldVersion, { rpc, version: WORLD_VERSION, portal }),
       h('div', { className: 'world-taskbar-center' },
         h('button', {
           className: `world-start-button${startOpen ? ' on' : ''}`, type: 'button', title: '开始',
@@ -2787,7 +3463,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
                 })
                 if (granted) showNotice('交给我了。你随时可以接手。')
               }
-              catch (error) { showNotice(error.message) }
+              catch (error) { showError(error.message) }
             }
           },
         }, h(ControlGlyph)),
@@ -2797,6 +3473,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
           title: depth ? '关闭 3D 景深' : '开启 3D 景深', 'aria-label': '3D 景深',
           onClick: () => setDepth(value => !value),
         }, h(DepthGlyph, { size: 20 })),
+        h(InternetTaskbar, { rpc, onOpen: () => openPlugin('world-internet') }),
         !phone && h('div', { className: 'world-clock', ref: clockRef },
           h('div', { 'data-world-time': true }, clock?.time || ''), h('div', { className: 'world-date', 'data-world-date': true }, clock?.date || '')))),
     ...(installedApps.has('vscode') ? vscodeWindows.map(win => {
@@ -2811,17 +3488,20 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
         key: win.key,
         windowKey: win.key,
         session: win.session, remote, rpc, getDirectoryPicker,
+        sessions, SessionProvider, renderSlot, conversationSeat,
         rootPath: win.rootPath, collection, openRequest: win.openRequest,
+        immersive: immersive?.target === `vscode:${win.key}`,
         rect: win.rect, isActive, state: win.state || 'normal',
-        // VSCode 这一类在最前时，激活的那个压在最上面；其余情况统一压到 dsh 之上、外部应用之下
-        zIndex: activeWindow.startsWith('vscode:') ? (isActive ? 5 : 4) : 3,
+        zIndex: zIndexOf(`vscode:${win.key}`),
+        pinned: isPinned(`vscode:${win.key}`),
+        onTogglePin: () => toggleWindowPin(`vscode:${win.key}`),
         onClose: () => closeVscode(win.key),
         onMinimize: () => minimizeVscode(win.key),
         onToggleMaximize: () => toggleMaximizeVscode(win.key),
         onDirtyChange: dirty => setVscodeWindowDirty(win.key, dirty),
         onRootChange: rootPath => updateVscodeRoot(win.key, rootPath),
         onOpenInNewWindow: rootPath => openVscode(rootPath),
-        onFocusFolder: rootPath => Boolean(focusVscodeFolder(rootPath, win.key)),
+        onFocusFolder: rootPath => Boolean(focusVscodeFolder(rootPath)),
         ...(collection ? {} : { onDesktopRegister: registerDesktopEditor }),
         onDragStart: beginVscodeDrag(win.key),
         onDragMove: moveVscode, onDragEnd: endVscodeDrag,
@@ -2831,14 +3511,20 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     }).filter(Boolean) : []),
     lanChatOpen && installedApps.has('lanchat') && h(LanChatWindow, {
       rect: lanChatRect, state: lanChatState, rpc,
+      zIndex: zIndexOf('lanchat'), pinned: isPinned('lanchat'), onTogglePin: () => toggleWindowPin('lanchat'),
       onClose: closeLanChat, onMinimize: minimizeLanChat, onToggleMaximize: toggleMaximizeLanChat,
       onDragStart: beginLanChatDrag, onDragMove: moveLanChat, onDragEnd: endLanChatDrag,
       onResizeStart: beginLanChatResize, onActivate: () => setActiveWindow('lanchat'),
     }),
     browserOpen && installedApps.has('browser') && h(BrowserWindow, {
       rect: browserRect, state: browserState, active: activeWindow === 'browser',
-      // 原生 guest 不参与 DOM 合成：开始菜单/其它应用在前台时隐藏它，避免盖住上层窗口
-      suspended: startOpen || phoneRecent || (activeWindow !== 'browser' && (phone || activeWindow !== 'dsh')),
+      initialUrl: browserLaunch?.url || '', initialNonce: browserLaunch?.nonce || 0,
+      zIndex: zIndexOf('browser'), pinned: isPinned('browser'), onTogglePin: () => toggleWindowPin('browser'),
+      // 原生 guest 不参与 DOM 合成：开始菜单/其它应用在前台时隐藏它，避免盖住上层窗口。
+      // 钉住后浏览器本来就在最上面，只有另一个钉住窗口压过它时才需要让位。
+      suspended: startOpen || phoneRecent || (isPinned('browser')
+        ? orderedWindows.at(-1) !== 'browser' && activeWindow !== 'browser' && activeWindow !== 'dsh'
+        : activeWindow !== 'browser' && (phone || activeWindow !== 'dsh')),
       onClose: closeBrowser, onMinimize: minimizeBrowser, onToggleMaximize: toggleMaximizeBrowser,
       onDragStart: beginBrowserDrag, onDragMove: moveBrowser, onDragEnd: endBrowserDrag,
       onResizeStart: beginBrowserResize, onActivate: () => setActiveWindow('browser'),
@@ -2846,6 +3532,7 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
     }),
     terminalOpen && installedApps.has('terminal') && h(TerminalWindow, {
       rect: terminalRect, state: terminalState, rpc, session, active: activeWindow === 'terminal',
+      zIndex: zIndexOf('terminal'), pinned: isPinned('terminal'), onTogglePin: () => toggleWindowPin('terminal'),
       apps: launcherApps, onOpenApp: openLauncherApp,
       onClose: closeTerminal, onMinimize: minimizeTerminal, onToggleMaximize: toggleMaximizeTerminal,
       onDragStart: beginTerminalDrag, onDragMove: moveTerminal, onDragEnd: endTerminalDrag,
@@ -2859,10 +3546,13 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       const id = `plugin:${win.key}`
       return h(PluginWindow, {
         key: win.key, app, win, active: activeWindow === id, renderSlot,
+        zIndex: zIndexOf(id), pinned: isPinned(id), onTogglePin: () => toggleWindowPin(id),
         ...(JOURNAL_APPS.some(item => item.key === win.key) ? { children: h(JournalPage, { client: journalClient,
           trash: win.key === 'world-trash', visible: win.state !== 'min' }) } : {}),
         ...(TASK_APPS.some(item => item.key === win.key) ? { children: h(TasksPage, { rpc,
           visible: win.state !== 'min', onDirtyChange: value => { taskDirtyRef.current = value } }) } : {}),
+        ...(PROCESS_APPS.some(item => item.key === win.key) ? { children: h(ProcessesPage, { rpc, visible: win.state !== 'min' }) } : {}),
+        ...(INTERNET_APPS.some(item => item.key === win.key) ? { children: h(InternetPage, { rpc, visible: win.state !== 'min' }) } : {}),
         ...(holder ? { children: h(HolderPage, {
           holder,
           items: holder.items.map(entryById).filter(Boolean),
@@ -2886,7 +3576,8 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       if (!app) return null
       const id = `ext:${win.id}`
       return h(ExternalAppWindow, {
-        key: win.id, app, rect: win.rect, state: win.state, active: activeWindow === id,
+        key: win.id, app, rect: win.rect, state: win.state,
+        zIndex: zIndexOf(id), pinned: isPinned(id), onTogglePin: () => toggleWindowPin(id),
         onActivate: () => setActiveWindow(id),
         onClose: () => closeExternalApp(win.id),
         onMinimize: () => minimizeExternalApp(win.id),
@@ -2968,6 +3659,12 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
       h('div', { className: 'world-drop-card' },
         h('strong', null, '松开以登记文件'),
         h('span', null, '.worldapp 应用包会安装；其它文件只记录绝对路径，不复制文件'))),
+    snapPreview && h('div', {
+      className: `world-snap-preview is-${snapPreview.side}`, 'aria-hidden': true,
+      'data-world-snap-preview': snapPreview.side,
+      // 左右半屏按这个窗口自己的 clamp 画：和松手后的矩形一模一样
+      style: snapPreview.rect ? { left: `${snapPreview.rect.x}vw`, width: `${snapPreview.rect.w}vw` } : undefined,
+    }),
     contextMenu && h('div', {
       className: `world-context-menu${contextMenu.kind === 'wall' ? ' is-desktop' : ''}`,
       style: { left: contextMenu.x, top: contextMenu.y },
@@ -2981,6 +3678,13 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
           h('button', { type: 'button', 'data-role': 'refresh', onClick: refreshDesktop }, '刷新'))
         : h(React.Fragment, null,
       h('button', { type: 'button', 'data-role': 'open', onClick: () => menuOpen(contextMenu.appId) }, '打开'),
+      // 主应用的右键菜单补上开始菜单里的「设置」和「插件」：不用先开窗口再找入口。
+      menuEntry?.id === 'dsh' && h(React.Fragment, null,
+        h('button', { type: 'button', 'data-role': 'settings', onClick: openSettingsPanel }, '设置'),
+        HOST_PANELS.map(page => h('button', {
+          key: page.id, type: 'button', 'data-role': page.id,
+          onClick: () => openHostPage(page.id),
+        }, page.label))),
       menuEntry?.kind === 'holder' && h('button', { type: 'button', 'data-role': 'rename',
         onClick: () => { setContextMenu(null); setRename({ id: menuEntry.id, name: menuEntry.label }) } }, '重命名'),
       menuEntry?.kind === 'holder' && h('button', { type: 'button', 'data-role': 'vscode-folder',
@@ -2990,6 +3694,9 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
         onClick: () => deleteFileLink(menuEntry.link) }, '删除快捷方式'),
       menuEntry?.kind === 'holder' && h('button', { type: 'button', className: 'is-danger', 'data-role': 'dissolve',
         onClick: () => { setContextMenu(null); dissolveHolder(menuEntry.holder) } }, '解散收纳盒'),
+      menuEntry && ['app', 'external'].includes(menuEntry.kind) && !['settings', 'plugins'].includes(menuEntry.id)
+        ? h('button', { type: 'button', 'data-role': 'launch-shortcut', onClick: () => { void createLaunchShortcut(menuEntry.id) } }, '创建沉浸启动快捷方式')
+        : null,
       h('button', { type: 'button', 'data-role': 'reposition', onClick: () => resetIconPosition(contextMenu.appId) }, '还原位置'),
       h('button', { type: 'button', 'data-role': 'rearrange', onClick: resetAllIconPositions }, '重排全部图标'),
       menuEntry && (menuEntry.kind === 'external' || ['vscode', 'lanchat', 'browser', 'terminal'].includes(menuEntry.id))
@@ -2997,7 +3704,20 @@ function DesktopLayer({ sessions, remote, rpc, renderSlot, SessionProvider, cata
         : menuEntry?.kind === 'app'
           ? h('div', { className: 'world-context-note', 'data-role': 'protected' }, menuEntry.id === 'dsh' ? 'DSH 主应用不可卸载' : '内置应用不可卸载')
           : null)),
-    notice && h('div', { className: 'world-toast', role: 'status' }, notice))
+    powerMenu && h('div', {
+      className: 'world-context-menu world-power-menu', role: 'menu', 'data-world-power-menu': true,
+      style: { left: powerMenu.x, top: powerMenu.y },
+      onPointerDown: event => event.stopPropagation(), onContextMenu: event => event.preventDefault(),
+    },
+      h('div', { className: 'world-context-title' }, 'DSH 主程序'),
+      h('button', { type: 'button', role: 'menuitem', 'data-role': 'shutdown', onClick: () => { void requestPower('shutdown') } }, '关机'),
+      h('button', { type: 'button', role: 'menuitem', 'data-role': 'restart', onClick: () => { void requestPower('restart') } }, '重启')),
+    noticeErrors.length ? h('div', { className: 'world-toast is-error' },
+      h('div', { role: 'alert' }, noticeErrors[0]),
+      h('button', { type: 'button', 'aria-label': '关闭错误提示',
+        onClick: () => setNoticeErrors(errors => errors.slice(1)) }, '关闭'))
+      : notice && h('div', { className: 'world-toast', role: 'status' }, notice),
+    h(ConfirmHost))
   return portal ? createPortal(desktop, portal) : null
 }
 
@@ -3019,6 +3739,7 @@ export function apply(ctx) {
     children: {
       [PLUGIN_SLOT]: { kind: 'keyed', scope: 'root' },
       [ASSISTANT_CONVERSATION_SLOT]: { kind: 'single', scope: 'session' },
+      [DOCUMENT_SLOT]: { kind: 'keyed', scope: 'session', inject: { hooks: { tabInfo: (_standard, reader) => reader } } },
     },
     // directoryPicker 只在桌面宿主里存在；延迟取值，网页端打开文件夹对话框时再如实报错。
     inject: () => ({ sessions: ctx.sessions, remote: ctx.remote, rpc: ctx.connection.rpc, catalog, conversationSeat,
@@ -3033,4 +3754,5 @@ export function apply(ctx) {
     name: ASSISTANT_CONVERSATION_SLOT,
   }, AssistantConversationContent))
   ctx.slots.inject(PLUGIN_SLOT, () => catalog.start())
+  ctx.slots.inject(DOCUMENT_SLOT, () => mirrorNativeDocuments(ctx.slots))
 }

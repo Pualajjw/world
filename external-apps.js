@@ -3,6 +3,7 @@
  * 格式校验、注册表与窗口几何在 app-format.js（无 React 依赖，可单独测试）。
  */
 import React from 'react'
+import { PinGlyph, pinLabel } from './window-pin.js'
 
 export {
   APP_FORMAT, APP_FILE_PATTERN, RESERVED_IDS, MAX_APP_FILE, parseWorldApp,
@@ -21,25 +22,25 @@ export function ExternalAppGlyph({ app, size = 48 }) {
     h('text', { x: 24, y: 32, textAnchor: 'middle', fontSize: 24, fontFamily: 'Segoe UI Emoji, system-ui' }, app?.icon || '🧩'))
 }
 
-function Cap({ label, onClick, close, children }) {
+function Cap({ label, onClick, close, className, pressed, children }) {
   return h('button', {
-    type: 'button', className: `world-external-cap${close ? ' world-external-close' : ''}`,
-    title: label, 'aria-label': label, onClick,
+    type: 'button', className: `world-external-cap${close ? ' world-external-close' : ''}${className ? ` ${className}` : ''}`,
+    title: label, 'aria-label': label, 'aria-pressed': pressed, onClick,
   }, children)
 }
 
 /** 外部应用的独立窗口：复用 VSCode 窗口外观，内容是一个 iframe。 */
 export function ExternalAppWindow({
-  app, rect, state, active, onActivate, onClose, onMinimize, onToggleMaximize,
+  app, rect, state, zIndex, pinned = false, onTogglePin, onActivate, onClose, onMinimize, onToggleMaximize,
   onDragStart, onDragMove, onDragEnd, onResizeStart,
 }) {
   const minimized = state === 'min'
   const maximized = state === 'max'
   const style = maximized
     ? { '--vscode-x': '0vw', '--vscode-y': '0vh', '--vscode-w': '100vw',
-      '--vscode-h': 'calc(100vh - var(--world-desktop-top) - var(--world-taskbar-height))', zIndex: active ? 5 : 3 }
+      '--vscode-h': 'calc(100vh - var(--world-desktop-top) - var(--world-taskbar-height))', zIndex }
     : { '--vscode-x': `${rect.x}vw`, '--vscode-y': `${rect.y}vh`,
-      '--vscode-w': `${rect.w}vw`, '--vscode-h': `${rect.h}vh`, zIndex: active ? 5 : 3 }
+      '--vscode-w': `${rect.w}vw`, '--vscode-h': `${rect.h}vh`, zIndex }
   if (minimized) style.display = 'none'
 
   return h('section', {
@@ -55,6 +56,10 @@ export function ExternalAppWindow({
     h('div', { className: 'world-vscode-title' },
       h(ExternalAppGlyph, { app, size: 16 }), h('span', null, app.name)),
     h('div', { className: 'world-vscode-controls' },
+      h(Cap, {
+        label: pinLabel(pinned), onClick: onTogglePin, pressed: pinned,
+        className: `world-pin-cap${pinned ? ' is-pinned' : ''}`,
+      }, h(PinGlyph, { size: 12, filled: pinned })),
       h(Cap, { label: '最小化', onClick: onMinimize },
         h('svg', { width: 10, height: 10, viewBox: '0 0 10 10', 'aria-hidden': true },
           h('path', { d: 'M0 5h10', stroke: 'currentColor', strokeWidth: 1 }))),

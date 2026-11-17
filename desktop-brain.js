@@ -31,11 +31,22 @@ export function createDesktopBrain(ctx, { file = () => join(process.env.DSH_HOME
     return { document: value, info: publish({ sessionId: value.sessionId, profile, setupRequired: profile === null, revision: value.revision ?? 0 }, order) }
   }
   const read = async () => (await load()).info
+  /**
+   * 只确认「绑定还有效」，不用它去证明会话活着。
+   * `ctx.sessions` 里只有这次宿主进程里打开着的会话：切到别的会话、重启之后本来就会没有，
+   * 但她的会话照样能被 prompt 起来，所以「没载入」不能当「不可用」。
+   * 真正能判死的只有持久层：读得到就放行，读不到才算会话没了；
+   * 宿主没提供持久层（旧宿主 / 精简 profile）时也不拦。
+   */
   async function available(brain) {
     if (ctx.sessions.get(brain.sessionId)) return brain
-    if (!ctx.sessionController?.inspect) fail('固定助手会话不可用，已停止交接；不会自动更换会话。')
-    try { await ctx.sessionController.inspect(brain.sessionId) }
+    let persistence
+    try { persistence = ctx.get('sessionPersistence') } catch {}
+    if (!persistence?.open) return brain
+    let handle
+    try { handle = await persistence.open(brain.sessionId, 'read') }
     catch { fail('固定助手会话已不可用，已停止交接；不会自动更换会话。') }
+    await handle.close?.()
     return brain
   }
   return {

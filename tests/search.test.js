@@ -1,6 +1,6 @@
 /** The search view reads the session workspace twice as fast as a user can type; keep its contract pinned. */
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -51,6 +51,17 @@ test('matchText reports line numbers, columns and visible ranges', () => {
   assert.equal(hits[0].text, 'two TODO here')
 })
 
+test('empty Unicode regex matches advance past emoji and still find later text', () => {
+  for (const query of ['^', '$', '(?:)', '(?=.)']) {
+    assert.deepEqual(matchText('😀 hello\n中文😀', buildMatcher({ query, regex: true })), [])
+  }
+  const hits = matchText('😀 hello', buildMatcher({ query: '(?=.)|hello', regex: true }))
+  assert.deepEqual(hits, [])
+  const mixed = matchText('😀 hello', buildMatcher({ query: '^|hello', regex: true }))
+  assert.equal(mixed[0].column, 3)
+  assert.deepEqual(mixed[0].ranges, [[3, 8]])
+})
+
 test('clipLine keeps the hit visible in a very long line', () => {
   const line = `${'x'.repeat(2000)}NEEDLE${'y'.repeat(2000)}`
   const clipped = clipLine(line, [[2000, 2006]])
@@ -77,6 +88,7 @@ test('search walks the workspace and skips noise, binaries and filters', async t
     fs: context.fs,
     sessions: { get: id => id === 'session' ? session : undefined },
     get: () => undefined,
+    sandboxPolicy: { resolve: () => ({ mode: 'danger-full-access' }) },
   }, { FsError })
   t.after(async () => {
     service.dispose()
@@ -115,4 +127,122 @@ test('search walks the workspace and skips noise, binaries and filters', async t
   await assert.rejects(service.call('find', { sessionId: 'session', query: '(' , regex: true }), { code: 'SEARCH_INVALID_PATTERN' })
   await assert.rejects(service.call('find', { sessionId: 'missing', query: 'x' }), { code: 'SEARCH_NO_SESSION' })
   await assert.rejects(service.call('find', { sessionId: 'session', query: 'x'.repeat(400) }), { code: 'SEARCH_TOO_LONG' })
+})
+
+test('file lookup matches names and paths without reading contents, including binary, GBK and large files', async t => {
+  const workspace = await mkdtemp(join(tmpdir(), 'world-filenames-'))
+  await mkdir(join(workspace, 'src/deep'), { recursive: true })
+  await mkdir(join(workspace, 'node_modules/pkg'), { recursive: true })
+  await writeFile(join(workspace, 'src/中文窗口.srw'), Buffer.from([0xd6, 0xd0, 0xce, 0xc4]))
+  await writeFile(join(workspace, 'src/deep/Report.PDF'), Buffer.alloc(2_000_000))
+  await writeFile(join(workspace, 'body.txt'), 'only-in-content')
+  await writeFile(join(workspace, 'node_modules/pkg/Report.js'), 'ignored')
+  const context = new Context()
+  await context.plugin(LocalFs, { cwd: workspace })
+  const service = createVscodeSearch({ fs: {
+    resolve: (...args) => context.fs.resolve(...args), stat: (...args) => context.fs.stat(...args),
+    listDir: (...args) => context.fs.listDir(...args), contains: (...args) => context.fs.contains(...args),
+    processPath: (...args) => context.fs.processPath(...args),
+    readBytes() { assert.fail('file name search must not read file contents') },
+  }, sessions: { get: () => ({ header: { cwd: workspace } }) }, get: () => undefined }, { FsError })
+  t.after(async () => { service.dispose(); await context.fiber.dispose(); await rm(workspace, { recursive: true, force: true }) })
+  assert.deepEqual((await service.call('files', { sessionId: 's', query: 'report' })).files, [{ path: 'src/deep/Report.PDF' }])
+  assert.deepEqual((await service.call('files', { sessionId: 's', query: '中文' })).files, [{ path: 'src/中文窗口.srw' }])
+  assert.equal((await service.call('files', { sessionId: 's', query: 'only-in-content' })).fileCount, 0)
+  assert.deepEqual((await service.call('files', { sessionId: 's', query: 'deep\\report' })).files, [{ path: 'src/deep/Report.PDF' }])
+  assert.deepEqual((await service.call('files', { sessionId: 's', query: 'report', root: join(workspace, 'src/deep') })).files, [{ path: 'Report.PDF' }])
+  await assert.rejects(service.call('files', { sessionId: 's', query: '' }), { code: 'SEARCH_EMPTY' })
+  await assert.rejects(service.call('files', { sessionId: 's', query: 'x'.repeat(301) }), { code: 'SEARCH_TOO_LONG' })
+})
+
+test('file lookup enforces result limits, directory boundaries and cancellation', async () => {
+  let cancel
+  const service = createVscodeSearch({ fs: {
+    resolve: async value => value, stat: async () => ({ type: 'directory' }), processPath: value => value,
+    contains: (root, target) => target.startsWith(root + '/'),
+    listDir: async (_root, signal) => {
+      if (cancel) { cancel.abort(); signal.throwIfAborted() }
+      return [{ name: 'match-outside', type: 'file', target: '/elsewhere/file' },
+        ...Array.from({ length: 250 }, (_, index) => ({ name: `match-${index}.js`, type: 'file', target: `/workspace/match-${index}.js` }))]
+    },
+  }, sessions: { get: () => ({ header: { cwd: '/workspace' } }) }, get: () => undefined }, { FsError })
+  try {
+    const found = await service.call('files', { sessionId: 's', query: 'match' })
+    assert.equal(found.fileCount, 200); assert.equal(found.truncated, true); assert.equal(found.skipped, 1)
+    cancel = new AbortController()
+    await assert.rejects(service.call('files', { sessionId: 's', query: 'match' }, cancel.signal), { name: 'AbortError' })
+  } finally { service.dispose() }
+})
+
+test('replace only touches listed files, keeps CRLF and expands regex captures', async t => {
+  const workspace = await mkdtemp(join(tmpdir(), 'world-replace-'))
+  const src = join(workspace, 'src')
+  await mkdir(src, { recursive: true })
+  const app = join(src, 'app.js')
+  const notes = join(workspace, 'notes.md')
+  await writeFile(app, 'const TODO = 1\r\n// todo again\r\n')
+  await writeFile(notes, 'todo\n')
+
+  const context = new Context()
+  await context.plugin(LocalFs, { cwd: workspace })
+  const session = { header: { cwd: workspace } }
+  const service = createVscodeSearch({
+    fs: context.fs,
+    sessions: { get: id => id === 'session' ? session : undefined },
+    get: () => undefined,
+    sandboxPolicy: { resolve: () => ({ mode: 'danger-full-access' }) },
+  }, { FsError })
+  t.after(async () => {
+    service.dispose()
+    await context.fiber.dispose()
+    await rm(workspace, { recursive: true, force: true })
+  })
+
+  const found = await service.call('find', { sessionId: 'session', query: 'todo' })
+  const paths = found.files.map(file => file.path)
+  const replaced = await service.call('replace', {
+    sessionId: 'session', query: 'todo', replacement: 'DONE', paths,
+  })
+  assert.equal(replaced.replacements, 3)
+  assert.deepEqual(replaced.files.map(file => file.path).sort(), ['notes.md', 'src/app.js'])
+  assert.equal(await readFile(app, 'utf8'), 'const DONE = 1\r\n// DONE again\r\n')
+  assert.equal(await readFile(notes, 'utf8'), 'DONE\n')
+
+  // 有草稿的文件由前端点名跳过；正则替换支持捕获组
+  await writeFile(app, 'const TODO = 2\n')
+  const skipped = await service.call('replace', {
+    sessionId: 'session', query: 'todo', replacement: 'X', paths: ['src/app.js'], skip: [app],
+  })
+  assert.equal(skipped.replacements, 0)
+  assert.match(skipped.skipped[0].reason, /未保存/u)
+  assert.equal(await readFile(app, 'utf8'), 'const TODO = 2\n')
+
+  await writeFile(app, 'const count = 41\n')
+  const captured = await service.call('replace', {
+    sessionId: 'session', query: 'const (\\w+) = (\\d+)', regex: true,
+    replacement: 'let $1 = $2 + 1', paths: ['src/app.js'],
+  })
+  assert.equal(captured.replacements, 1)
+  assert.equal(await readFile(app, 'utf8'), 'let count = 41 + 1\n')
+
+  await assert.rejects(service.call('replace', {
+    sessionId: 'session', query: 'a*', regex: true, replacement: 'x', paths: ['src/app.js'],
+  }), { code: 'SEARCH_INVALID_PATTERN' })
+
+  const outside = await service.call('replace', {
+    sessionId: 'session', query: 'todo', replacement: 'x', paths: ['../outside.txt'],
+  })
+  assert.equal(outside.replacements, 0)
+  assert.equal(outside.skipped.length, 1)
+
+  const readOnly = createVscodeSearch({
+    fs: context.fs,
+    sessions: { get: id => id === 'session' ? session : undefined },
+    get: () => undefined,
+    sandboxPolicy: { resolve: () => ({ mode: 'read-only' }) },
+  }, { FsError })
+  t.after(() => readOnly.dispose())
+  await assert.rejects(readOnly.call('replace', {
+    sessionId: 'session', query: 'value', replacement: 'x', paths: ['src/app.js'],
+  }), { code: 'FS_SANDBOX_DENIED' })
 })

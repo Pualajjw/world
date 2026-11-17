@@ -14,10 +14,10 @@ const home = join(run, 'home'), profile = join(home, 'profiles/web')
 await mkdir(join(profile, 'node_modules/@local'), { recursive: true })
 let pluginRoot = root
 if (process.env.WORLD_TEST_MOBILE_PACKAGE) {
-  execFileSync('tar.exe', ['-xzf', process.env.WORLD_TEST_MOBILE_PACKAGE, '-C', run], { windowsHide: true })
+  execFileSync(process.platform === 'win32' ? 'tar.exe' : 'tar', ['-xzf', process.env.WORLD_TEST_MOBILE_PACKAGE, '-C', run], { windowsHide: true })
   pluginRoot = join(run, 'package')
   await cp(pluginRoot, join(profile, 'node_modules/@local/dsh-world'), { recursive: true })
-} else await symlink(pluginRoot, join(profile, 'node_modules/@local/dsh-world'), 'junction')
+} else await symlink(pluginRoot, join(profile, 'node_modules/@local/dsh-world'), process.platform === 'win32' ? 'junction' : 'dir')
 await writeFile(join(profile, 'package.json'), JSON.stringify({ name: 'world-mobile-test', private: true,
   dependencies: { '@local/dsh-world': process.env.WORLD_TEST_MOBILE_PACKAGE ? 'file:' + process.env.WORLD_TEST_MOBILE_PACKAGE : 'link:' + pluginRoot.replaceAll('\\', '/') },
   dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@local/dsh-world'] } } }))
@@ -50,6 +50,13 @@ try {
   assert.equal(packet.result.ok, true, JSON.stringify(packet.result.error))
   const url = packet.result.value.url
   await desktop.locator('.world-mobile-qr svg').waitFor()
+  await desktop.evaluate(() => { window.worldCopiedAddress = ''; Object.defineProperty(navigator, 'clipboard', {
+    configurable: true, value: { async writeText(value) { window.worldCopiedAddress = value } },
+  }) })
+  await desktop.getByRole('button', { name: '复制地址', exact: true }).click()
+  await desktop.getByText('已复制', { exact: true }).waitFor()
+  const copiedUrl = await desktop.evaluate(() => window.worldCopiedAddress)
+  assert.equal(copiedUrl, url, 'the visible button copies the complete pairing URL, including its fragment')
   assert.equal(Math.round((await desktop.locator('.world-mobile-qr').boundingBox()).width), 240)
   await desktop.screenshot({ path: join(run, 'desktop-qr.png') })
   await desktop.setViewportSize({ width: 280, height: 700 })
@@ -57,12 +64,23 @@ try {
   const narrowQr = await desktop.locator('.world-mobile-qr').boundingBox()
   assert.equal(Math.round(narrowQr.width), Math.round(narrowQr.height))
   await desktop.setViewportSize({ width: 1280, height: 900 })
+  await desktop.getByRole('button', { name: '关闭手机连接', exact: true }).click()
+  await desktop.locator('.world-start-button').click()
+  const desktopInstall = desktop.locator('[data-world-app-card="lanchat"] .world-app-install')
+  if (await desktopInstall.count()) await desktopInstall.click()
+  const [desktopChatState] = await Promise.all([
+    desktop.waitForResponse(response => new URL(response.url()).pathname === '/api/state'
+      && response.url().startsWith('http://127.0.0.1:')),
+    desktop.locator('[data-world-app-card="lanchat"] .world-app-open').click(),
+  ])
+  assert.equal(desktopChatState.status(), 200, 'desktop iframe exchanges its owner link for an HttpOnly cookie')
+  assert.equal(await desktop.frameLocator('.world-lanchat-frame').locator('body').evaluate(() => location.hash), '')
   const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, locale: 'zh-CN' })
   let liveFrames = 0
   phone.on('websocket', socket => { if (new URL(socket.url()).pathname === '/api/remote.mux') socket.on('framereceived', () => { liveFrames++ }) })
   phone.on('pageerror', error => errors.push(error.message))
   await dismissOnboarding(phone)
-  await phone.goto(url, { waitUntil: 'domcontentloaded' })
+  await phone.goto(copiedUrl, { waitUntil: 'domcontentloaded' })
   await phone.locator('.world-phone-nav').waitFor({ timeout: 30000 })
   assert.equal(await phone.evaluate(() => globalThis.__WORLD_MOBILE_ACCESS__), true)
   assert.equal(new URL(phone.url()).hash, '')
@@ -98,8 +116,10 @@ try {
   await chatEvents
   const state = await phone.evaluate(async () => (await fetch('/_world_mobile/lan-chat/api/state')).status)
   assert.equal(state, 200)
+  assert.equal(await phone.frameLocator('.world-lanchat-frame').locator('body').evaluate(() => location.hash), '')
+  assert.equal(await phone.evaluate(() => document.cookie.includes('world_chat_')), false, 'the proxy keeps the chat credential on the host')
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ result: 'passed', run, qrWidth: 240, sharedChineseTask: true, refresh: true, chat: true, liveFrames }))
+  console.log(JSON.stringify({ result: 'passed', run, qrWidth: 240, copiedAddressOpensPhone: true, sharedChineseTask: true, refresh: true, chat: true, liveFrames }))
 } catch (error) {
   console.error('Private diagnostics:', run)
   // Print only sanitized diagnostics, never the authenticated root URL.

@@ -65,6 +65,39 @@ export function hostLabel(url) {
   try { return new URL(url).hostname || '网页' } catch { return '网页' }
 }
 
+/** 起始页的搜索落点：不是网址时交给腾讯搜索。 */
+export const SEARCH_URL = 'https://so.qq.com/isearch?query='
+
+export function browserSearchUrl(query) {
+  return `${SEARCH_URL}${encodeURIComponent(String(query == null ? '' : query).trim())}`
+}
+
+/**
+ * 起始页输入算不算网址：有显式协议、localhost/IPv6、或 hostname 带点（域名 / IP）才算；
+ * 中文句子、带空格的短语、单个词都当搜索词。地址栏本身不套这条，仍走 parseBrowserAddress 的白名单。
+ */
+export function isBrowserAddressInput(input) {
+  const trimmed = String(input == null ? '' : input).trim()
+  if (trimmed === '' || /\s/u.test(trimmed)) return false
+  if (/^[A-Za-z][A-Za-z\d+.-]*:\/\//u.test(trimmed)) return true
+  if (/^(?:https?|file|javascript|data|chrome|about|mailto|ftp):/iu.test(trimmed)) return true
+  if (/^localhost(?::\d+)?(?:[/?#]|$)/iu.test(trimmed)) return true
+  if (/^\[[0-9A-Fa-f:.]+\](?::\d+)?(?:[/?#]|$)/u.test(trimmed)) return true
+  const parsed = parseBrowserAddress(trimmed)
+  if (!parsed.ok) return false
+  try {
+    const { hostname } = new URL(parsed.target.url)
+    return hostname === 'localhost' || hostname.includes('.') || hostname.startsWith('[')
+  } catch { return false }
+}
+
+/** 起始页提交：像网址就原样交给导航，不像就走腾讯搜索。 */
+export function resolveBrowserHomeInput(input) {
+  const trimmed = String(input == null ? '' : input).trim()
+  if (trimmed === '') return trimmed
+  return isBrowserAddressInput(trimmed) ? trimmed : browserSearchUrl(trimmed)
+}
+
 /**
  * webview 的启动属性。src 必须是 about:blank#<lease>，partition/name 必须逐字节匹配租约，
  * 否则主进程 will-attach-webview 会 preventDefault（browser-guests.ts:72-93）。

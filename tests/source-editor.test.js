@@ -62,6 +62,34 @@ test('source editor preserves UTF-8 BOM/newlines and enforces session write poli
   await assert.rejects(editor.call('open', { sessionId: 'session', path: foreign }), { code: 'FS_SANDBOX_DENIED' })
 })
 
+test('GBK files open losslessly for viewing and cannot be overwritten as UTF-8', async t => {
+  const workspace = await mkdtemp('E:/newworkspace/pbhelp/.dsh/tmp/world-gbk-')
+  const context = new Context()
+  await context.plugin(LocalFs, { cwd: workspace })
+  const editor = createVscodeSourceEditor({ fs: context.fs,
+    sessions: { get: () => ({ header: { cwd: workspace } }) }, get: () => undefined,
+    sandboxPolicy: { resolve: () => ({ mode: 'workspace-write', workspaceRoot: workspace }) },
+  }, { FsError, writableRoots })
+  t.after(async () => { await editor.dispose(); await context.fiber.dispose(); await rm(workspace, { recursive: true, force: true }) })
+  const file = join(workspace, 'w_test.srw')
+  const bytes = Buffer.concat([Buffer.from('string ls_name = "'), Buffer.from([0xd6, 0xd0, 0xce, 0xc4]), Buffer.from('"\r\n')])
+  await writeFile(file, bytes)
+  const opened = await editor.call('open', { sessionId: 'session', path: file })
+  assert.equal(opened.source, 'string ls_name = "中文"\n')
+  assert.equal(opened.encoding, 'GBK')
+  assert.equal(opened.eol, 'CRLF')
+  assert.equal(opened.readOnly, true)
+  await assert.rejects(editor.call('save', { sessionId: 'session', path: file, version: opened.version, source: 'modified' }), { code: 'FS_ENCODING_READ_ONLY' })
+  assert.deepEqual(await readFile(file), bytes)
+  await writeFile(join(workspace, 'utf8.srw'), 'string ls_name = "中文"\n')
+  const utf8 = await editor.call('open', { sessionId: 'session', path: 'utf8.srw' })
+  assert.equal(utf8.encoding, 'UTF-8'); assert.equal(utf8.readOnly, false)
+  for (const bytes of [Buffer.from([0x81]), Buffer.from([0xd6, 0xd0, 0x00])]) {
+    await writeFile(join(workspace, 'binary.bin'), bytes)
+    await assert.rejects(editor.call('open', { sessionId: 'session', path: 'binary.bin' }), { code: 'FS_NOT_TEXT' })
+  }
+})
+
 test('opening a folder moves the editor root without escaping it', async t => {
   const workspace = await mkdtemp('E:/newworkspace/pbhelp/.dsh/tmp/world-folder-')
   const outside = await mkdtemp('E:/newworkspace/pbhelp/.dsh/tmp/world-other-')

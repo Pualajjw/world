@@ -78,10 +78,10 @@ try {
   // 收起侧栏 / 拖宽侧栏
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.waitForTimeout(300)
-  await page.keyboard.press('Control+b')
+  await page.keyboard.press('Control+Shift+b')
   await page.waitForTimeout(250)
   await page.screenshot({ path: join(shots, 'vscode-collapsed.png') })
-  await page.keyboard.press('Control+b')
+  await page.keyboard.press('Control+Shift+b')
   await page.waitForTimeout(250)
   const grip = await page.locator('.world-vscode-sidebar-resize').boundingBox()
   await page.mouse.move(grip.x + 3, grip.y + 200)
@@ -94,7 +94,7 @@ try {
   await page.waitForTimeout(200)
 
   // 打开文件夹：对话框 → 进入子目录 → 以它为新根
-  await page.locator('.world-vscode-title-btn').click()
+  await page.locator('.world-vscode-title-btn[aria-label="打开文件夹"]').click()
   await page.locator('.world-vscode-picker').waitFor()
   await page.waitForTimeout(250)
   await page.screenshot({ path: join(shots, 'vscode-picker.png') })
@@ -105,17 +105,17 @@ try {
   await page.waitForTimeout(450)
   await page.screenshot({ path: join(shots, 'vscode-folder.png') })
 
-  // 多开：不同文件夹各占一个窗口；同一个文件夹只会把已开的窗口拿到前台
+  // 多开：默认文件夹相同也创建独立窗口。
   await page.getByRole('button', { name: '开始' }).click()
   await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-open').click()
   await page.waitForFunction(() => document.querySelectorAll('.world-vscode-window').length === 2)
   await page.waitForTimeout(450)
   await page.screenshot({ path: join(shots, 'vscode-multi.png') })
-  // 再开一次相同文件夹：窗口数不变，只是聚焦
+  // 再开一次相同文件夹：新增独立窗口。
   await page.getByRole('button', { name: '开始' }).click()
   await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-open').click()
   await page.waitForTimeout(350)
-  if (await page.locator('.world-vscode-window').count() !== 2) throw new Error('同一个文件夹不该再开窗口')
+  if (await page.locator('.world-vscode-window').count() !== 3) throw new Error('同一个文件夹应该可以再开窗口')
   await page.close()
 
   // 最大化 / 最小化：最大化铺满桌面（顶栏到任务栏之间），最小化后任务栏留一格

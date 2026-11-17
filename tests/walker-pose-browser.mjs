@@ -26,7 +26,7 @@ export async function checkWalkerPoses(browser, bundleText, shotsDir) {
     await page.goto('http://world.test/index.html')
     await page.evaluate(() => {
       localStorage.setItem('dsh.world.apps', JSON.stringify(['vscode', 'lanchat']))
-      localStorage.setItem('dsh.world.depth', 'on')
+      localStorage.setItem('dsh.world.depth.choice', 'on')
     })
     await page.reload()
     await page.addScriptTag({ content: bundleText })

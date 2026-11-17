@@ -17,8 +17,9 @@
 import React from 'react'
 import {
   BROWSER_WORKSPACE, MAX_TABS, createGuestAttributes, createLeasePool, createTabStore,
-  describeBrowserFailure, hostLabel, parseBrowserAddress, resolveBrowserBridge,
+  describeBrowserFailure, hostLabel, parseBrowserAddress, resolveBrowserBridge, resolveBrowserHomeInput,
 } from './browser-frame.js'
+import { PinGlyph, pinLabel } from './window-pin.js'
 
 const h = React.createElement
 const RESIZE_EDGES = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']
@@ -43,10 +44,10 @@ export function BrowserGlyph({ size = 48 }) {
     }))
 }
 
-function Cap({ label, onClick, close, disabled, children }) {
+function Cap({ label, onClick, close, disabled, className, pressed, children }) {
   return h('button', {
-    type: 'button', className: `world-browser-cap${close ? ' world-browser-close' : ''}`,
-    title: label, 'aria-label': label, disabled, onClick,
+    type: 'button', className: `world-browser-cap${close ? ' world-browser-close' : ''}${className ? ` ${className}` : ''}`,
+    title: label, 'aria-label': label, 'aria-pressed': pressed, disabled, onClick,
   }, children)
 }
 
@@ -60,16 +61,16 @@ function Icon({ name }) {
   return null
 }
 
-/** 新标签页：深色起始页，只有一个输入框和几个入口；不做搜索、不联网。 */
+/** 新标签页：深色起始页，只有一个输入框和几个入口；输入不是网址时走腾讯搜索。 */
 function BrowserHome({ onNavigate }) {
   const [value, setValue] = React.useState('')
-  const submit = event => { event.preventDefault(); if (onNavigate(value)) setValue('') }
+  const submit = event => { event.preventDefault(); if (onNavigate(resolveBrowserHomeInput(value))) setValue('') }
   return h('div', { className: 'world-browser-home', 'data-world-browser-home': true },
     h('div', { className: 'world-browser-home-mark' }, h(BrowserGlyph, { size: 56 })),
     h('strong', { className: 'world-browser-home-title' }, '浏览器'),
     h('form', { className: 'world-browser-home-form', onSubmit: submit },
       h('input', {
-        type: 'text', value, 'aria-label': '输入网址', placeholder: '输入网址，例如 example.com',
+        type: 'text', value, 'aria-label': '输入网址或搜索内容', placeholder: '输入网址或搜索内容',
         spellCheck: false, autoComplete: 'off', onChange: event => setValue(event.target.value),
       }),
       h('button', { type: 'submit' }, '前往')),
@@ -99,13 +100,20 @@ function BrowserError({ error, onRetry, onExternal }) {
  * @param {boolean} props.suspended 开始菜单打开 / 其它应用窗口在前台时隐藏原生视图
  */
 export function BrowserWindow({
-  rect, state, active, suspended, onActivate, onClose, onMinimize, onToggleMaximize,
+  rect, state, active, suspended, zIndex, pinned = false, onTogglePin,
+  onActivate, onClose, onMinimize, onToggleMaximize,
   onDragStart, onDragMove, onDragEnd, onResizeStart, onTakeOver,
+  initialUrl = '', initialNonce = 0,
 }) {
   const [bridge] = React.useState(resolveBrowserBridge)
+  const appOrigin = typeof window === 'undefined' ? undefined : window.location?.origin
+  const initialLaunch = React.useRef(initialNonce)
   const [store] = React.useState(() => {
     const instance = createTabStore()
-    instance.addTab()
+    const parsed = typeof initialUrl === 'string' && initialUrl
+      ? parseBrowserAddress(initialUrl, appOrigin) : undefined
+    if (parsed?.ok) instance.addTab({ url: parsed.target.url, title: parsed.target.title, address: 'requested' })
+    else instance.addTab()
     return instance
   })
   const [pool] = React.useState(() => bridge ? createLeasePool({ bridge, workspace: BROWSER_WORKSPACE }) : null)
@@ -119,7 +127,6 @@ export function BrowserWindow({
   const guestsRef = React.useRef(new Map())
   const aliveRef = React.useRef(true)
   const noticeTimer = React.useRef(0)
-  const appOrigin = typeof window === 'undefined' ? undefined : window.location?.origin
 
   const activeTab = tabs.tabs.find(tab => tab.id === tabs.activeId) || null
   const minimized = state === 'min'
@@ -194,6 +201,13 @@ export function BrowserWindow({
       showNotice(describeBrowserFailure('tab-limit'))
     }
   }
+
+  // 窗口已经开着时，新的快捷方式意图会换一个 nonce；补一个新标签，而不是重建整扇窗。
+  React.useEffect(() => {
+    if (initialNonce === initialLaunch.current) return
+    initialLaunch.current = initialNonce
+    if (typeof initialUrl === 'string' && initialUrl) openInNewTab(initialUrl)
+  }, [initialNonce, initialUrl])
 
   /** 一个标签 = 一个 lease；异步 acquire 期间标签被关掉时不留下悬空 guest。 */
   const mountGuest = async tab => {
@@ -374,9 +388,9 @@ export function BrowserWindow({
 
   const style = maximized
     ? { '--vscode-x': '0vw', '--vscode-y': '0vh', '--vscode-w': '100vw',
-      '--vscode-h': 'calc(100vh - var(--world-desktop-top) - var(--world-taskbar-height))' }
+      '--vscode-h': 'calc(100vh - var(--world-desktop-top) - var(--world-taskbar-height))', zIndex }
     : { '--vscode-x': `${rect.x}vw`, '--vscode-y': `${rect.y}vh`,
-      '--vscode-w': `${rect.w}vw`, '--vscode-h': `${rect.h}vh` }
+      '--vscode-w': `${rect.w}vw`, '--vscode-h': `${rect.h}vh`, zIndex }
 
   const banner = notice || (compat && !compatDismissed
     ? '兼容模式：当前环境无法创建独立网页容器，部分网站会拒绝嵌入。'
@@ -395,6 +409,10 @@ export function BrowserWindow({
       h('div', { className: 'world-vscode-title' },
         h(BrowserGlyph, { size: 16 }), h('span', null, '浏览器')),
       h('div', { className: 'world-vscode-controls world-vscode-caps' },
+        h(Cap, {
+          label: pinLabel(pinned), onClick: onTogglePin, pressed: pinned,
+          className: `world-pin-cap${pinned ? ' is-pinned' : ''}`,
+        }, h(PinGlyph, { size: 12, filled: pinned })),
         h(Cap, { label: '最小化', onClick: onMinimize },
           h('svg', { width: 10, height: 10, viewBox: '0 0 10 10', 'aria-hidden': true },
             h('path', { d: 'M0 5h10', stroke: 'currentColor', strokeWidth: 1 }))),

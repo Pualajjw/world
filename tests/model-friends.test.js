@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { createModelFriends, renderAssembly, sessionIdOf, assistantText } from '../model-friends.js'
-import { createLanChatServer, findMentions, mentionPrompt, parseMentions } from '../lan-chat/server.mjs'
+import { findMentions, mentionPrompt, parseMentions } from '../lan-chat/server.mjs'
+import { createAuthenticatedChat as createLanChatServer, ownerHeaders } from './chat-fixture.js'
 import { registerLanChatTools } from '../lan-chat-tool.js'
 
 const HOME = () => mkdtemp(join(tmpdir(), 'dsh-world-test-'))
@@ -82,8 +83,9 @@ function fakeHost(options = {}) {
 }
 
 async function json(base, path, body) {
-  const response = await fetch(base + path, body === undefined ? undefined : {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  const headers = ownerHeaders(new URL(base).port)
+  const response = await fetch(base + path, body === undefined ? { headers } : {
+    method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   })
   return response.json()
 }

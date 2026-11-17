@@ -81,6 +81,7 @@ export function createLifeLine({ memory, workbench, config, dir, logger, now = (
   const activityFile = day => join(root(), 'activity', `${day}.jsonl`)
   let state = blank()
   let timer = null, disposed = false, delivery = null, saving = Promise.resolve()
+  let stateRevision = 0
   // A wake word is "in flight" from the instant it is fired, not from the instant it is delivered: `settled()`
   // must not report quiet while `fire()` is still waiting on anything.
   let firing = 0
@@ -100,18 +101,21 @@ export function createLifeLine({ memory, workbench, config, dir, logger, now = (
   }
 
   async function load() {
+    const revision = stateRevision
+    await saving
     faults = []
     try {
       const value = JSON.parse(await readFile(target(), 'utf8'))
+      if (revision !== stateRevision) return
       state = value?.version === 1 ? { ...blank(), ...value } : blank()
     } catch (error) {
+      if (revision !== stateRevision) return
       if (error.code !== 'ENOENT') fault('state', `生活线状态读不出来，按空的开始：${error.message}`)
       state = blank()
     }
   }
-  async function writeState() {
+  async function writeState(content) {
     try {
-      const content = JSON.stringify(state)
       if (atomic?.writeFileAtomic) await atomic.writeFileAtomic(target(), content, { mode: 0o600, dirMode: 0o700 })
       else {
         await mkdir(root(), { recursive: true, mode: 0o700 })
@@ -125,7 +129,9 @@ export function createLifeLine({ memory, workbench, config, dir, logger, now = (
     }
   }
   function save() {
-    const task = writeState()
+    stateRevision++
+    const content = JSON.stringify(state)
+    const task = saving.then(() => writeState(content))
     saving = task.catch(() => {})
     return task
   }
@@ -296,7 +302,11 @@ export function createLifeLine({ memory, workbench, config, dir, logger, now = (
    * Nothing here starts a turn by itself — a wake word still has to be due.
    */
   async function reopen({ handoff = false } = {}) {
+    // Persist the prior delivery receipt before reloading a disk snapshot.
+    await waitForDelivery()
+    if (disposed) return
     await load()
+    if (disposed) return
     if (!(await available())) return
     if (handoff && enabled() && !state.arrived) {
       state.arrived = true
@@ -350,36 +360,46 @@ export function createLifeLine({ memory, workbench, config, dir, logger, now = (
       next: next ? { kind: next.kind, at: next.at } : null, summary: check(), faults }
   }
 
+  async function waitForDelivery() {
+    while (delivery || firing) {
+      if (delivery) await delivery
+      else await new Promise(resolve => quiet.push(resolve))
+    }
+    let pending
+    do { pending = saving; await pending } while (pending !== saving)
+  }
+
   return {
     /** `arrival` is the first day in a new world; `resumed` is her world opening again. */
-    async start({ resumed = false, arrival = false } = {}) {
-      if (disposed) return
-      await load()
-      if (!enabled()) return
-      if (!(await available())) { retryLater(5 * 60_000); return }
-      if (!state.review) {
-        // Only a look back that came due after this world started is late; the first morning must not review a day
-        // she was not here for.
-        const missed = missedReview(now())
-        if (!state.startedAt) state.startedAt = now().toISOString()
-        state.review = missed.at >= state.startedAt && state.lastReviewDay !== missed.day ? missed : nextReview(now())
-      }
-      if (arrival) state.greeting = { at: now().toISOString(), kind: 'arrival' }
-      else if (resumed && !state.greeting && state.alarm?.source !== 'plan') state.greeting = { at: now().toISOString(), kind: 'return' }
-      await save()
-      fallback()
-      arm()
-      // Anything already due (a restart late in the evening, a door that opened after the hour) is taken now.
-      takeDue()
+    start({ resumed = false, arrival = false } = {}) {
+      const task = reflecting.then(async () => {
+        if (disposed) return
+        await load()
+        if (!enabled()) return
+        if (!(await available())) { retryLater(5 * 60_000); return }
+        if (!state.review) {
+          // Only a look back that came due after this world started is late; the first morning must not review a day
+          // she was not here for.
+          const missed = missedReview(now())
+          if (!state.startedAt) state.startedAt = now().toISOString()
+          state.review = missed.at >= state.startedAt && state.lastReviewDay !== missed.day ? missed : nextReview(now())
+        }
+        if (arrival) state.greeting = { at: now().toISOString(), kind: 'arrival' }
+        else if (resumed && !state.greeting && state.alarm?.source !== 'plan') state.greeting = { at: now().toISOString(), kind: 'return' }
+        await save()
+        fallback()
+        arm()
+        // Anything already due (a restart late in the evening, a door that opened after the hour) is taken now.
+        takeDue()
+      })
+      reflecting = task.catch(() => {})
+      return task
     },
     stop() { disposed = true; clearTimer(timer); timer = null },
     /** Resolves once no wake word is in flight; its abort signal can outlast the call that started it. */
     async settled() {
-      while (delivery || firing) {
-        if (delivery) await delivery
-        else await new Promise(resolve => quiet.push(resolve))
-      }
-      await saving
+      await reflecting
+      await waitForDelivery()
     },
     plan, cancel, check, status, memoryBlock,
     /** A tool call she made, kept for the next alarm to quote back. */

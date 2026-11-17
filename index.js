@@ -23,6 +23,15 @@ import { createWorldTerminal } from './terminal.js'
 import { createWorldSsh } from './ssh.js'
 import { createWorkspaceRoots, discoverToolDirs } from './workspace-roots.js'
 import { createMobileAccess } from './mobile-access.js'
+import { createWorldPower } from './power.js'
+import { createWorldProcesses } from './process-manager.js'
+import { createWorldStorage } from './storage-manager.js'
+import { createWorldInternet } from './internet.js'
+import { createWorldUpdates, pbpkgCaller } from './updates.js'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { createLaunchIntentStore } from './launch-intent.js'
+import { createLaunchShortcutService } from './launch-shortcut.js'
 
 export const name = 'world'
 export const inject = ['fs', 'connection', 'sessions', 'sandboxPolicy', 'sessionController', 'agents']
@@ -56,6 +65,8 @@ export function apply(ctx) {
   registerTasksTools(ctx, { tasks, brain })
   // 世界内核：原文按天留在磁盘上，生活线只有一个闹钟，什么时候醒来由她自己定。
   const worldDir = () => join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'world')
+  // 桌面快捷方式先落一个意图文件，world 客户端轮询取走；DSH 没启动时也能等它启动后再消费。
+  const launchIntent = createLaunchIntentStore({ dir: worldDir() })
   const memory = createCompanionMemory({ dir: worldDir })
   let life = null
   void memory.refreshSelf().catch(() => {})
@@ -134,7 +145,7 @@ export function apply(ctx) {
       let result
       try {
         const info = await chat.start()
-        result = { ok: true, value: { port: info.port, world: info.world, installed: info.installed, bots: info.bots } }
+        result = { ok: true, value: { port: info.port, world: info.world, installed: info.installed, bots: info.bots, url: info.url } }
       } catch (error) {
         result = { ok: false, error: { code: 'WORLD_LAN_CHAT', message: String(error?.message || error), details: {} } }
       }
@@ -169,14 +180,32 @@ export function apply(ctx) {
   }
 
   // The Desktop keeps its loopback Host; world owns the optional, on-demand phone entry.
+  // The pairing key lives beside the rest of her state so a restart keeps the same QR.
   const mobile = createMobileAccess({
     connection: ctx.connection, webServer: () => ctx.get('webServer'), chat: () => chat.start(),
+    dir: worldDir(),
     config: { host: process.env.WORLD_MOBILE_HOST, port: process.env.WORLD_MOBILE_PORT,
       publicOrigin: process.env.WORLD_MOBILE_ORIGIN,
       certFile: process.env.WORLD_MOBILE_CERT, keyFile: process.env.WORLD_MOBILE_KEY },
   })
   ctx.effect(() => () => mobile.dispose(), 'world: mobile browser access')
-  serve(ctx, 'world-mobile', ['addresses', 'open'], mobile, 'WORLD_MOBILE')
+  serve(ctx, 'world-mobile', ['addresses', 'open', 'reset'], mobile, 'WORLD_MOBILE')
+  // 快捷方式启动：poll 会把意图取走，ack 用于客户端明确确认（poll 失败重试时也可用）。
+  serve(ctx, 'world-launch', ['poll', 'ack'], launchIntent, 'WORLD_LAUNCH')
+  // 冷启动时 world 的 UI 可能比子进程 / 工作区服务更早出现在屏幕上。客户端先问这里，
+  // 服务齐了才取走意图，避免打开一个只有 UI、查不到数据的空应用。
+  const launchReadiness = {
+    call(operation) {
+      if (operation !== 'ready') throw Object.assign(new Error('不支持的启动就绪操作。'), { code: 'WORLD_LAUNCH' })
+      const services = {
+        sessions: Boolean(ctx.get('sessions')),
+        subprocess: Boolean(ctx.get('subprocess')),
+        workspaceRegistry: Boolean(ctx.get('workspaceRegistry')),
+      }
+      return { ready: services.sessions && services.subprocess, services }
+    },
+  }
+  serve(ctx, 'world-launch', ['ready'], launchReadiness, 'WORLD_LAUNCH')
 
   // list 是「打开文件夹」对话框：只列子目录，读写仍按 root + sandbox policy 校验。
   serve(ctx, 'world-vscode-source', ['open', 'save', 'list', 'reveal', 'probe'], editor, 'WORLD_VSCODE_SOURCE')
@@ -185,28 +214,67 @@ export function apply(ctx) {
   const toolDirs = () => discoverToolDirs(import.meta.dirname)
   const roots = createWorkspaceRoots(ctx, { FsError, toolDirs })
   serve(ctx, 'world-vscode-roots', ['scan'], roots, 'WORLD_VSCODE_ROOTS')
+  // VSCode 对话新建会话：先把当前文件夹解析成 DSH workspace（没有就登记一个），
+  // 空会话 Hero 才会显示目录，而不是「选择工作区」。
+  const vscodeSessions = {
+    async call(operation, payload, signal) {
+      if (operation !== 'resolve') throw new FsError('不支持的会话操作。', 'WORLD_VSCODE_SESSIONS')
+      const root = typeof payload?.root === 'string' ? payload.root : ''
+      if (!root) return { workspaceId: '' }
+      const registry = ctx.get('workspaceRegistry')
+      if (!registry?.resolveByPath) return { workspaceId: '' }
+      signal?.throwIfAborted()
+      try {
+        const workspace = await registry.resolveByPath(root) ?? await registry.create(root)
+        return { workspaceId: workspace?.id ? String(workspace.id) : '' }
+      } catch {
+        return { workspaceId: '' }
+      }
+    },
+  }
+  serve(ctx, 'world-vscode-sessions', ['resolve'], vscodeSessions, 'WORLD_VSCODE_SESSIONS')
   serve(ctx, 'world-desktop', ['connect', 'poll', 'reply', 'disconnect', 'update'], desktop, 'WORLD_DESKTOP_ACTION')
   serve(ctx, 'world-desktop-brain', ['get', 'bind', 'configure', 'update_profile'], brain, 'WORLD_DESKTOP_BRAIN')
   // 自动推进的刹车：暂停只停「新轮次」，不动当前这一轮，也不撤销桌面授权。
   serve(ctx, 'world-workbench', ['get', 'pause', 'resume'], workbench, 'WORLD_WORKBENCH')
   serve(ctx, 'world-journal', ['list', 'get', 'write', 'pin', 'trash', 'restore', 'purge', 'clear'], journal, 'WORLD_DIARY_ACTION')
   serve(ctx, 'world-tasks', ['list', 'get', 'write', 'remove', 'clearDone'], tasks, 'WORLD_TASKS_ACTION')
+  // 关机 / 重启：操作的始终是 DSH 主程序，world 只是那颗按钮所在的地方。
+  serve(ctx, 'world-power', ['probe', 'shutdown', 'restart'], createWorldPower(), 'WORLD_POWER')
+  const processes = createWorldProcesses()
+  ctx.effect(() => () => processes.dispose(), 'world: DSH process manager')
+  serve(ctx, 'world-processes', ['snapshot', 'files', 'ports'], processes, 'WORLD_PROCESSES')
+  const storage = createWorldStorage()
+  ctx.effect(() => () => storage.dispose(), 'world: DSH storage manager')
+  serve(ctx, 'world-storage', ['start', 'status', 'cancel', 'list', 'preview'], storage, 'WORLD_STORAGE')
+  const internet = createWorldInternet({ dir: worldDir() })
+  ctx.effect(() => () => internet.dispose(), 'world: EasyTier connection')
+  serve(ctx, 'world-internet', ['info', 'save', 'start', 'stop', 'status', 'clear', 'connection'], internet, 'WORLD_INTERNET')
+  const updates = createWorldUpdates({ currentVersion: JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version,
+    runtimeDir: fileURLToPath(new URL('.', import.meta.url)),
+    manager: () => ctx.get('pluginManager'), profile: () => ctx.get('profileContext'), pbpkg: pbpkgCaller(ctx.connection) })
+  ctx.effect(() => () => updates.dispose(), 'world: update service')
+  serve(ctx, 'world-update', ['info', 'check', 'install', 'status'], updates, 'WORLD_UPDATE')
 
-  // 侧栏搜索：只读遍历会话工作目录，不需要子进程，也不碰沙箱写权限。
-  const search = createVscodeSearch(ctx, { FsError })
+  // 侧栏搜索：遍历会话工作目录；替换只改结果列表点名的文件，写入同样走沙箱策略。
+  const search = createVscodeSearch(ctx, { FsError, writableRoots })
   ctx.effect(() => () => search.dispose(), 'world: VSCode search')
-  serve(ctx, 'world-vscode-search', ['find'], search, 'WORLD_VSCODE_SEARCH')
+  serve(ctx, 'world-vscode-search', ['find', 'files', 'replace'], search, 'WORLD_VSCODE_SEARCH')
 
   // Git 需要宿主子进程服务；这里用 ctx.inject 让缺少该服务时其余内置应用照常工作。
   ctx.inject(['subprocess'], scope => {
     const git = createVscodeGit(ctx, { FsError, writableRoots, subprocess: scope.subprocess })
     scope.effect(() => () => git.dispose(), 'world: VSCode git')
-    serve(scope, 'world-vscode-git', ['status', 'stage', 'unstage', 'commit', 'pull', 'push'], git, 'WORLD_VSCODE_GIT')
+    serve(scope, 'world-vscode-git', ['status', 'diff', 'log', 'stage', 'unstage', 'commit', 'pull', 'push'], git, 'WORLD_VSCODE_GIT')
   })
 
   // 终端：每条命令一个子进程，走同一个注入——没有子进程服务的宿主里窗口会自己报错，
   // 其余桌面功能不受影响。
   ctx.inject(['subprocess'], scope => {
+    // 桌面快捷方式生成需要 PowerShell（Windows）或创建可执行文件（macOS/Linux），跟终端共用注入。
+    const shortcuts = createLaunchShortcutService({ dir: worldDir(), subprocess: scope.subprocess })
+    serve(scope, 'world-launch', ['shortcut'], shortcuts, 'WORLD_LAUNCH')
+
     const terminal = createWorldTerminal(ctx, { FsError, subprocess: scope.subprocess, toolDirs })
     scope.effect(() => () => terminal.dispose(), 'world: terminal')
     serve(scope, 'world-terminal', ['info', 'run', 'poll', 'cancel', 'chdir', 'complete'], terminal, 'WORLD_TERMINAL')

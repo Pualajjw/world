@@ -31,9 +31,18 @@ function createSubprocess() {
         cwd: spec.cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env, ...(spec.env ?? {}) },
       })
-      let stdout = '', stderr = ''
-      child.stdout?.on('data', chunk => { stdout += chunk })
-      child.stderr?.on('data', chunk => { stderr += chunk })
+      // Decode only after collection: UTF-8 codepoints may cross pipe chunks.
+      const collect = (stream, maxBytes) => {
+        let bytes = Buffer.alloc(0), lossy = false
+        stream?.on('data', chunk => {
+          const combined = Buffer.concat([bytes, chunk])
+          lossy ||= combined.length > maxBytes
+          bytes = combined.subarray(0, maxBytes)
+        })
+        return { readFrom: () => ({ text: bytes.toString('utf8'), lossy }) }
+      }
+      const stdout = collect(child.stdout, spec.stdio.stdout.maxBytes)
+      const stderr = collect(child.stderr, spec.stdio.stderr.maxBytes)
       const done = new Promise(resolve => {
         child.on('error', error => resolve({ exitCode: null, signal: 'error', error }))
         child.on('close', (code, signal) => resolve({ exitCode: code, signal }))
@@ -41,8 +50,7 @@ function createSubprocess() {
       const handle = {
         done,
         collected: {
-          stdout: { readFrom: () => ({ text: stdout, lossy: false }) },
-          stderr: { readFrom: () => ({ text: stderr, lossy: false }) },
+          stdout, stderr,
         },
         terminate() { if (!child.killed) child.kill() },
         waitForExit: () => done.then(() => {}, () => {}),
@@ -53,8 +61,8 @@ function createSubprocess() {
   }
 }
 
-const git = argv => new Promise(resolve => {
-  const child = spawnProcess('git', argv, { windowsHide: true, stdio: 'ignore' })
+const git = (argv, env = {}) => new Promise(resolve => {
+  const child = spawnProcess('git', argv, { windowsHide: true, stdio: 'ignore', env: { ...process.env, ...env } })
   child.on('close', code => resolve(code))
 })
 
@@ -159,6 +167,28 @@ test('git service stages, commits and guards its inputs', async t => {
   mode = 'workspace-write'
   assert.equal((await service.call('status', { sessionId: 'session' })).files.length, 1)
 
+  // Diff：未跟踪按整份新增、工作区看磁盘、已暂存看索引，且只读模式下仍然可看
+  const untrackedDiff = await service.call('diff', { sessionId: 'session', paths: ['c.txt'], untracked: true })
+  assert.equal(untrackedDiff.untracked, true)
+  assert.match(untrackedDiff.patch, /^\+\+\+ b\/c\.txt$/mu)
+  assert.match(untrackedDiff.patch, /^\+c$/mu)
+
+  await writeFile(join(workspace, 'a.txt'), 'a changed\n')
+  const workDiff = await service.call('diff', { sessionId: 'session', paths: ['a.txt'] })
+  assert.equal(workDiff.staged, false)
+  assert.match(workDiff.patch, /^-a$/mu)
+  assert.match(workDiff.patch, /^\+a changed$/mu)
+
+  await service.call('stage', { sessionId: 'session', paths: ['a.txt'] })
+  const indexDiff = await service.call('diff', { sessionId: 'session', paths: ['a.txt'], staged: true })
+  assert.equal(indexDiff.staged, true)
+  assert.match(indexDiff.patch, /^\+a changed$/mu)
+  assert.equal((await service.call('diff', { sessionId: 'session', paths: ['a.txt'] })).patch, '')
+
+  mode = 'read-only'
+  assert.match((await service.call('diff', { sessionId: 'session', paths: ['a.txt'], staged: true })).patch, /^\+a changed$/mu)
+  mode = 'workspace-write'
+
   // 打开子文件夹：Git 在子目录里运行，能打开的文件路径相对子文件夹，仓库根的同级文件不能打开
   await writeFile(join(workspace, 'sub', 'b.txt'), 'b changed\n')
   const scoped = await service.call('status', { sessionId: 'session', root: join(workspace, 'sub') })
@@ -166,6 +196,104 @@ test('git service stages, commits and guards its inputs', async t => {
   assert.equal(scoped.files.find(file => file.path === 'sub/b.txt').open, 'b.txt')
   assert.equal(scoped.files.find(file => file.path === 'c.txt').open, '')
   await assert.rejects(service.call('status', { sessionId: 'session', root: join(workspace, 'nope') }), { code: 'GIT_NO_WORKSPACE' })
+})
+
+test('log reads real repositories without writes and scopes every request', async t => {
+  const workspace = await mkdtemp(join(tmpdir(), 'world-git-log-'))
+  const context = new Context()
+  await context.plugin(LocalFs, { cwd: workspace })
+  const session = { header: { cwd: workspace } }
+  const service = createVscodeGit({
+    fs: context.fs,
+    sessions: { get: id => id === 'session' ? session : undefined },
+    get: () => undefined,
+    sandboxPolicy: { resolve: () => ({ mode: 'read-only', workspaceRoot: workspace }) },
+  }, { FsError, writableRoots, subprocess: createSubprocess() })
+  const log = root => service.call('log', { sessionId: 'session', ...(root ? { root } : {}) })
+  const command = async (root, ...args) => assert.equal(await git(['-C', root, ...args]), 0)
+  const init = async root => {
+    await mkdir(root, { recursive: true })
+    await command(root, 'init', '-b', 'main')
+    await command(root, 'config', 'user.name', '中文作者')
+    await command(root, 'config', 'user.email', 'history@example.invalid')
+    await command(root, 'config', 'commit.gpgsign', 'false')
+    await command(root, 'config', 'i18n.logOutputEncoding', 'GBK')
+  }
+  const commit = async (root, message, env = {}) => {
+    const file = join(root, 'message.txt')
+    await writeFile(file, message)
+    assert.equal(await git(['-C', root, 'commit', '--allow-empty', '--cleanup=verbatim', '-F', file], env), 0)
+  }
+  t.after(async () => {
+    await service.dispose()
+    await context.fiber.dispose()
+    await rm(workspace, { recursive: true, force: true })
+  })
+  await t.test('non-repo, absent session and invalid roots are rejected', async () => {
+    await assert.rejects(log(), { code: 'GIT_NO_REPO' })
+    await assert.rejects(service.call('log', {}), { code: 'GIT_NO_SESSION' })
+    await assert.rejects(log(join(workspace, 'missing')), { code: 'GIT_NO_WORKSPACE' })
+  })
+  const first = join(workspace, 'first')
+  const second = join(workspace, 'second')
+  await init(first)
+  await init(second)
+  await t.test('unborn HEAD returns the exact empty shape in read-only mode', async () => {
+    assert.deepEqual(await log(first), { commits: [], truncated: false })
+  })
+  const message = '中文主题\n\n完整说明第一行\n第二行：中文、标点和空行\n\n最后一行\n'
+  const committedAt = '2024-02-03T04:05:06+08:00'
+  await commit(first, message, {
+    GIT_AUTHOR_DATE: '2001-01-01T01:02:03+08:00', GIT_COMMITTER_DATE: committedAt,
+  })
+  let firstHash
+  await t.test('UTF-8 multiline full message, author and ISO date are preserved', async () => {
+    const result = await log(first)
+    assert.equal(result.truncated, false)
+    assert.equal(result.commits.length, 1)
+    const row = result.commits[0]
+    assert.deepEqual(Object.keys(row).sort(), ['author', 'body', 'date', 'hash', 'shortHash', 'subject'])
+    assert.equal(row.subject, '中文主题')
+    assert.equal(row.body, message)
+    assert.equal(row.author, '中文作者')
+    assert.match(row.hash, /^[a-f0-9]{40}$/u)
+    assert.ok(row.hash.startsWith(row.shortHash))
+    assert.match(row.date, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/u)
+    assert.ok(Number.isFinite(Date.parse(row.date)))
+    assert.equal(row.date, committedAt) // Committer date, not the different author date.
+    firstHash = row.hash
+  })
+  await t.test('newest descendant first, exactly 20 is not truncated, 21 is', async () => {
+    for (let index = 1; index < 20; index++) await commit(first, '提交 ' + index + '\n')
+    const exact = await log(first)
+    assert.equal(exact.commits.length, 20)
+    assert.equal(exact.truncated, false)
+    assert.deepEqual(exact.commits.map(row => row.subject),
+      [...Array.from({ length: 19 }, (_, i) => '提交 ' + (19 - i)), '中文主题'])
+    await commit(first, '提交 20\n')
+    const capped = await log(first)
+    assert.equal(capped.commits.length, 20)
+    assert.equal(capped.truncated, true)
+    assert.deepEqual(capped.commits.map(row => row.subject), Array.from({ length: 20 }, (_, i) => '提交 ' + (20 - i)))
+    // Optional client parameters cannot change the fixed HEAD / 20-commit query.
+    assert.deepEqual(await service.call('log', { sessionId: 'session', root: first, limit: 1, ref: firstHash }), capped)
+  })
+  await t.test('root and session cwd switches never reuse another repository history', async () => {
+    await commit(second, '另一个仓库\n')
+    assert.equal((await log(second)).commits[0].subject, '另一个仓库')
+    await mkdir(join(first, 'sub'))
+    assert.equal((await log(join(first, 'sub'))).commits[0].subject, '提交 20')
+    session.header.cwd = second
+    assert.equal((await log()).commits[0].subject, '另一个仓库')
+    session.header.cwd = first
+    assert.equal((await log()).commits[0].subject, '提交 20')
+    await command(first, 'checkout', '--detach', firstHash)
+    assert.deepEqual((await log(first)).commits.map(row => row.hash), [firstHash])
+  })
+  await t.test('an oversized Chinese message returns no partial record', async () => {
+    await commit(second, '大消息\n\n' + '多行中文正文\n'.repeat(20000))
+    assert.deepEqual(await log(second), { commits: [], truncated: true })
+  })
 })
 
 after(() => hooks.deregister())

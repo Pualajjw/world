@@ -50,13 +50,14 @@ export async function checkJournal(browser, bundleText, root) {
     await page.addStyleTag({ content: themeCss })
     await page.addScriptTag({ content: bundleText })
     await page.locator('[data-world-icon-id="plugin:world-trash"]').waitFor()
-    assert.equal(await page.locator('[data-world-version]').innerText(), `world v${manifest.version}`)
+    await page.waitForFunction(() => document.querySelector('[data-world-version]')?.textContent.includes('DSH v0.2.2-rc.3'))
+    assert.equal(await page.locator('.world-version-numbers').innerText(), `world v${manifest.version}\nDSH v0.2.2-rc.3`)
     const version = await page.locator('[data-world-version]').evaluate(node => ({
       x: node.getBoundingClientRect().x, font: getComputedStyle(node).fontSize,
       color: getComputedStyle(node).color,
       expected: getComputedStyle(document.body).getPropertyValue('--dsw-alias-label-secondary').trim(),
     }))
-    assert.equal(version.x, 16); assert.equal(version.font, '12px')
+    assert.equal(version.x, 16); assert.equal(version.font, '11px')
     assert.equal(version.color, version.expected, 'desktop labels follow the active dsh appearance token')
     await openDiary()
     const diary = page.locator('[data-world-plugin="world-diary"]'), trash = page.locator('[data-world-plugin="world-trash"]')

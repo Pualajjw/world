@@ -43,10 +43,30 @@ test('a deleted assistant session blocks handoff rather than binding the newly v
   const { file, ctx } = await fixture(t)
   const original = createDesktopBrain(ctx, { file })
   await original.call('configure', { sessionId: 'a' })
-  const restored = createDesktopBrain({ sessions: { get: id => id === 'b' ? {} : null },
-    sessionController: { inspect: async () => { throw new Error('not found') } } }, { file })
+  const restored = createDesktopBrain({ sessions: { get: () => null },
+    get: name => name === 'sessionPersistence' ? { open: async () => { throw new Error('not found') } } : undefined }, { file })
   await assert.rejects(restored.call('bind', { sessionId: 'b' }), { code: 'WORLD_DESKTOP_BRAIN' })
   assert.equal((await restored.get()).sessionId, 'a')
+})
+
+test('a session that is only switched away or not yet loaded still hands off', async t => {
+  const { file } = await fixture(t)
+  await createDesktopBrain({ sessions: { get: id => id === 'a' ? {} : null } }, { file }).call('configure', { sessionId: 'a' })
+  const opened = []
+  const restored = createDesktopBrain({ sessions: { get: () => null },
+    get: name => name === 'sessionPersistence'
+      ? { async open(id) { opened.push(id); return { async close() {} } } }
+      : undefined }, { file })
+  const bound = await restored.call('bind', { sessionId: 'b' })
+  assert.equal(bound.sessionId, 'a', '交接继续用原来那个助手会话')
+  assert.deepEqual(opened, ['a'], '只读持久层确认存在，不去打开或新建会话')
+})
+
+test('a host without session persistence never blocks handoff on an unloaded session', async t => {
+  const { file, ctx } = await fixture(t)
+  await createDesktopBrain(ctx, { file }).call('configure', { sessionId: 'a' })
+  const restored = createDesktopBrain({ sessions: { get: () => null } }, { file })
+  assert.equal((await restored.call('bind', { sessionId: 'b' })).sessionId, 'a')
 })
 
 test('legacy identity requires setup, stores background once, and retains that session', async t => {
@@ -103,14 +123,16 @@ test('preferences can precede first handoff, survive restart and attach to exact
 
 test('editing a bound profile keeps identity and extensions, without prompting any session', async t => {
   const { file, ctx } = await fixture(t)
-  let prompts = 0
-  ctx.sessionController = { prompt() { prompts++ }, inspect() { throw new Error('should not inspect on edit') } }
+  let prompts = 0, opens = 0
+  ctx.sessionController = { prompt() { prompts++ } }
+  ctx.get = () => ({ async open() { opens++; throw new Error('should not probe on edit') } })
   await writeFile(file, JSON.stringify({ sessionId: 'a', profile: { version: 1, background: '旧背景' }, extension: { keep: true } }))
   const brain = createDesktopBrain(ctx, { file, atomic })
   const result = await brain.call('update_profile', { expectedRevision: 0, expectedSessionId: 'a',
     profile: { name: '归舟', userName: '阿林', tone: 'detailed', background: '新的自定义背景' } })
   assert.equal(result.sessionId, 'a')
   assert.equal(prompts, 0)
+  assert.equal(opens, 0, '改个性化不碰会话')
   assert.deepEqual(JSON.parse(await readFile(file, 'utf8')).extension, { keep: true })
   const profile = brain.peek().profile
   assert.equal(profile.name, '归舟')

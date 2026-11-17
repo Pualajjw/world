@@ -208,8 +208,138 @@ export async function checkTerminal(browser, bundleText) {
       await page.locator('[data-world-app-card="terminal"] .world-app-open').click()
     })
 
+    // 桌面有真键盘：那排触控键不该出现在这里（它们会白占一行高度）
+    assert.equal(await page.locator('.world-term-keys').count(), 0, '桌面不画触控快捷键条')
+
     assert.deepEqual(errors, [])
-    console.log('Terminal passed: default install, command output, ANSI colour, exit code, cd/pwd, Tab completion, typing without focus, font size, queueing, Ctrl+C, cls, help, follow-up scrolling, window restore.')
+    console.log('Terminal passed: default install, command output, ANSI colour, exit code, cd/pwd, Tab completion, typing without focus, font size, queueing, Ctrl+C, cls, help, follow-up scrolling, window restore, desktop has no touch key row.')
+    return page
+  } finally {
+    await terminal.dispose().catch(() => {})
+    await page.close()
+    await rm(workspace, { recursive: true, force: true })
+  }
+}
+
+/**
+ * 手机上的终端。软键盘上没有 Tab / Ctrl / 方向键，所以这些键必须有触控入口：
+ * 一排按钮直接调用键盘那条路上的同一段逻辑，行为不能和桌面漂成两套。
+ */
+export async function checkPhoneTerminal(browser, bundleText) {
+  const workspace = await mkdtemp(join(tmpdir(), 'world-term-phone-'))
+  await writeFile(join(workspace, 'alpha.txt'), 'alpha\n')
+  await mkdir(join(workspace, 'sub'))
+  const terminal = createTerminalFixture()
+  const page = await browser.newPage({ viewport: { width: 360, height: 640 }, hasTouch: true })
+  const errors = []
+  page.on('pageerror', error => errors.push(error.message))
+  const input = page.locator('.world-term-input')
+  const key = label => page.locator(`.world-term-key:text-is("${label}")`)
+  const waitForText = (text, timeout = 20000) => page.waitForFunction(
+    needle => (document.querySelector('[data-world-term-screen]')?.innerText || '').includes(needle),
+    text, { timeout },
+  )
+  const value = () => input.inputValue()
+  const focused = () => page.evaluate(() => document.activeElement?.className || '')
+  try {
+    await page.exposeBinding('__worldTerminalCall', async (_source, operation, payload) => {
+      try {
+        const cwd = !payload?.cwd || payload.cwd === '/workspace' ? workspace : payload.cwd
+        return { ok: true, value: await terminal.call(operation, { ...payload, cwd }) }
+      } catch (error) {
+        return { ok: false, error: { code: error.code, message: error.message } }
+      }
+    })
+    await page.route('http://127.0.0.1/world-terminal-phone', route => route.fulfill({ contentType: 'text/html; charset=utf-8',
+      body: '<!doctype html><html style="--dsh-windows-titlebar-height:40px"><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0}#root{height:100vh;width:100vw}.app-frame{position:relative;height:100%}#host-ui{position:absolute;inset:40px 0 0}</style></head><body><div id="root"><div class="app-frame"><main id="host-ui"></main><div id="overlay-root" data-shell-overlay></div></div></div></body></html>' }))
+    await page.goto('http://127.0.0.1/world-terminal-phone')
+    await page.addScriptTag({ content: bundleText })
+    await page.locator('[data-world-icon-id="terminal"]').waitFor()
+    await page.locator('[data-world-icon-id="terminal"]').tap()
+    await page.locator('.world-terminal-window').waitFor()
+    await waitForText('world 终端')
+    // 手机版的启动提示不该再教人按 Tab / Ctrl：那几颗键软键盘上没有
+    await waitForText('下方按键')
+    assert.equal(await page.evaluate(() => (document.querySelector('[data-world-term-screen]')?.innerText || '').includes('Ctrl+R')), false,
+      '手机启动提示不提物理键盘')
+
+    // 六颗键：等宽等高，全在窗口里，且不压住状态栏
+    const keys = await page.evaluate(() => [...document.querySelectorAll('.world-term-key')].map(node => {
+      const rect = node.getBoundingClientRect()
+      return { label: node.textContent, x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) }
+    }))
+    assert.deepEqual(keys.map(item => item.label), ['Tab', '↑', '↓', '^C', '^L', '^R'])
+    assert.equal(Math.min(...keys.map(item => item.h)), 40, '触控键 40px 高')
+    assert.ok(Math.min(...keys.map(item => item.w)) >= 44, `每颗键至少 44px 宽：${JSON.stringify(keys.map(item => item.w))}`)
+    assert.ok(Math.max(...keys.map(item => item.x + item.w)) <= 360, '按键条没有溢出屏幕')
+    const row = await page.locator('.world-term-keys').boundingBox()
+    const status = await page.locator('.world-term-status').boundingBox()
+    const win = await page.locator('.world-terminal-window').boundingBox()
+    assert.ok(row.y + row.height <= status.y + 1, '按键条在状态栏上面，不叠')
+    assert.ok(row.y >= win.y && row.y + row.height <= win.y + win.height, '按键条在窗口里')
+    // 输入行只有一行 18px 的字，手机上得给够可点的高度
+    const inputRow = await page.locator('.world-term-input-row').boundingBox()
+    assert.ok(inputRow.height >= 30, `输入行可点区 ${Math.round(inputRow.height)}px`)
+
+    // Tab 补全：和键盘上按 Tab 走的是同一条路
+    await input.fill('al')
+    await key('Tab').tap()
+    await page.waitForFunction(() => document.querySelector('.world-term-input')?.value === 'alpha.txt', undefined, { timeout: 10000 })
+
+    // 点按钮不能把焦点从输入行抢走：软键盘一收，还得再点回来才能继续打
+    await input.focus()
+    await key('^L').tap()
+    assert.equal(await focused(), 'world-term-input', '点快捷键后焦点仍在输入行')
+    await page.waitForFunction(() => !(document.querySelector('[data-world-term-screen]')?.innerText || '').includes('下方按键'),
+      undefined, { timeout: 10000 })
+
+    // 历史：跑两条内置命令，再用 ↑ / ↓ 翻
+    for (const line of ['help', 'pwd']) {
+      await input.fill(line)
+      await input.press('Enter')
+      await page.waitForTimeout(400)
+    }
+    await key('↑').tap()
+    assert.equal(await value(), 'pwd')
+    await key('↑').tap()
+    assert.equal(await value(), 'help')
+    await key('↓').tap()
+    assert.equal(await value(), 'pwd')
+    await input.fill('')
+
+    // ^R 进搜索：输入行换名字，接着就能用软键盘打关键字
+    await key('^R').tap()
+    assert.equal(await page.locator('.world-term-prompt[data-world-term-prompt="search"]').count(), 1, '^R 进反向搜索')
+    await input.fill('p')
+    assert.ok(await page.locator('.world-term-search').isVisible(), '搜索模式显示命中')
+    await key('^C').tap()
+    assert.equal(await page.locator('.world-term-prompt[data-world-term-prompt="search"]').count(), 0, '^C 退出搜索')
+
+    // ^C 中断：命令真要停下来（夹具用 taskkill /T /F 杀整棵树，和宿主一致）
+    await input.fill('node -e "setTimeout(() => {}, 20000)"')
+    await input.press('Enter')
+    await page.locator('.world-term-running').waitFor()
+    await key('^C').tap()
+    await waitForText('^C 已中断')
+    assert.equal(await value(), '')
+    await page.waitForFunction(() => !document.querySelector('.world-term-running'), undefined, { timeout: 15000 })
+
+    // 浅色主题下终端那一行不能被当成表单框垫灰底（vscode 外壳的 input 样式会漏进来）
+    const formField = await page.evaluate(() => {
+      document.body.dataset.worldTheme = 'light'
+      const host = document.querySelector('.world-vscode-window')
+      const field = document.createElement('input')
+      host.append(field)
+      const painted = getComputedStyle(field).backgroundColor
+      field.remove()
+      return painted
+    })
+    assert.notEqual(formField, 'rgba(0, 0, 0, 0)', '浅色主题下 vscode 外壳里的表单框仍有底色（规则是活的）')
+    assert.equal(await input.evaluate(node => getComputedStyle(node).backgroundColor), 'rgba(0, 0, 0, 0)',
+      '终端输入行是「终端里的一行」，不该垫表单底色')
+
+    assert.deepEqual(errors, [])
+    console.log('Phone terminal passed: touch key row (Tab / ↑ / ↓ / ^C / ^L / ^R), completion, history, reverse search, real interrupt, focus kept, no form backdrop.')
     return page
   } finally {
     await terminal.dispose().catch(() => {})

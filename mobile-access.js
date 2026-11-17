@@ -1,24 +1,35 @@
-/** On-demand mobile browser access to this Host, with one-use pairing and a private upstream cookie jar. */
+/**
+ * Phone entry: a pairing key kept on disk so the QR survives a restart, plus a cached
+ * upstream cookie per phone. The phone only ever holds the world key, never DSH credentials.
+ */
 import http from 'node:http'
 import https from 'node:https'
 import { isIP } from 'node:net'
 import { networkInterfaces } from 'node:os'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile, mkdir } from 'node:fs/promises'
+import { join } from 'node:path'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { createMobileProxy, upstreamRequest } from './mobile-proxy.js'
 
 const PREFIX = '/_world_mobile/'
-const PAIR_MS = 5 * 60 * 1000, SESSION_MS = 8 * 60 * 60 * 1000
+/** Upstream cookie cache. Longer than a page session, shorter than a visible DSH login expiry. */
+const SESSION_MS = 2 * 60 * 60 * 1000, COOKIE_AGE = 365 * 24 * 60 * 60
+const KEY = /^[A-Za-z0-9_-]{43}$/
 const failure = message => Object.assign(new Error(message), { code: 'WORLD_MOBILE' })
 const random = () => randomBytes(32).toString('base64url')
 const cookieName = port => `world_mobile_${port}`
-const equal = (a, b) => typeof a === 'string' && typeof b === 'string' && /^[A-Za-z0-9_-]{43}$/.test(a) && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b))
+const equal = (a, b) => typeof a === 'string' && typeof b === 'string' && KEY.test(a) && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b))
 
 export function mobileNetworkAddresses(interfaces = networkInterfaces()) {
   const seen = new Set()
-  return Object.entries(interfaces).filter(([name]) => !/loopback|vethernet|vmware|virtualbox|docker|wsl|tailscale|vpn/i.test(name))
-    .flatMap(([name, rows]) => (rows || []).filter(row => (row.family === 'IPv4' || row.family === 4) && !row.internal && !row.address.startsWith('169.254.'))
-      .map(row => ({ name, address: row.address })))
+  // Interface names are platform/user-defined. A VPN can be the phone's usable route,
+  // so classify addresses rather than rejecting names such as VPN, en0 or tun0.
+  return Object.entries(interfaces || {}).flatMap(([name, rows]) => (Array.isArray(rows) ? rows : [])
+    .filter(row => row && (row.family === 'IPv4' || row.family === 4) && !row.internal && typeof row.address === 'string' && isIP(row.address) === 4)
+    .filter(row => {
+      const [a, b] = row.address.split('.').map(Number)
+      return a !== 0 && a < 224 && !(a === 169 && b === 254)
+    }).map(row => ({ name, address: row.address })))
     .filter(row => { if (seen.has(row.address)) return false; seen.add(row.address); return true })
 }
 export function mobileBindAddress(override, interfaces = networkInterfaces()) {
@@ -32,32 +43,108 @@ export function mobileBindAddress(override, interfaces = networkInterfaces()) {
 }
 const PAIR_PAGE = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>连接 world</title></head><body><p id="message">请在电脑上打开「手机连接」，扫描二维码。</p><script>
 const token=new URLSearchParams(location.hash.slice(1)).get('world-pair');history.replaceState(null,'','/');
-if(token){document.getElementById('message').textContent='正在连接 world…';fetch('/_world_mobile/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})}).then(r=>{if(!r.ok)throw Error();location.replace('/')}).catch(()=>{document.getElementById('message').textContent='连接未完成或二维码已过期，请重新扫码。'})}
+if(token){document.getElementById('message').textContent='正在连接 world…';fetch('/_world_mobile/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})}).then(r=>{if(!r.ok)throw Error();location.replace('/')}).catch(()=>{document.getElementById('message').textContent='连接未完成。请确认电脑上的 DSH 仍在运行，然后重新扫码。'})}
 </script></body></html>`
+
+/**
+ * The QR has to stay valid after a restart, so its key is a small file rather than memory.
+ * Only a missing file means "first run"; any other read error is surfaced instead of
+ * silently minting a new key that would invalidate the one already saved on the phone.
+ */
+export function createMobileCredential({ dir, io = {}, now = Date.now }) {
+  const fs = { readFile, writeFile, mkdir, ...io }
+  const file = join(dir, 'mobile.json')
+  let state, loading
+  async function save() {
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(file, `${JSON.stringify(state, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+  }
+  async function load() {
+    let text
+    try { text = await fs.readFile(file, 'utf8') }
+    catch (error) { if (error?.code !== 'ENOENT') throw failure(`无法读取手机连接密钥，请检查 ${file} 的访问权限。`) }
+    let stored = {}
+    if (text) { try { stored = JSON.parse(text) } catch { stored = {} } }
+    const token = typeof stored?.token === 'string' && KEY.test(stored.token) ? stored.token : random()
+    state = {
+      version: 1, token, createdAt: Number.isFinite(stored?.createdAt) ? stored.createdAt : now(),
+      host: typeof stored?.host === 'string' && stored.host ? stored.host : '',
+    }
+    if (token !== stored?.token || state.host !== (stored?.host || '')) await save()
+    return state
+  }
+  const credential = {
+    file,
+    get() {
+      if (state) return Promise.resolve(state)
+      if (!loading) loading = load().finally(() => { loading = null })
+      return loading
+    },
+    async remember(host) {
+      const value = await credential.get()
+      if (value.host === host) return
+      value.host = host
+      await save()
+    },
+    async rotate() {
+      const value = await credential.get()
+      value.token = random(); value.createdAt = now()
+      await save()
+      return value
+    },
+  }
+  return credential
+}
 
 /** Each explicitly selected interface keeps its own listener so changing the QR does not disconnect phones. */
 export function createMobileAccess(options) {
-  const { config = {}, interfaces = networkInterfaces } = options
+  const { config = {}, interfaces = networkInterfaces, now = Date.now } = options
+  const credential = options.credential ?? createMobileCredential({ dir: options.dir, io: options.io, now })
   const listeners = new Map()
-  let selectedHost = '', stopped = false
+  let selectedHost = '', restored = false, stopped = false
+  async function restore() {
+    if (restored) return
+    const value = await credential.get()
+    restored = true
+    if (!selectedHost) selectedHost = value.host
+  }
+  async function open(payload, signal) {
+    if (stopped) throw failure('手机连接服务已停止。')
+    signal?.throwIfAborted()
+    await restore()
+    const rows = interfaces()
+    const addresses = config.host ? [{ name: '已配置地址', address: mobileBindAddress(config.host) }] : mobileNetworkAddresses(rows)
+    let host = config.host
+    if (!host) {
+      host = payload?.host || (addresses.some(row => row.address === selectedHost) ? selectedHost : '') || mobileBindAddress('', rows)
+      if (!addresses.some(row => row.address === host)) throw failure('所选网络地址已不可用，请重新打开手机连接后选择。')
+    }
+    if (!listeners.has(host)) listeners.set(host, createMobileListener({ ...options, credential, config: { ...config, host } }))
+    const value = await listeners.get(host).call('open', {}, signal)
+    selectedHost = host
+    void credential.remember(host).catch(() => {})
+    return value
+  }
   return {
     async call(operation, payload, signal) {
       if (stopped) throw failure('手机连接服务已停止。')
       signal?.throwIfAborted()
-      if (!['addresses', 'open'].includes(operation)) throw failure('不支持的手机连接操作。')
-      const rows = interfaces()
-      const addresses = config.host ? [{ name: '已配置地址', address: mobileBindAddress(config.host) }] : mobileNetworkAddresses(rows)
-      if (operation === 'addresses') return { addresses, configured: Boolean(config.host),
-        selectedHost: config.host || (addresses.some(row => row.address === selectedHost) ? selectedHost : '') }
-      let host = config.host
-      if (!host) {
-        host = payload?.host || (addresses.some(row => row.address === selectedHost) ? selectedHost : '') || mobileBindAddress('', rows)
-        if (!addresses.some(row => row.address === host)) throw failure('所选网络地址已不可用，请重新打开手机连接后选择。')
+      if (!['addresses', 'open', 'reset'].includes(operation)) throw failure('不支持的手机连接操作。')
+      if (operation === 'addresses') {
+        await restore()
+        const addresses = config.host ? [{ name: '已配置地址', address: mobileBindAddress(config.host) }] : mobileNetworkAddresses(interfaces())
+        return { addresses, configured: Boolean(config.host),
+          selectedHost: config.host || (addresses.some(row => row.address === selectedHost) ? selectedHost : '') }
       }
-      if (!listeners.has(host)) listeners.set(host, createMobileListener({ ...options, config: { ...config, host } }))
-      const value = await listeners.get(host).call('open', {}, signal)
-      selectedHost = host
-      return value
+      const value = await open(payload, signal)
+      if (operation === 'open') return value
+      // Resetting is the only way to invalidate a link that never expires; the phone keeps
+      // its key until the computer rotates it.
+      await credential.rotate()
+      await Promise.all([...listeners.values()].map(listener => listener.call('revoke')))
+      const link = new URL(value.url)
+      link.hash = `world-pair=${(await credential.get()).token}`
+      return { url: link.toString(), persistent: true }
     },
     async dispose() {
       stopped = true
@@ -67,22 +154,24 @@ export function createMobileAccess(options) {
   }
 }
 
-function createMobileListener({ connection, webServer, chat, config = {}, interfaces, now = Date.now }) {
+function createMobileListener({ connection, webServer, chat, config = {}, interfaces, credential, now = Date.now }) {
   const sessions = new Map(), sockets = new Set(), pending = new Set()
-  let server, starting, origin, upstream, pairing, proxy, stopped = false, sweep
-  const pairMs = config.pairMs ?? PAIR_MS, sessionMs = config.sessionMs ?? SESSION_MS
+  let server, starting, origin, upstream, proxy, stopped = false, sweep, establishing
+  const sessionMs = config.sessionMs ?? SESSION_MS
   function track(session, resource) {
     session.resources.add(resource)
     resource.once('close', () => session.resources.delete(resource))
     return resource
   }
-  function revoke(id, session) { sessions.delete(id); for (const resource of session.resources) resource.destroy(); session.resources.clear() }
-  function expire() { for (const [id, session] of sessions) if (session.expiresAt <= now()) revoke(id, session) }
-  function browserSession(req) {
-    expire()
+  function cookieValue(req) {
+    if (!server) return ''
     const name = cookieName(server.address().port)
-    const token = String(req.headers.cookie || '').split(';').map(row => row.trim()).find(row => row.startsWith(name + '='))?.slice(name.length + 1)
-    return token ? sessions.get(token) : undefined
+    return String(req.headers.cookie || '').split(';').map(row => row.trim()).find(row => row.startsWith(name + '='))?.slice(name.length + 1) || ''
+  }
+  function dropCache() { for (const [key, session] of sessions) if (session.expiresAt <= now()) sessions.delete(key) }
+  function revokeAll() {
+    for (const session of sessions.values()) { for (const resource of session.resources) resource.destroy(); session.resources.clear() }
+    sessions.clear()
   }
   function trusted(req) {
     const expected = new URL(origin)
@@ -93,6 +182,7 @@ function createMobileListener({ connection, webServer, chat, config = {}, interf
   function reply(res, status, body) {
     res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' }); res.end(body)
   }
+  async function currentToken() { return (await credential.get()).token }
   async function authenticate() {
     const url = new URL(connection.authenticatedUrl(upstream.origin + '/'))
     if (url.origin !== upstream.origin || url.pathname !== '/') throw failure('DSH 网页认证地址不可用。')
@@ -110,6 +200,19 @@ function createMobileListener({ connection, webServer, chat, config = {}, interf
       request.once('close', () => pending.delete(request)); request.end()
     })
   }
+  /** A phone that kept its key gets its upstream cookie back without pairing again. */
+  function ensureSession(token) {
+    const cached = sessions.get(token)
+    if (cached && cached.expiresAt > now()) return Promise.resolve(cached)
+    if (!establishing) {
+      establishing = authenticate().then(cookie => {
+        const session = { cookie, expiresAt: now() + sessionMs, resources: new Set() }
+        sessions.set(token, session)
+        return session
+      }).finally(() => { establishing = null })
+    }
+    return establishing
+  }
   async function pair(req, res) {
     if (!/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) { reply(res, 415, 'Invalid content type'); return }
     let bytes = 0, chunks = []
@@ -120,20 +223,13 @@ function createMobileListener({ connection, webServer, chat, config = {}, interf
     }
     let value
     try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { reply(res, 400, 'Invalid JSON'); return }
-    const current = pairing
-    if (!current || current.busy || current.expiresAt <= now() || !equal(value?.token, current.token)) { reply(res, 401, '二维码已过期或已使用，请重新扫码。'); return }
-    expire()
-    if (sessions.size >= 16) { reply(res, 429, '连接数量已达上限，请稍后重试。'); return }
-    current.busy = true
-    try {
-      const cookie = await authenticate()
-      if (stopped || pairing !== current || current.expiresAt <= now() || res.destroyed) throw failure('二维码已更新，请重新扫码。')
-      const token = random(), session = { cookie, expiresAt: now() + sessionMs, resources: new Set() }
-      sessions.set(token, session); pairing = null
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store',
-        'set-cookie': `${cookieName(server.address().port)}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(sessionMs / 1000)}${origin.startsWith('https:') ? '; Secure' : ''}` })
-      res.end('{"ok":true}')
-    } finally { current.busy = false }
+    const token = await currentToken()
+    if (stopped || !equal(value?.token, token)) { reply(res, 401, '链接无效或已重置，请在电脑上重新打开「手机连接」。'); return }
+    try { await ensureSession(token) } catch { reply(res, 502, '连接电脑失败，请确认 DSH 仍在运行后重试。'); return }
+    if (stopped || res.destroyed) return
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store',
+      'set-cookie': `${cookieName(server.address().port)}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_AGE}${origin.startsWith('https:') ? '; Secure' : ''}` })
+    res.end('{"ok":true}')
   }
   async function handler(req, res) {
     res.setHeader('Referrer-Policy', 'no-referrer')
@@ -144,7 +240,12 @@ function createMobileListener({ connection, webServer, chat, config = {}, interf
     const url = new URL(req.url, origin)
     if (url.origin !== origin) { reply(res, 400, 'Invalid path'); return }
     if (url.pathname === PREFIX + 'pair' && req.method === 'POST') { await pair(req, res); return }
-    const session = browserSession(req)
+    const token = cookieValue(req)
+    let session
+    if (equal(token, await currentToken())) {
+      try { session = await ensureSession(token) }
+      catch { if (!res.destroyed) reply(res, 502, '连接电脑失败，请稍后重试或重新扫码。'); return }
+    }
     if (!session) {
       if (url.pathname === '/' && req.method === 'GET') {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'" }); res.end(PAIR_PAGE)
@@ -157,13 +258,25 @@ function createMobileListener({ connection, webServer, chat, config = {}, interf
       const target = new URL(`http://127.0.0.1:${info.port}/`)
       target.pathname = url.pathname.slice((PREFIX + 'lan-chat').length)
       target.search = url.search
-      proxy.forward(req, res, target, session, '')
+      // Only paired phones reach this branch; the owner cookie stays on the host.
+      proxy.forward(req, res, target, session, info.cookie || '')
     } else if (url.pathname.startsWith(PREFIX)) reply(res, 404, 'Not found')
     else {
       const target = new URL(upstream)
       target.pathname = url.pathname; target.search = url.search
       proxy.forward(req, res, target, session)
     }
+  }
+  async function upgrade(req, socket, head) {
+    socket.on('error', () => {})
+    const refuse = () => { if (!socket.destroyed) socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n') }
+    if (!trusted(req) || req.url !== '/api/remote.mux' || req.headers.upgrade?.toLowerCase() !== 'websocket') return refuse()
+    const token = cookieValue(req)
+    if (!equal(token, await currentToken())) return refuse()
+    let session
+    try { session = await ensureSession(token) } catch { return refuse() }
+    if (socket.destroyed) return
+    proxy.upgrade(req, socket, head, new URL('/api/remote.mux', upstream), session)
   }
   async function start() {
     if (stopped) throw failure('手机连接服务已停止。')
@@ -181,15 +294,10 @@ function createMobileListener({ connection, webServer, chat, config = {}, interf
     }
     server = tls ? https.createServer(tls) : http.createServer()
     const instance = server
-    instance.on('request', (req, res) => { void handler(req, res).catch(() => { if (!res.headersSent) reply(res, 502, '连接未完成，请重新扫码或稍后重试。'); else res.destroy() }) })
+    instance.on('request', (req, res) => { void handler(req, res).catch(() => { if (!res.headersSent) reply(res, 502, '连接未完成，请稍后重试。'); else res.destroy() }) })
     instance.on('connection', socket => { sockets.add(socket); socket.once('close', () => sockets.delete(socket)) })
     instance.on('clientError', (_error, socket) => socket.destroy())
-    instance.on('upgrade', (req, socket, head) => {
-      socket.on('error', () => {})
-      const session = trusted(req) && browserSession(req)
-      if (!session || req.url !== '/api/remote.mux' || req.headers.upgrade?.toLowerCase() !== 'websocket') { socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return }
-      proxy.upgrade(req, socket, head, new URL('/api/remote.mux', upstream), session)
-    })
+    instance.on('upgrade', (req, socket, head) => { void upgrade(req, socket, head).catch(() => socket.destroy()) })
     await new Promise((resolve, reject) => {
       instance.once('error', reject)
       instance.listen(port, host, () => { instance.removeListener('error', reject); resolve() })
@@ -203,11 +311,12 @@ function createMobileListener({ connection, webServer, chat, config = {}, interf
     if (stopped) throw failure('手机连接服务已停止。')
     proxy = createMobileProxy({ origin, track })
     instance.on('error', () => { for (const socket of sockets) socket.destroy() })
-    sweep = setInterval(expire, 1000); sweep.unref?.()
+    sweep = setInterval(dropCache, 1000); sweep.unref?.()
   }
   return {
     async call(operation, _payload, signal) {
-      if (operation !== 'open') throw failure('不支持的手机连接操作。')
+      if (!['open', 'revoke'].includes(operation)) throw failure('不支持的手机连接操作。')
+      if (operation === 'revoke') { revokeAll(); return { ok: true } }
       signal?.throwIfAborted()
       if (!starting) starting = start().catch(async error => {
         for (const socket of sockets) socket.destroy()
@@ -218,12 +327,11 @@ function createMobileListener({ connection, webServer, chat, config = {}, interf
       await starting
       signal?.throwIfAborted()
       if (stopped) throw failure('手机连接服务已停止。')
-      pairing = { token: random(), expiresAt: now() + pairMs, busy: false }
-      return { url: `${origin}/#world-pair=${pairing.token}`, expiresAt: pairing.expiresAt }
+      return { url: `${origin}/#world-pair=${await currentToken()}`, persistent: true }
     },
     async dispose() {
-      stopped = true; pairing = null; clearInterval(sweep)
-      for (const [id, session] of sessions) revoke(id, session)
+      stopped = true; clearInterval(sweep)
+      revokeAll()
       for (const request of pending) request.destroy()
       for (const socket of sockets) socket.destroy()
       if (starting) await starting.catch(() => {})

@@ -7,6 +7,9 @@
  */
 import React from 'react'
 import { NO_STYLE, colorCss, createScreen } from './ansi.js'
+import { isPhoneViewport } from './responsive.js'
+import { worldConfirm } from './world-confirm.js'
+import { PinGlyph, pinLabel } from './window-pin.js'
 
 const h = React.createElement
 const RESIZE_EDGES = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']
@@ -35,6 +38,20 @@ function readFontIndex() {
 
 function saveFontIndex(index) {
   try { window.localStorage.setItem(FONT_KEY, String(FONT_SIZES[index])) } catch {}
+}
+
+/**
+ * 手机上终端只能靠屏幕按键，因为软键盘上没有 Tab / Ctrl / 方向键。
+ * 这里存的只是「要不要画那一排」，与 vscode-app 里的同名 hook 同构。
+ */
+function usePhoneLayout() {
+  const [phone, setPhone] = React.useState(isPhoneViewport)
+  React.useEffect(() => {
+    const sync = () => setPhone(isPhoneViewport())
+    window.addEventListener('resize', sync)
+    return () => window.removeEventListener('resize', sync)
+  }, [])
+  return phone
 }
 
 export function TerminalGlyph({ size = 48 }) {
@@ -76,12 +93,17 @@ function baseName(path) {
 }
 
 /** `C:\Users\me\proj` → `~\proj`；太长时只留最后两段，提示行不该被路径占满。 */
-function shortPath(path, home) {
+function shortPath(path, home, phone = false) {
   const text = String(path || '')
   const normalized = text.replace(/\\/gu, '/')
   const root = String(home || '').replace(/\\/gu, '/')
   const tail = root && normalized.startsWith(root) ? `~${normalized.slice(root.length)}` : normalized
   const parts = tail.split('/').filter(Boolean)
+  // 手机上提示行只剩 ~140px：末级目录之后全折成 …/，否则命令本身就被挤出视野。
+  if (phone) {
+    if (tail.startsWith('~') || parts.length <= 1) return tail || '.'
+    return `…/${parts[parts.length - 1]}`
+  }
   if (tail.length <= 42 || parts.length <= 2) return tail || '.'
   const keep = parts.slice(-2).join('/')
   return `${/^[a-zA-Z]:/u.test(parts[0]) ? `${parts[0]}/` : ''}…/${keep}`
@@ -194,15 +216,15 @@ function unwrap(result) {
   return result.value
 }
 
-function Cap({ label, onClick, close, children }) {
+function Cap({ label, onClick, close, className, pressed, children }) {
   return h('button', {
-    type: 'button', className: `world-lanchat-cap${close ? ' world-lanchat-close' : ''}`,
-    title: label, 'aria-label': label, onClick,
+    type: 'button', className: `world-lanchat-cap${close ? ' world-lanchat-close' : ''}${className ? ` ${className}` : ''}`,
+    title: label, 'aria-label': label, 'aria-pressed': pressed, onClick,
   }, children)
 }
 
 export function TerminalWindow({
-  rect, state, rpc, session, apps, onOpenApp, active,
+  rect, state, rpc, session, apps, onOpenApp, active, zIndex, pinned = false, onTogglePin,
   onActivate, onClose, onMinimize, onToggleMaximize, onDragStart, onDragMove, onDragEnd, onResizeStart,
 }) {
   const screenRef = React.useRef(null)
@@ -258,17 +280,42 @@ export function TerminalWindow({
 
   const minimized = state === 'min'
   const maximized = state === 'max'
-  const prompt = search
-    ? '(reverse-i-search)'
+  const phone = usePhoneLayout()
+  const promptPath = search
+    ? ''
     : remote
-      ? `${remoteLabel(remote)}:${compactRemotePath(remote.cwd, remote.home)}$`
-      : `${shortPath(cwd || info?.cwd || '', info?.home)}${info?.platform === 'windows' ? '>' : ' $'}`
+      ? `${remoteLabel(remote)}:${compactRemotePath(remote.cwd, remote.home)}`
+      : shortPath(cwd || info?.cwd || '', info?.home, phone)
+  const promptSign = remote ? '$' : info?.platform === 'windows' ? '>' : ' $'
 
   /** 远程会话的权威副本放在 ref 里：轮询和队列回调拿到的必须是「现在」的连接。 */
   const applyRemote = next => { remoteRef.current = next; setRemote(next) }
   const applyHosts = list => { hostsRef.current = list; setHosts(list) }
   const applyTrust = target => { pendingTrustRef.current = target; setPendingTrust(target) }
   const applySearch = next => { searchRef.current = next; setSearch(next) }
+
+  /**
+   * ↑ / ↓ 翻历史。已经敲了几个字时只翻「以它开头」的那几条，而不是把整条历史倒出来。
+   * 键盘与手机上那排按键共用这一段——两处各写一遍迟早会漂。
+   */
+  const stepHistory = direction => {
+    if (!history.length) return
+    if (direction === 'up') {
+      if (cursor < 0) { draftRef.current = input; prefixRef.current = input }
+      const prefix = prefixRef.current
+      let index = cursor + 1
+      while (index < history.length && prefix && !history[history.length - 1 - index].startsWith(prefix)) index += 1
+      if (index >= history.length) return
+      setCursor(index)
+      setInput(history[history.length - 1 - index])
+      return
+    }
+    if (cursor < 0) return
+    const index = cursor - 1
+    setCursor(index)
+    if (index < 0) prefixRef.current = ''
+    setInput(index < 0 ? draftRef.current : history[history.length - 1 - index])
+  }
 
   /**
    * 反向搜索：从最新一条往回找。多按一次 Ctrl+R 就再往前翻一条——终端里的肌肉记忆，
@@ -326,7 +373,7 @@ export function TerminalWindow({
     if (current && !options?.local) {
       // 远程提示行换个颜色：一眼就能看出「这条命令发到别人机器上了」
       screen.write(`\x1b[95m${remoteLabel(current)}\x1b[0m`)
-      screen.write(`\x1b[2m:${shortPath(current.cwd, current.home)}\x1b[0m`)
+      screen.write(`\x1b[2m:${shortPath(current.cwd, current.home, phone)}\x1b[0m`)
       screen.write('$ ')
       screen.write(`${line}\n`)
       refresh()
@@ -334,11 +381,11 @@ export function TerminalWindow({
     }
     // 本机：提示行是我们画的，暗色路径 + 强调色箭头，命令本身用正文色
     if (current) screen.write('\x1b[2m[本机]\x1b[0m ')
-    screen.write(`\x1b[2m${shortPath(cwd || info?.cwd || '', info?.home)}\x1b[0m`)
+    screen.write(`\x1b[2m${shortPath(cwd || info?.cwd || '', info?.home, phone)}\x1b[0m`)
     screen.write(`${info?.platform === 'windows' ? '>' : ' $'} `)
     screen.write(`${line}\n`)
     refresh()
-  }, [cwd, info, refresh])
+  }, [cwd, info, phone, refresh])
 
   React.useEffect(() => {
     let alive = true
@@ -352,7 +399,10 @@ export function TerminalWindow({
       saveCwd(next)
       const screen = screenRef.current
       screen.write(`\x1b[2mworld 终端 · ${value.shell} · ${value.platform === 'windows' ? 'Windows' : 'POSIX'}\x1b[0m\n`)
-      screen.write('\x1b[2mhelp 内置命令 · Tab 补全 · Ctrl+R 搜历史 · Ctrl+L 清屏 · ssh <主机> 连远程\x1b[0m\n\n')
+      // 手机上软键盘没有 Tab / Ctrl：与其列一串按不到的键，不如把下面那排按钮指出来
+      screen.write(phone
+        ? '\x1b[2mhelp 内置命令\x1b[0m\n\x1b[2m下方按键：补全 / 历史 / 中断 / 清屏 / 搜索\x1b[0m\n\n'
+        : '\x1b[2mhelp 内置命令 · Tab 补全 · Ctrl+R 搜历史 · Ctrl+L 清屏 · ssh <主机> 连远程\x1b[0m\n\n')
       refresh()
     }).catch(error => {
       if (alive) setFatal(String(error?.message || error))
@@ -700,13 +750,19 @@ export function TerminalWindow({
    * 关窗口前先说清会丢什么：正在跑的命令会被中断，远程会话会断开。
    * `exit` 与标题栏的关闭键都走这里，免得「手滑关掉」把跑了半天的构建扔掉。
    */
-  const requestClose = () => {
+  const requestClose = async () => {
     const running = Boolean(jobRef.current) || Boolean(startingRef.current)
     const host = remoteRef.current?.hostName
     if (running || host) {
       const what = [running ? '还有命令在跑，关闭会中断它' : '', host ? `还连着 ${host}，关闭会断开远程会话` : '']
         .filter(Boolean).join('；')
-      if (!window.confirm(`${what}。仍要关闭吗？`)) return
+      const ok = await worldConfirm({
+        title: '关闭终端',
+        message: `${what}。`,
+        confirmLabel: '仍然关闭',
+        danger: true,
+      })
+      if (!ok) return
     }
     onClose()
   }
@@ -834,6 +890,14 @@ export function TerminalWindow({
   }
 
   const cancel = async () => {
+    // 搜索里按 ^C 是「退出搜索」而不是「中断命令」（键盘上就是这么走的）。
+    // 手机上只点得到按钮、没有 Esc，这条不做就等于进得去出不来。
+    if (searchRef.current) {
+      draftRef.current = ''
+      applySearch(null)
+      setInput('')
+      return
+    }
     // 真终端里 Ctrl+C 连正在敲的那一行一起丢掉，排队的命令也不再执行
     setInput('')
     const pending = queueRef.current.length
@@ -845,7 +909,17 @@ export function TerminalWindow({
     try { await cancelJob(current) } catch { /* 已经结束就算了 */ }
   }
 
+  /** Ctrl+R / 手机上的 ^R：进入反向搜索，输入行变成搜索框（手机上顺着软键盘就能打字）。 */
+  const beginSearch = () => {
+    if (!history.length) { say('还没有历史命令，先跑一条再来搜。'); return }
+    draftRef.current = input
+    inputRef.current?.focus({ preventScroll: true })
+    runSearch('')
+  }
+
   const onKeyDown = event => {
+    // 选字期间的回车、方向键、Tab 和 Esc 交给输入法；229 兼容组合结束时的确认键。
+    if (event.isComposing || event.keyCode === 229) return
     const searching = searchRef.current
     const node = inputRef.current
     // 键盘事件挂在窗口上（不是输入框上）：点过「中断」、拖过滚动条之后，
@@ -946,34 +1020,15 @@ export function TerminalWindow({
       return
     }
     if (event.key === 'Tab') { event.preventDefault(); void complete(); return }
-    if (event.key === 'ArrowUp') {
-      event.preventDefault()
-      if (!history.length) return
-      if (cursor < 0) { draftRef.current = input; prefixRef.current = input }
-      // 已经敲了几个字时只翻「以它开头」的历史，而不是把整条历史都倒出来
-      const prefix = prefixRef.current
-      let index = cursor + 1
-      while (index < history.length && prefix && !history[history.length - 1 - index].startsWith(prefix)) index += 1
-      if (index >= history.length) return
-      setCursor(index)
-      setInput(history[history.length - 1 - index])
-      return
-    }
+    if (event.key === 'ArrowUp') { event.preventDefault(); stepHistory('up'); return }
     if (event.key === 'ArrowDown') {
       event.preventDefault()
-      if (cursor < 0) return
-      const index = cursor - 1
-      setCursor(index)
-      if (index < 0) prefixRef.current = ''
-      setInput(index < 0 ? draftRef.current : history[history.length - 1 - index])
+      stepHistory('down')
       return
     }
     if (event.key === 'r' && (event.ctrlKey || event.metaKey)) {
       event.preventDefault()
-      if (!history.length) { say('还没有历史命令，先跑一条再来搜。'); return }
-      draftRef.current = input
-      node?.focus({ preventScroll: true })
-      runSearch('')
+      beginSearch()
       return
     }
     if (event.key === 'l' && (event.ctrlKey || event.metaKey)) {
@@ -1019,6 +1074,22 @@ export function TerminalWindow({
   }
 
   /**
+   * 手机上的快捷键条：软键盘上没有 Tab / Ctrl / 方向键，这几个键只能做成按钮。
+   * 按钮直接调用键盘那条路上的同一段逻辑（补全 / 翻历史 / 中断 / 清屏），
+   * 而不是往输入框里塞按键序列——塞文本会改掉正在敲的那一行。
+   */
+  const shortcut = (label, title, action) => h('button', {
+    type: 'button', className: 'world-term-key', title, 'aria-label': title,
+    // 按下时别把焦点从输入框抢走：软键盘一收，整屏会跟着跳一下，还得再点回来才能继续打
+    onPointerDown: event => event.preventDefault(),
+    onClick: () => {
+      action()
+      const node = inputRef.current
+      if (node && document.activeElement === node) node.focus({ preventScroll: true })
+    },
+  }, label)
+
+  /**
    * 键盘挂在 document 上，而不是输入框（或窗口节点）上：点过「中断」、标题栏、滚动条之后，
    * 焦点会落到按钮或 body 上，那时再敲字，事件根本不会经过窗口节点。终端要的就是
    * 「在这个窗口里直接敲」——所以只在它是当前窗口时接管，别处的输入框一律不碰。
@@ -1048,16 +1119,16 @@ export function TerminalWindow({
 
   const style = maximized
     ? { '--vscode-x': '0vw', '--vscode-y': '0vh', '--vscode-w': '100vw',
-      '--vscode-h': 'calc(100vh - var(--world-desktop-top) - var(--world-taskbar-height))' }
+      '--vscode-h': 'calc(100vh - var(--world-desktop-top) - var(--world-taskbar-height))', zIndex }
     : { '--vscode-x': `${rect.x}vw`, '--vscode-y': `${rect.y}vh`,
-      '--vscode-w': `${rect.w}vw`, '--vscode-h': `${rect.h}vh` }
+      '--vscode-w': `${rect.w}vw`, '--vscode-h': `${rect.h}vh`, zIndex }
   if (minimized) style.display = 'none'
   // 字号只作用于输出区与输入行：标题栏、状态栏保持和桌面其它窗口一致
   const fontSize = FONT_SIZES[fontIndex]
   style['--world-term-font-size'] = `${fontSize}px`
   style['--world-term-line-height'] = `${Math.round(fontSize * 1.44 * 2) / 2}px`
 
-  const where = remote ? shortPath(remote.cwd, remote.home) : shortPath(cwd || info?.cwd || '', info?.home)
+  const where = remote ? shortPath(remote.cwd, remote.home, phone) : shortPath(cwd || info?.cwd || '', info?.home, phone)
 
   return h('section', {
     className: `world-vscode-window world-terminal-window${maximized ? ' is-max' : ''}${remote ? ' is-remote' : ''}`,
@@ -1081,6 +1152,10 @@ export function TerminalWindow({
         : cwd ? h('span', { className: 'world-term-title-path', title: cwd },
           cwd === info?.home ? '~' : baseName(cwd)) : null),
     h('div', { className: 'world-vscode-controls' },
+      h(Cap, {
+        label: pinLabel(pinned), onClick: onTogglePin, pressed: pinned,
+        className: `world-pin-cap${pinned ? ' is-pinned' : ''}`,
+      }, h(PinGlyph, { size: 12, filled: pinned })),
       h(Cap, { label: '最小化', onClick: onMinimize },
         h('svg', { width: 10, height: 10, viewBox: '0 0 10 10', 'aria-hidden': true },
           h('path', { d: 'M0 5h10', stroke: 'currentColor', strokeWidth: 1 }))),
@@ -1122,10 +1197,17 @@ export function TerminalWindow({
             className: `world-term-prompt${remote ? ' is-remote' : ''}${search ? ' is-search' : ''}`,
             title: remote ? `${remote.user}@${remote.hostName}:${remote.port}${remote.cwd}` : cwd,
             'data-world-term-prompt': search ? 'search' : remote ? 'ssh' : 'local',
-          }, prompt),
+          },
+          // 路径可以让位（省略号），提示符 `>` / `$` 必须留：那是「在这里输入」的最后一块路标
+          search
+            ? '(reverse-i-search)'
+            : [h('span', { key: 'path', className: 'world-term-prompt-path' }, promptPath),
+              h('span', { key: 'sign', className: 'world-term-prompt-sign' }, promptSign)]),
           h('input', {
             ref: inputRef, className: 'world-term-input', value: search ? search.query : input,
             'aria-label': search ? '反向搜索历史命令' : '输入命令',
+            // 手机上这一行是透明的、没有边框：空着时给个占位，否则看不出哪里能输入
+            placeholder: phone && !search ? '输入命令…' : '',
             spellCheck: false, autoComplete: 'off', autoCapitalize: 'off',
             onChange: event => {
               const value = event.target.value
@@ -1138,6 +1220,20 @@ export function TerminalWindow({
       !stick
         ? h('button', { type: 'button', className: 'world-term-jump', onClick: scrollToEnd }, '跳到最新 ↓')
         : null),
+    phone
+      ? h('div', { className: 'world-term-keys', role: 'toolbar', 'aria-label': '终端快捷键' },
+        shortcut('Tab', '补全（Tab）', () => void complete()),
+        shortcut('↑', '上一条历史（↑）', () => stepHistory('up')),
+        shortcut('↓', '下一条历史（↓）', () => stepHistory('down')),
+        shortcut('^C', '中断当前命令（Ctrl+C）', () => void cancel()),
+        shortcut('^L', '清屏（Ctrl+L）', () => { screenRef.current.clear(); refresh() }),
+        // 再点一次 = 往前翻下一条命中，和键盘上连按 Ctrl+R 一样
+        shortcut('^R', '搜索历史（Ctrl+R）', () => {
+          const live = searchRef.current
+          if (live) runSearch(live.query, live.step + 1)
+          else beginSearch()
+        }))
+      : null,
     h('div', { className: 'world-term-status' },
       h('span', { className: 'world-term-status-path', title: remote ? `${remote.hostName}:${remote.port}${remote.cwd}` : cwd },
         remote ? `${remoteLabel(remote)}:${where}` : where),
@@ -1163,8 +1259,11 @@ export function TerminalWindow({
               : pendingTrust
                 ? h('span', { className: 'world-term-trust', title: `核对 ${pendingTrust} 的指纹后写入 known_hosts` },
                   '主机密钥待确认 · 输入 trust')
-                : h('span', { className: 'world-term-idle' },
-                  sshNote || (isMac() ? '⌘L 清屏 · Ctrl+R 历史' : 'Ctrl+L 清屏 · Ctrl+R 历史'))))),
+                // 手机上那排按钮就在上面，这里再写一遍快捷键只会白占地方
+                : phone && !sshNote
+                  ? null
+                  : h('span', { className: 'world-term-idle' },
+                    sshNote || (isMac() ? '⌘L 清屏 · Ctrl+R 历史' : 'Ctrl+L 清屏 · Ctrl+R 历史'))))),
   !minimized && !maximized
     ? RESIZE_EDGES.map(edge => h('div', {
       key: edge, className: `world-vscode-resize world-vscode-resize-${edge}`, 'aria-hidden': true,

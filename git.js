@@ -3,10 +3,11 @@ import { isAbsolute } from 'node:path'
 
 const MAX_OUTPUT = 256 * 1024
 const MAX_STATUS = 400
+const MAX_COMMITS = 20
 const MAX_MESSAGE = 4000
 const MAX_PATH = 1024
 
-const TIMEOUT = { status: 20_000, stage: 30_000, unstage: 30_000, commit: 60_000, pull: 180_000, push: 300_000 }
+const TIMEOUT = { status: 20_000, diff: 20_000, stage: 30_000, unstage: 30_000, commit: 60_000, pull: 180_000, push: 300_000 }
 const MUTATIONS = new Set(['stage', 'unstage', 'commit', 'pull', 'push'])
 
 /** Split `git status --porcelain=v1 -z --branch` into a branch header and file entries. */
@@ -105,6 +106,7 @@ export function createVscodeGit(ctx, { FsError, writableRoots, subprocess }) {
         code: result.exitCode, signal: result.signal,
         stdout: handle.collected.stdout.readFrom(0).text,
         stderr: handle.collected.stderr.readFrom(0).text,
+        lossy: handle.collected.stdout.readFrom(0).lossy,
         timedOut,
       }
     } finally {
@@ -175,6 +177,69 @@ export function createVscodeGit(ctx, { FsError, writableRoots, subprocess }) {
     })
   }
 
+  /** 一个文件的 unified patch：已暂存看索引、工作区看磁盘、未跟踪与 /dev/null 对比。 */
+  async function readDiff(root, payload, signal) {
+    const paths = normalizePaths(payload?.paths)
+    if (paths.length > 2) fail('一次只能查看一个文件的 Diff。', 'GIT_INVALID_PATH')
+    const staged = payload?.staged === true
+    const untracked = !staged && payload?.untracked === true
+    let result
+    if (untracked) {
+      if (paths.length !== 1) fail('一次只能查看一个文件的 Diff。', 'GIT_INVALID_PATH')
+      // --no-index 把未跟踪文件当成「从空文件新增」；有差异时退出码是 1，不是失败
+      result = await run(['git', 'diff', '--no-index', '--no-color', '--no-ext-diff', '--unified=3', '--', '/dev/null', paths[0]],
+        { cwd: root, signal, timeout: TIMEOUT.diff })
+      if (result.signal || result.timedOut) fail('读取 Diff 超时。', 'GIT_TIMEOUT')
+      if (result.code !== 0 && result.code !== 1) fail(gitFailure(result.stderr, result.stdout), 'GIT_FAILED')
+    } else {
+      result = await run(['git', 'diff', ...(staged ? ['--cached'] : []), '--no-color', '--no-ext-diff', '--unified=3', '--', ...paths],
+        { cwd: root, signal, timeout: TIMEOUT.diff })
+      if (result.signal || result.timedOut) fail('读取 Diff 超时。', 'GIT_TIMEOUT')
+      if (result.code !== 0) fail(gitFailure(result.stderr, result.stdout), 'GIT_FAILED')
+    }
+    return {
+      paths, staged, untracked,
+      patch: result.stdout.replace(/\r\n?/gu, '\n'),
+      truncated: Boolean(result.lossy),
+    }
+  }
+
+  /**
+   * Current HEAD only, in Git date order (descendants before ancestors), at most 20.
+   * body is %B: the complete message INCLUDING its subject and original newlines.
+   * author is the author name; date is the committer's strict ISO 8601 timestamp.
+   * Never expose partial records: a lossy subprocess buffer invalidates the batch.
+   */
+  async function readLog(root, signal) {
+    const options = { cwd: root, signal, timeout: TIMEOUT.status }
+    const head = await run(['git', 'rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], options)
+    if (head.signal || head.timedOut) fail('读取 Git 历史超时。', 'GIT_TIMEOUT')
+    if (head.code !== 0) {
+      const status = await must(['git', 'status', '--porcelain=v1', '-z', '--branch', '--untracked-files=no'], options)
+      if (parseStatus(status.stdout).unborn) return { commits: [], truncated: false }
+      fail(gitFailure(head.stderr, head.stdout), 'GIT_FAILED')
+    }
+    // Pin HEAD once, so concurrent branch switches cannot change this request.
+    const revision = head.stdout.trim()
+    if (head.lossy || !/^[a-f0-9]{40,64}$/u.test(revision)) fail('无法读取 Git HEAD。', 'GIT_FAILED')
+    const result = await must(['git', '-c', 'i18n.logOutputEncoding=UTF-8', 'log',
+      '--no-show-signature', '--no-notes', '--no-decorate', '--date-order', '-z',
+      '--max-count=' + (MAX_COMMITS + 1), '--format=%H%x00%h%x00%s%x00%B%x00%an%x00%cI', revision, '--'], options)
+    // A capped host buffer may retain a prefix OR suffix; never guess alignment.
+    if (result.lossy || Buffer.byteLength(result.stdout, 'utf8') > MAX_OUTPUT)
+      return { commits: [], truncated: true }
+    const fields = result.stdout.split('\0')
+    if (fields.pop() !== '' || fields.length % 6 !== 0) fail('Git 历史记录不完整。', 'GIT_FAILED')
+    const commits = []
+    for (let index = 0; index < fields.length; index += 6) {
+      const [hash, shortHash, subject, body, author, date] = fields.slice(index, index + 6)
+      if (!/^[a-f0-9]{40,64}$/u.test(hash) || !/^[a-f0-9]+$/u.test(shortHash) || !Number.isFinite(Date.parse(date)))
+        fail('Git 历史记录无效。', 'GIT_FAILED')
+      commits.push({ hash, shortHash, subject, body, author, date })
+    }
+    return { commits: commits.slice(0, MAX_COMMITS), truncated: commits.length > MAX_COMMITS }
+  }
+
   async function readStatus(cwd, signal) {
     const repo = await findRoot({ signal, cwd })
     if (!repo) {
@@ -235,13 +300,16 @@ export function createVscodeGit(ctx, { FsError, writableRoots, subprocess }) {
   }
 
   async function call(operation, payload, signal) {
-    if (operation !== 'status' && !MUTATIONS.has(operation)) fail('不支持的 Git 操作。', 'GIT_FAILED')
+    if (operation !== 'status' && operation !== 'diff' && operation !== 'log' && !MUTATIONS.has(operation)) fail('不支持的 Git 操作。', 'GIT_FAILED')
     const active = signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal
     const task = (async () => {
       active.throwIfAborted()
       const { session, cwd } = await scopeFor(payload, active)
       if (operation === 'status') return readStatus(cwd, active)
       const root = await requireRoot({ signal: active, cwd })
+      // Diff 是只读的：只读模式下也能看，不经过 assertWritable
+      if (operation === 'diff') return readDiff(root, payload, active)
+      if (operation === 'log') return readLog(root, active)
       await assertWritable(session, root, active)
       const timeout = TIMEOUT[operation]
 

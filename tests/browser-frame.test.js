@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  BROWSER_WORKSPACE, MAX_ADDRESS_LENGTH, MAX_TABS, createGuestAttributes, createLeasePool,
-  createTabStore, describeBrowserFailure, hostLabel, parseBrowserAddress, resolveBrowserBridge,
+  BROWSER_WORKSPACE, MAX_ADDRESS_LENGTH, MAX_TABS, browserSearchUrl, createGuestAttributes, createLeasePool,
+  createTabStore, describeBrowserFailure, hostLabel, isBrowserAddressInput, parseBrowserAddress, resolveBrowserBridge,
+  resolveBrowserHomeInput,
 } from '../browser-frame.js'
 
 test('parseBrowserAddress: 补 https、保留 http、返回规范化 URL', () => {
@@ -33,6 +34,21 @@ test('parseBrowserAddress: 白名单拒绝协议 / 凭据 / 空 / 超长 / 宿�
 test('hostLabel 不抛异常，也不读取页面内容', () => {
   assert.equal(hostLabel('https://example.com/a'), 'example.com')
   assert.equal(hostLabel(''), '网页')
+})
+
+test('起始页输入：不是网址就走腾讯搜索，网址保持原样', () => {
+  assert.equal(browserSearchUrl('如何处理内容'),
+    'https://so.qq.com/isearch?query=%E5%A6%82%E4%BD%95%E5%A4%84%E7%90%86%E5%86%85%E5%AE%B9')
+  assert.equal(browserSearchUrl(' a&b '), 'https://so.qq.com/isearch?query=a%26b')
+  for (const query of ['如何处理内容', 'hello world', 'hello'])
+    assert.equal(isBrowserAddressInput(query), false, query)
+  for (const url of ['example.com', 'example.com:8080', 'http://example.com', 'localhost:3000',
+    '127.0.0.1', 'https://user:pass@example.com', 'javascript:alert(1)', 'file:///C:/a.txt', '[::1]:8080'])
+    assert.equal(isBrowserAddressInput(url), true, url)
+  assert.equal(resolveBrowserHomeInput(' 如何处理内容 '),
+    'https://so.qq.com/isearch?query=%E5%A6%82%E4%BD%95%E5%A4%84%E7%90%86%E5%86%85%E5%AE%B9')
+  assert.equal(resolveBrowserHomeInput(' example.com '), 'example.com')
+  assert.equal(resolveBrowserHomeInput('   '), '')
 })
 
 test('createGuestAttributes 精确对齐主进程 will-attach-webview 校验', () => {

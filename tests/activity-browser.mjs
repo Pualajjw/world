@@ -38,6 +38,9 @@ export async function checkAssistantActivity(browser, bundleText) {
     await page.setContent('<!doctype html><html style="--dsh-windows-titlebar-height:40px"><head><style>#root{position:relative;width:100vw;height:100vh}.app-frame{position:relative;width:100%;height:100%;padding-top:40px;box-sizing:border-box}#host-ui{position:absolute;inset:40px 0 0;background:#262626}</style></head><body><div id="root"><div class="app-frame"><main id="host-ui"></main><div id="overlay-root" data-shell-overlay></div></div></div></body></html>')
     await page.addScriptTag({ content: bundleText })
     await page.waitForFunction(() => document.body.dataset.worldWindow === 'closed')
+    // 0.2.95 起默认是平面桌面，机器人只站在 3D 地面上；这一组看的是它的姿势，先把景深打开。
+    await page.locator('.world-depth-toggle').click()
+    await page.waitForFunction(() => document.body.dataset.worldDepth === 'on')
     await page.locator('[data-world-control-button]').click()
     const status = page.locator('[data-world-assistant-activity]')
     // 0.2.58 · 等模型时不能像卡死：卡片状态要能被样式读到（相位类名 + 三段动画）。

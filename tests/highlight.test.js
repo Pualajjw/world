@@ -34,6 +34,25 @@ test('tokenizing is lossless for every supported language', () => {
   }
 })
 
+test('PowerBuilder export syntax, case-insensitive keywords, tilde escapes and enums are lossless', () => {
+  const source = '$PBExportHeader$w_test.srw\n@w_test.srw.event open;\nGLOBAL TYPE w_test FROM window\nString ls_text = "中文~"引号~"和 C:\\path\\"\nIF IsNull(ls_text) THEN\n  MessageBox("标题", ls_text, Information!) // 中文注释\nEND IF\n/* 第一行\n第二行 */\n@end event\n'
+  const result = highlight(source, 'powerbuilder'), tokens = result.lines.flat()
+  assert.equal(result.plain, false)
+  assert.equal(flatten(result.lines), source)
+  for (const ext of ['sra', 'sru', 'srw', 'srd', 'srm', 'srf', 'srs', 'srq', 'pb', 'pbtest']) {
+    assert.equal(languageOf(`C:\\源码\\app.${ext.toUpperCase()}`), 'powerbuilder')
+  }
+  assert.equal(languageOf('library.pbl'), null, 'binary PB libraries are not source files')
+  assert.ok(tokens.some(t => t.type === 'type' && t.text === 'String'))
+  assert.ok(tokens.some(t => t.type === 'ctl' && t.text === 'IF'))
+  assert.ok(tokens.some(t => t.type === 'fn' && t.text === 'MessageBox'))
+  assert.ok(tokens.some(t => t.type === 'num' && t.text === 'Information!'))
+  assert.ok(tokens.some(t => t.type === 'str' && t.text.includes('~"引号~"')))
+  assert.ok(tokens.some(t => t.type === 'meta' && t.text.startsWith('@w_test')))
+  assert.ok(tokens.some(t => t.type === 'cmt' && t.text.includes('中文注释')))
+  assert.ok(tokens.some(t => t.type === 'cmt' && t.text.includes('第二行')))
+})
+
 test('javascript colours keywords, strings, numbers and comments', () => {
   const { lines, plain } = highlight(SAMPLES.javascript, 'javascript')
   assert.equal(plain, false)

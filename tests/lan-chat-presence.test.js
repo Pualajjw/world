@@ -4,13 +4,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import dgram from 'node:dgram'
-import { createLanChatServer } from '../lan-chat/server.mjs'
+import { createAuthenticatedChat as createLanChatServer, ownerHeaders, freeUdpPort } from './chat-fixture.js'
 
 const PROTOCOL = 'dsh-world-lan-chat/1'
 const home = () => mkdtemp(join(tmpdir(), 'dsh-world-presence-'))
 const base = port => `http://127.0.0.1:${port}`
-const get = (port, path) => fetch(base(port) + path).then(res => res.json())
-const post = (port, path, body) => fetch(base(port) + path, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+const get = (port, path) => fetch(base(port) + path, { headers: ownerHeaders(port) }).then(res => res.json())
+const post = (port, path, body) => fetch(base(port) + path, { method: 'POST', headers: { ...ownerHeaders(port), 'Content-Type': 'application/json' },
   body: JSON.stringify(body) }).then(async res => ({ status: res.status, body: await res.json() }))
 const waitFor = async (read, timeout = 4000) => {
   const started = Date.now()
@@ -24,19 +24,20 @@ const waitFor = async (read, timeout = 4000) => {
 
 test('diagnostics expose UDP/HTTP health and the compact network snapshot', async t => {
   const port = 59000 + Math.floor(Math.random() * 300)
-  const service = createLanChatServer({ port, discoveryPort: port + 1000, home: await home() })
+  const discoveryPort = await freeUdpPort()
+  const service = createLanChatServer({ port, discoveryPort, home: await home() })
   try {
     const info = await service.start()
     const diag = await get(info.port, '/api/diagnostics')
-    assert.equal(diag.discoveryPort, port + 1000)
+    assert.equal(diag.discoveryPort, discoveryPort)
     assert.equal(diag.httpPort, info.port)
     assert.equal(diag.udp.bound, true, 'UDP should bind on a free port')
-    assert.equal(diag.udp.port, port + 1000)
+    assert.equal(diag.udp.port, discoveryPort)
     assert.ok(Array.isArray(diag.warnings))
     assert.equal(diag.http.received, 0)
     const state = await get(info.port, '/api/state')
     assert.equal(state.network.udpBound, true)
-    assert.equal(state.network.discoveryPort, port + 1000)
+    assert.equal(state.network.discoveryPort, discoveryPort)
     assert.equal(state.network.httpPort, info.port)
     assert.ok(state.network.warnings.length >= 0)
   } finally { await service.stop() }

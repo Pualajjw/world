@@ -12,6 +12,8 @@
   }
 
   var params = new URLSearchParams(location.search)
+  var ownerToken = new URLSearchParams(location.hash.slice(1)).get('world-chat')
+  if (ownerToken) history.replaceState(null, '', location.pathname + location.search)
   var DEMO = Boolean(window.LAN_CHAT_DEMO) || location.protocol === 'file:' || params.has('demo')
   document.body.classList.add(DEMO ? 'lc-demo' : 'lc-live')
 
@@ -94,6 +96,7 @@
       { id: 'peer-zhe', name: '阿哲', machine: 'DESKTOP-ZHE', ip: '192.168.1.31', world: '@local/dsh-world 0.2.4', online: true },
       { id: 'peer-man', name: '小满', machine: 'LAPTOP-MAN', ip: '192.168.1.42', world: '@local/dsh-world 0.2.3', online: true },
       { id: 'peer-zhou', name: '老周', machine: 'PC-ZHOU', ip: '192.168.1.58', world: '@local/dsh-world 0.2.4', online: true },
+      { id: 'peer-lin', name: '林工', machine: 'PC-LIN', ip: '192.168.2.66', world: '@local/dsh-world 0.2.115', online: true, sameSubnet: false },
       { id: 'peer-test', name: '测试机', machine: 'WIN-TEST', ip: '192.168.1.77', world: '@local/dsh-world 0.2.1', online: false }
     ]
     var bots = [
@@ -147,7 +150,9 @@
         msg('d-peer-zhou', 'me-local', '我', '好，我在说明里写清楚', 180)
       ]
     }
-    return { me: me, peers: peers, bots: bots, conversations: conversations, messages: messages, pending: {}, retrying: {} }
+    return { me: me, peers: peers, bots: bots, conversations: conversations, messages: messages, pending: {}, retrying: {},
+      network: { discoveryPort: 53318, httpPort: 53317, udpBound: true, onlinePeers: 4, crossSubnetPeers: 1,
+        seeds: 1, broadcasts: 1, subnets: ['192.168.1.0/24', '192.168.2.0/24'], warnings: [] } }
   }
 
   function createDemoBackend() {
@@ -301,6 +306,18 @@
         emit()
         return Promise.resolve({ ok: true, sessionId: id })
       },
+      // 原型里放两个网段的示例，保存只提示不落盘（没有真服务）
+      networkConfig: function () {
+        return Promise.resolve({
+          seeds: ['192.168.2.50'], broadcasts: ['192.168.2.255'],
+          envSeeds: [], envBroadcasts: [],
+          subnets: [
+            { name: '以太网', address: '192.168.1.24', netmask: '255.255.255.0', broadcast: '192.168.1.255', cidr: '192.168.1.0/24' },
+            { name: '以太网 2', address: '192.168.2.14', netmask: '255.255.255.0', broadcast: '192.168.2.255', cidr: '192.168.2.0/24' }
+          ]
+        })
+      },
+      saveNetwork: function () { return Promise.resolve({ ok: true, demo: true }) },
       dispose: function () { for (var t of replyTimers) clearTimeout(t) }
     }
   }
@@ -322,11 +339,24 @@
     }
     function post(path, payload) {
       return fetch(address(path), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload || {}) })
-        .then(function (res) { if (!res.ok) throw new Error('HTTP ' + res.status); return res.json() })
+        .then(function (res) {
+          return res.json().catch(function () { return {} }).then(function (data) {
+            if (!res.ok) throw new Error(data && data.error ? data.error : 'HTTP ' + res.status)
+            return data
+          })
+        })
+    }
+    function get(path) {
+      return fetch(address(path)).then(function (res) {
+        if (!res.ok) throw new Error('聊天请求失败（HTTP ' + res.status + '），请从 world 重新打开聊天')
+        return res.json()
+      })
     }
     return {
       start: function () {
-        return fetch(address('/api/state')).then(function (res) { return res.json() }).then(function (data) {
+        var authorized = ownerToken ? post('/api/auth', { token: ownerToken }) : Promise.resolve()
+        ownerToken = null
+        return authorized.then(function () { return get('/api/state') }).then(function (data) {
           adopt(data)
           source = new EventSource(address('/api/events'))
           source.onmessage = function (event) {
@@ -343,9 +373,9 @@
       updateGroup: function (options) { return post('/api/group/settings', options).then(function (data) { adopt(data.state); return data }) },
       markRead: function (convId) { return post('/api/read', { conversationId: convId }).then(function (data) { adopt(data.state) }) },
       setProfile: function (nickname) { return post('/api/profile', { nickname: nickname }).then(function (data) { adopt(data.state) }) },
-      refresh: function () { return fetch(address('/api/state')).then(function (res) { return res.json() }).then(adopt) },
+      refresh: function () { return get('/api/state').then(adopt) },
       botSessions: function () {
-        return fetch(address('/api/bots/sessions')).then(function (res) { return res.json() })
+        return get('/api/bots/sessions')
       },
       bindBot: function (botId, sessionId) {
         return post('/api/bind', { botId: botId, sessionId: sessionId }).then(function (data) { adopt(data.state); return data })
@@ -353,6 +383,15 @@
       newBotSession: function (botId, conversationId) {
         return post('/api/context/reset', { botId: botId, conversationId: conversationId })
           .then(function (data) { adopt(data.state); return data })
+      },
+      networkConfig: function () {
+        return get('/api/network')
+      },
+      saveNetwork: function (config) {
+        return post('/api/network', config).then(function (data) {
+          return get('/api/state')
+            .then(function (state) { adopt(state); return data })
+        })
       },
       dispose: function () { if (source) source.close() }
     }
@@ -365,8 +404,11 @@
   var S = null
   var ui = {
     tab: 'chats', activeId: null, query: '', pop: '', typing: '', lastReadId: null, show: MESSAGE_WINDOW,
-    detailHidden: false, selected: new Set(), selectedBots: new Set()
+    detailHidden: false, selected: new Set(), selectedBots: new Set(), mobileChat: false
   }
+  // 窄屏（手机）走微信式的两级页面：先看会话列表，点进某个会话才盖满聊天页，返回再回到列表。
+  var MOBILE_QUERY = window.matchMedia ? window.matchMedia('(max-width: 720px)') : null
+  function isMobile() { return Boolean(MOBILE_QUERY && MOBILE_QUERY.matches) }
   document.documentElement.setAttribute('data-theme', 'light')
   var THEME_TOKENS = ['bg-base', 'bg-layer-1', 'bg-layer-2', 'bg-layer-3', 'label-primary', 'label-secondary',
     'label-tertiary', 'border-l1', 'border-l2', 'border-l3', 'interactive-bg-hover', 'interactive-bg-active',
@@ -440,16 +482,28 @@
       (conv.unread ? '<span class="lc-badge">' + conv.unread + '</span>' : '') + '</span></span></button>'
   }
 
+  /** 手机上「消息」页签挂未读总数，和微信底部红点一样一眼能看到。 */
+  function paintTabBadge(conversations) {
+    var tab = $('lcTabs').querySelector('[data-tab="chats"]')
+    if (!tab) return
+    var total = isMobile() ? conversations.reduce(function (n, c) { return n + (Number(c.unread) || 0) }, 0) : 0
+    var html = '消息' + (total ? '<span class="lc-tab-badge">' + (total > 99 ? '99+' : total) + '</span>' : '')
+    if (tab.dataset.painted !== html) { tab.innerHTML = html; tab.dataset.painted = html }
+  }
+
   function renderSidebar() {
     var list = $('lcList'), html = ''
     var conversations = (S.conversations || []).slice().sort(function (a, b) { return (b.updatedAt || 0) - (a.updatedAt || 0) })
+    paintTabBadge(conversations)
     if (ui.tab === 'chats' || ui.tab === 'groups') {
       var rows = conversations.filter(function (c) {
         return (ui.tab === 'groups' ? c.kind === 'group' : true) && (matches(convName(c)) || matches(lastMessage(c) && lastMessage(c).text))
       })
       html += '<div class="lc-list-title">' + (ui.tab === 'groups' ? '群聊 · ' + rows.length + ' 个' : '最近会话') + '</div>'
-      html += rows.length ? rows.map(function (c) { return rowHtml(c, c.id === (activeConv() && activeConv().id)) }).join('')
-        : '<div class="lc-empty"><strong>没有匹配的会话</strong>换个关键词，或新建一个群聊</div>'
+      if (rows.length) html += rows.map(function (c) { return rowHtml(c, c.id === (activeConv() && activeConv().id)) }).join('')
+      else if (ui.query) html += '<div class="lc-empty"><strong>没有匹配的会话</strong>换个关键词试试</div>'
+      else html += '<div class="lc-empty"><strong>还没有会话</strong>去通讯录挑一台设备，发一句「在吗」' +
+        '<button type="button" class="lc-empty-action" data-goto="people">去通讯录</button></div>'
     } else {
       var peers = (S.peers || []).filter(function (p) { return matches(p.name) || matches(p.machine) || matches(p.ip) })
       var bots = (S.bots || []).filter(function (b) { return matches(b.name) || matches(b.model) || matches(b.provider) })
@@ -477,7 +531,7 @@
             '<span class="lc-row-sub"><span>' + esc(p.machine) + ' · ' + esc(p.ip) + '</span></span></span></button>'
         }).join('')
       }
-      if (!peers.length && !bots.length) html += '<div class="lc-empty"><strong>还没有发现设备</strong>同一局域网里启动其它机器的聊天服务即可自动出现</div>'
+      if (!peers.length && !bots.length) html += '<div class="lc-empty"><strong>还没有发现设备</strong>在本网段启动其它机器的聊天服务，或在右栏「跨网段设置」里填入种子设备</div>'
     }
     list.innerHTML = html
     for (var tab of $('lcTabs').children) {
@@ -496,7 +550,9 @@
       : (conv.kind === 'group'
         ? (conv.memberIds || []).length + ' 位成员 · ' + members.filter(function (x) { return x.online }).length + ' 人在线'
         : (p ? (p.online ? '在线' : '离线') + ' · ' + p.ip + ' · ' + p.machine : '私聊'))
-    head.innerHTML = avatarHtml(convIcon(conv), conv.tone, 'lg') +
+    head.innerHTML = '<button class="lc-head-back" type="button" data-action="back" title="返回会话列表" aria-label="返回会话列表">' +
+      '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button>' +
+      avatarHtml(convIcon(conv), conv.tone, 'lg') +
       '<div class="lc-head-info"><strong>' + esc(convName(conv)) + '</strong><span class="lc-head-sub"><i></i>' + esc(sub) + '</span></div>' +
       '<div class="lc-head-actions">' +
       '<button class="lc-head-btn" type="button" data-action="search" title="搜索会话">' +
@@ -639,7 +695,7 @@
     membersHtml += '</div>'
 
     var devices = [{ name: S.me.nickname + '（本机）', ip: S.me.ip, world: S.me.world, online: true, me: true }].concat(
-      (S.peers || []).map(function (p) { return { name: p.name, ip: p.ip, world: p.world, online: p.online } }))
+      (S.peers || []).map(function (p) { return { name: p.name, ip: p.ip, world: p.world, online: p.online, cross: p.sameSubnet === false } }))
       .filter(function (d) { return d.online })
     // 雷达上的点跟着在线台数走，别固定画三个
     var radarDots = devices.slice(0, 3).map(function (_, i) {
@@ -649,20 +705,27 @@
       '<div class="lc-radar"><div class="lc-radar-sweep"></div>' + radarDots + '</div>' +
       devices.map(function (d) {
         return '<div class="lc-device"><i class="' + (d.online ? '' : 'off') + '"></i><div class="lc-device-body"><strong>' + esc(d.name) + '</strong>' +
-          '<span>' + esc(d.ip) + '</span></div><span class="lc-device-version">' + esc(String(d.world || '').replace('@local/dsh-world ', 'world ')) + '</span></div>'
+          '<span>' + esc(d.ip) + (d.cross ? ' · 跨网段' : '') + '</span></div><span class="lc-device-version">' +
+          esc(String(d.world || '').replace('@local/dsh-world ', 'world ')) + '</span></div>'
       }).join('') + '</div>'
     var safeHtml = '<div class="lc-safe-note"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="flex:0 0 13px;margin-top:1px"><path d="M12 3l8 3v6c0 5-3.4 8-8 9-4.6-1-8-4-8-9V6l8-3z"/></svg>' +
-      '<span>自动发现同一网段中装有 world 插件的设备；消息点对点传输，不经过任何外部服务器。</span></div>'
+      '<span>自动发现本网段中装有 world 插件的设备；跨网段时按右栏设置里的种子设备互相发现，消息仍然点对点传输。</span></div>'
     // 网络健康：UDP 收不到时，先看这里，不用再猜「为什么对方看不到我」
     var net = S.network || {}
     var inboundAgo = net.lastInboundAt ? Math.max(0, Math.round((Date.now() - net.lastInboundAt) / 1000)) : null
     var netWarn = net.warnings && net.warnings.length ? net.warnings[0] : ''
+    var subnetList = (net.subnets || []).filter(Boolean)
+    var subnetText = subnetList.slice(0, 3).join(' · ') + (subnetList.length > 3 ? ' 等 ' + subnetList.length + ' 个' : '')
     var netHtml = '<div class="lc-net-health' + (netWarn ? ' is-warn' : '') + '">' +
       '<div class="lc-net-line"><i></i><span>UDP ' + esc(String(net.discoveryPort || 53318)) +
         (net.udpBound ? ' 已就绪' : ' 未绑定') + ' · ' +
         (inboundAgo === null ? '尚未收到广播' : '收到广播 ' + inboundAgo + ' 秒前') +
         (net.onlinePeers === undefined ? '' : ' · ' + net.onlinePeers + ' 台在线') + '</span>' +
       '<button type="button" class="lc-net-copy" data-action="copy-diagnostics">复制诊断</button></div>' +
+      (subnetText ? '<div class="lc-net-subnets">本机网段：' + esc(subnetText) + '</div>' : '') +
+      '<div class="lc-net-foot"><span>跨网段：' + (net.crossSubnetPeers || 0) + ' 台在线 · 种子 ' + (net.seeds || 0) +
+        ' · 额外广播 ' + (net.broadcasts || 0) + '</span>' +
+      '<button type="button" class="lc-net-copy" data-action="network-settings">跨网段设置</button></div>' +
       (netWarn ? '<div class="lc-net-warn">' + esc(netWarn) + '</div>' : '') + '</div>'
     // 发现卡排在成员卡前面：局域网状态是这个应用最需要一眼看到的信息
     detail.innerHTML = html + discoverHtml + netHtml + membersHtml + safeHtml
@@ -697,6 +760,7 @@
     }
     renderSidebar(); renderHead(); renderMessages(); renderDetail(); paintTyping()
     document.body.classList.toggle('lc-detail-hidden', ui.detailHidden)
+    document.body.classList.toggle('lc-mobile-chat', isMobile() && ui.mobileChat && Boolean(active))
     syncSend()
   }
 
@@ -791,6 +855,7 @@
   function openConversation(id) {
     if (ui.activeId !== id) ui.show = MESSAGE_WINDOW
     ui.activeId = id
+    if (isMobile()) ui.mobileChat = true
     backend.markRead(id)
     render()
   }
@@ -804,11 +869,14 @@
 
   $('lcTabs').addEventListener('click', function (e) {
     var button = e.target.closest('[data-tab]'); if (!button) return
-    ui.tab = button.dataset.tab; render()
+    ui.tab = button.dataset.tab
+    ui.mobileChat = false
+    render()
   })
   $('lcList').addEventListener('click', function (e) {
-    var conv = e.target.closest('[data-conv]'), peer = e.target.closest('[data-peer]')
-    if (conv) openConversation(conv.dataset.conv)
+    var conv = e.target.closest('[data-conv]'), peer = e.target.closest('[data-peer]'), goto = e.target.closest('[data-goto]')
+    if (goto) { ui.tab = goto.dataset.goto; ui.mobileChat = false; render() }
+    else if (conv) openConversation(conv.dataset.conv)
     else if (peer) openPeer(peer.dataset.peer)
   })
   $('lcSearch').addEventListener('input', function (e) { ui.query = e.target.value.trim(); render() })
@@ -848,7 +916,16 @@
   })
   $('lcChatHead').addEventListener('click', function (e) {
     var button = e.target.closest('[data-action]'); if (!button) return
-    if (button.dataset.action === 'search') $('lcSearch').focus()
+    if (button.dataset.action === 'back') { ui.mobileChat = false; render(); return }
+    if (button.dataset.action === 'search') {
+      // 手机上搜索框在列表页，先回列表再聚焦，不然会聚焦到一个 display:none 的输入框
+      if (isMobile()) {
+        ui.mobileChat = false; render()
+        setTimeout(function () { $('lcSearch').focus() }, 0)
+        return
+      }
+      $('lcSearch').focus()
+    }
     if (button.dataset.action === 'detail') { ui.detailHidden = !ui.detailHidden; render() }
     if (button.dataset.action === 'refresh') backend.refresh().then(function () { toast('状态已刷新') }).catch(function () {})
   })
@@ -882,6 +959,7 @@
     var button = e.target.closest('[data-action]'); if (!button) return
     var botId = button.dataset.bot
     if (button.dataset.action === 'copy-diagnostics') { copyDiagnostics(); return }
+    if (button.dataset.action === 'network-settings') { openNetworkModal(); return }
     if (button.dataset.action === 'group-settings') { openGroupSettingsModal(); return }
     if (button.dataset.action === 'bot-session-pick') { openSessionPicker(botId); return }
     if (button.dataset.action === 'bot-session-new') {
@@ -965,6 +1043,39 @@
       '<button class="lc-btn primary" type="button" data-modal="save-group-settings">保存设置</button></div></div>'
     $('lcModalRoot').hidden = false
   }
+  function openNetworkModal() {
+    $('lcModalRoot').innerHTML = '<div class="lc-modal"><h3>跨网段发现</h3><p>正在读取本机网段…</p></div>'
+    $('lcModalRoot').hidden = false
+    backend.networkConfig().then(function (data) {
+      var subnets = (data.subnets || []).map(function (item) {
+        return '<span>' + esc(item.name || '网卡') + ' · ' + esc(item.address || '') + ' · ' + esc(item.cidr || '') + '</span>'
+      }).join('')
+      var envSeeds = (data.envSeeds || []).join('、'), envBroadcasts = (data.envBroadcasts || []).join('、')
+      var envHtml = envSeeds || envBroadcasts
+        ? '<div class="lc-net-env"><strong>环境变量已固定</strong><span>' +
+          (envSeeds ? 'LAN_CHAT_PEERS=' + esc(envSeeds) : '') +
+          (envSeeds && envBroadcasts ? ' · ' : '') +
+          (envBroadcasts ? 'LAN_CHAT_BROADCASTS=' + esc(envBroadcasts) : '') + '</span></div>' : ''
+      $('lcModalRoot').innerHTML = '<div class="lc-modal"><h3>跨网段发现</h3>' +
+        '<p>UDP 广播只在同一网段内传播。填入其它网段里任意一台运行了局域网聊天的设备作为种子，或直接填对方的广播地址，就能跨网段互相发现；消息仍然点对点传输。</p>' +
+        '<label class="lc-modal-label">种子设备（IP 或 IP:HTTP端口，每行一个）</label>' +
+        '<textarea class="lc-field lc-field-area" id="lcSeedInput" spellcheck="false" placeholder="192.168.2.50&#10;10.0.3.8:53317">' +
+        esc((data.seeds || []).join('\n')) + '</textarea>' +
+        '<label class="lc-modal-label">额外广播地址（每行一个，支持 CIDR）</label>' +
+        '<textarea class="lc-field lc-field-area" id="lcBroadcastInput" spellcheck="false" placeholder="192.168.2.255&#10;10.0.3.0/24">' +
+        esc((data.broadcasts || []).join('\n')) + '</textarea>' +
+        (subnets ? '<label class="lc-modal-label">本机网段</label><div class="lc-net-subnet-list">' + subnets + '</div>' : '') +
+        envHtml +
+        '<div class="lc-modal-actions"><button class="lc-btn" type="button" data-modal="cancel">取消</button>' +
+        '<button class="lc-btn primary" type="button" data-modal="save-network">保存并重新发现</button></div></div>'
+      $('lcModalRoot').hidden = false
+      $('lcSeedInput').focus()
+    }).catch(function (error) {
+      $('lcModalRoot').innerHTML = '<div class="lc-modal"><h3>跨网段发现</h3><p>读取本机设置失败：' + esc(error.message) + '</p>' +
+        '<div class="lc-modal-actions"><button class="lc-btn" type="button" data-modal="cancel">关闭</button></div></div>'
+      $('lcModalRoot').hidden = false
+    })
+  }
   function openProfileModal() {
     $('lcModalRoot').innerHTML = '<div class="lc-modal"><h3>我的昵称</h3><p>局域网里的其它人会看到这个名字，随时可以改。</p>' +
       '<input class="lc-field" id="lcNickInput" maxlength="24" value="' + esc(S.me.nickname || '') + '" />' +
@@ -1008,6 +1119,14 @@
       }).catch(function (err) { toast('保存失败：' + err.message) })
       return
     }
+    if (action.dataset.modal === 'save-network') {
+      if (DEMO) { closeModal(); toast('演示模式不会真的保存'); return }
+      var entries = function (value) { return String(value || '').split(/[\s,;]+/).filter(Boolean) }
+      backend.saveNetwork({ seeds: entries($('lcSeedInput').value), broadcasts: entries($('lcBroadcastInput').value) })
+        .then(function () { closeModal(); toast('已保存，正在重新发现跨网段设备') })
+        .catch(function (err) { toast('保存失败：' + err.message) })
+      return
+    }
     if (action.dataset.modal === 'create') {
       var name = $('lcGroupName').value.trim()
       if (!name) return toast('给群聊起个名字吧')
@@ -1043,7 +1162,11 @@
     tick(); setInterval(tick, 15000)
   }
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') { closePop(); closeModal() }
+    if (e.key === 'Escape') {
+      if (!$('lcModalRoot').hidden) { closeModal(); return }
+      if (ui.mobileChat) { ui.mobileChat = false; render(); return }
+      closePop()
+    }
     if (e.key === '/' && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)) { e.preventDefault(); $('lcSearch').focus() }
   })
   document.addEventListener('click', function (e) {
@@ -1062,6 +1185,28 @@
       // 动画途中的 scroll 事件会把自己判成「用户已经离开底部」，于是再也不回底
       msgBox.scrollTo({ top: msgBox.scrollHeight, behavior: 'instant' })
     }).observe(msgBox)
+  }
+
+  /* 手机：右滑返回会话列表（和微信一样只认屏幕左边缘起手的横划，避开纵向滚动） */
+  var swipe = null
+  var mainEl = document.querySelector('.lc-main')
+  mainEl.addEventListener('touchstart', function (e) {
+    if (!isMobile() || !ui.mobileChat || e.touches.length !== 1) { swipe = null; return }
+    var touch = e.touches[0]
+    swipe = touch.clientX <= 40 ? { x: touch.clientX, y: touch.clientY } : null
+  }, { passive: true })
+  mainEl.addEventListener('touchend', function (e) {
+    if (!swipe) return
+    var touch = e.changedTouches[0], dx = touch.clientX - swipe.x, dy = touch.clientY - swipe.y
+    swipe = null
+    if (dx > 72 && Math.abs(dy) < 60) { ui.mobileChat = false; render() }
+  }, { passive: true })
+
+  if (MOBILE_QUERY && MOBILE_QUERY.addEventListener) {
+    MOBILE_QUERY.addEventListener('change', function () {
+      if (!isMobile()) ui.mobileChat = false
+      render()
+    })
   }
 
   backend.start()

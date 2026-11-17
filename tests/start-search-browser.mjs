@@ -19,6 +19,9 @@ export async function checkStartSearch(browser, bundleText) {
     await page.addScriptTag({ content: bundleText })
     await page.waitForFunction(() => document.body.dataset.worldWindow === 'closed')
 
+    // world 里不能拖选文字，只有输入框保留选择能力。
+    assert.equal(await page.locator('.world-wall').evaluate(node => getComputedStyle(node).userSelect), 'none',
+      'world 桌面整体禁止拖选文字')
     // 设置 / 日记 / 待办只在开始菜单里，桌面上不摆这三个图标。
     for (const id of ['settings', 'plugin:world-diary', 'plugin:world-tasks']) {
       assert.equal(await page.locator(`[data-world-icon-id="${id}"]`).count(), 0, `${id} stays off the desktop`)
@@ -31,6 +34,8 @@ export async function checkStartSearch(browser, bundleText) {
     await openMenu()
     const search = page.locator('[data-world-start-search]')
     await search.waitFor()
+    assert.equal(await search.evaluate(node => getComputedStyle(node).userSelect), 'text',
+      '搜索输入框仍然可以选择文字')
     assert.match(await page.locator('.world-start-group-title').first().innerText(), /^应用/, 'nothing is searched until you type')
     assert.equal(await search.evaluate(node => node === document.activeElement), true, 'opening the menu puts the caret in the search field')
 

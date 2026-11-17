@@ -188,6 +188,7 @@ world 桌面（shell.overlay，同一棵 React 树）
 | 操作 | 行为 |
 | --- | --- |
 | 地址栏输入 `example.com` | 补 `https://`；`http/https` 之外、内嵌 `user:pass@`、> 16384 字符、宿主自身 origin → 拒绝并在输入框下给一句中文原因（规则对齐 `url.ts:25-45`） |
+| 起始页输入不是网址 | 中文句子 / 带空格短语 / 单个词 → `https://so.qq.com/isearch?query=<encodeURIComponent(内容)>`；`example.com`、`localhost:3000`、`127.0.0.1`、显式 `http/https` 仍按地址栏规则打开。这条只作用于起始页，不改地址栏白名单 |
 | `Enter` / `Esc` | 导航 / 还原为当前已观测 URL 并失焦 |
 | 后退 / 前进 / 刷新 / 主页 | `goBack` / `goForward` / `reload` / 回到内建起始页（`about:blank` 引导页不算历史）；按钮按 `canGoBack/canGoForward` 置灰 |
 | 页面内点链接 | 同标签导航；`did-navigate` / `did-navigate-in-page` 同步地址栏与标题 |
@@ -217,7 +218,7 @@ world 桌面（shell.overlay，同一棵 React 树）
 | 子系统 | 接入方式 |
 | --- | --- |
 | 应用目录 | `id='browser'`，与 VSCode / 局域网聊天并列；默认安装、可卸载（待拍板 4） |
-| 桌面图标 | 双击打开；右键「打开 / 卸载」（主应用 `dsh` 仍只显示「打开」） |
+| 桌面图标 | 双击打开；右键「打开 / 卸载」（主应用 `dsh` 的右键菜单为「打开 / 设置 / 插件」） |
 | 开始菜单 | 「应用」分组第三张卡片，安装态显示「打开 / 卸载」 |
 | 任务栏 | 每个浏览器窗口一格，标签取当前 tab 标题（截断），最小化态 62% 透明 + 8px 灰线 |
 | 层级 | `data-world-active-kind="browser"`，复制 `styles.css:883-887` 的规则：其它窗口降 `z-index:3`、`#root` 降 `2`、DSH 窗口框 `3`；任务栏 `100` / 开始菜单 `101` 保持最上 |

@@ -275,6 +275,42 @@ test('handoffs that arrive together still say hello only once', async t => {
   assert.equal(runs.length, 1)
 })
 
+test('handoff reload waits for a delayed receipt and preserves a newer plan', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'world-receipt-')), runs = []
+  let release, entered, hold = true, activeWrites = 0, maxWrites = 0
+  const gate = new Promise(resolve => { release = resolve })
+  const receipt = new Promise(resolve => { entered = resolve })
+  const life = createLifeLine({
+    memory: createCompanionMemory({ dir }), dir, now: () => at('10:00'), available: () => true,
+    workbench: { run: async request => { runs.push(request); return true } },
+    config: () => ({ life: true, wakeTime: '09:00', reviewTime: '23:00' }),
+    setTimer: () => ({ unref() {} }), clearTimer() {},
+    atomic: { async writeFileAtomic(file, content) {
+      activeWrites++; maxWrites = Math.max(maxWrites, activeWrites)
+      try {
+        if (hold && JSON.parse(content).lastDelivered) { hold = false; entered(); await gate }
+        await writeFile(file, content)
+      } finally { activeWrites-- }
+    } },
+  })
+  t.after(async () => { release(); life.stop(); await life.settled(); await rm(dir, { recursive: true, force: true }) })
+  await life.start()
+  await life.refresh({ handoff: true })
+  await receipt
+  let refreshed = false
+  const next = life.refresh({ handoff: true }).then(() => { refreshed = true })
+  life.plan({ after_minutes: 2 }, '保留这项新计划')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(refreshed, false, 'a reload cannot overtake the pending receipt')
+  release()
+  await next
+  await life.settled()
+  assert.equal(runs.length, 1)
+  assert.equal(maxWrites, 1, 'state snapshots are persisted in order')
+  assert.equal(life.status().alarm.note, '保留这项新计划')
+  assert.equal(JSON.parse(await readFile(join(dir, 'life.json'), 'utf8')).greeting, null)
+})
+
 test('a hello that could not be said in time is dropped instead of waiting for the next handoff', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'world-stale-'))
   const memory = createCompanionMemory({ dir })
