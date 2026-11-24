@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 export async function checkQuickOpen(browser, bundleText, shotsDir) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
   const errors = [], requests = []
+  const failure = '文件搜索暂不可用\n  <原文> & path: C:\\测试\\窗口.srw'
   let release, mode = 'normal'
   page.on('pageerror', error => errors.push(error.message))
   try {
@@ -15,7 +16,7 @@ export async function checkQuickOpen(browser, bundleText, shotsDir) {
     await page.exposeBinding('__worldFileSearch', (_source, payload) => {
       requests.push(payload)
       const query = payload.query.toLowerCase()
-      if (mode === 'error') return { ok: false, error: { message: '文件搜索暂不可用' } }
+      if (mode === 'error') return { ok: false, error: { message: failure } }
       const files = ['main.js', 'main-test.js', 'README.md', '中文窗口.srw'].filter(path => path.toLowerCase().includes(query)).map(path => ({ path }))
       const result = { ok: true, value: { query: payload.query, files, fileCount: files.length, truncated: false } }
       return mode === 'delayed' ? new Promise(resolve => { release = () => resolve(result) }) : result
@@ -43,6 +44,9 @@ export async function checkQuickOpen(browser, bundleText, shotsDir) {
     assert.equal(await second.locator('.world-vscode-file').count(), 0, 'a blank editor must not fall back to the session cwd')
     assert.equal(await second.locator('.world-vscode-error').count(), 0)
     assert.equal(await second.locator('.world-vscode-status-branch').count(), 0)
+    await second.getByRole('button', { name: '搜索文件', exact: true }).click()
+    await second.locator('.world-vscode-picker:not(.world-vscode-quickopen)').waitFor()
+    await second.getByRole('button', { name: '关闭打开文件夹', exact: true }).click()
     assert.equal(await page.evaluate(() => window.__worldTesting.calls.some(call => call.method === 'world-vscode-git/status' && call.payload.root === '')), false)
     assert.equal(await first.locator('textarea').inputValue(), '// first draft')
     const blankKey = await second.getAttribute('data-world-vscode-key')
@@ -134,19 +138,64 @@ export async function checkQuickOpen(browser, bundleText, shotsDir) {
     await popup.waitFor({ state: 'detached' })
     assert.equal(await second.locator('textarea').inputValue(), '// second draft', 'opening an existing file preserves its draft')
 
+    const text = second.locator('textarea'), draft = 'one\nsecond line\nlast', beforeJump = requests.length
+    await text.fill(draft)
+    const jump = async value => { await text.press('Control+p'); await input.fill(value) }
+    const caret = () => text.evaluate(n => [n.selectionStart, n.selectionEnd, document.activeElement === n])
+    await jump(':2:3'); await popup.getByRole('option', { name: '跳转到第 2 行，第 3 列' }).waitFor()
+    if (shotsDir) await popup.locator('[role=dialog]').screenshot({path: join(shotsDir, 'quick-open-line.png')})
+    await input.press('Enter'); await popup.waitFor({state:'detached'})
+    assert.deepEqual(await caret(), [6, 6, true]); assert.equal(await text.inputValue(), draft)
+    await jump(':1'); await input.press('Escape'); assert.deepEqual(await caret(), [6, 6, true])
+    await jump(':0'); await input.press('Enter'); await popup.getByRole('status').filter({hasText:'从 1 开始'}).waitFor()
+    await input.fill(':2:'); await input.press('Enter'); assert.equal(await popup.getByRole('option').count(), 0)
+    await input.fill(':2'); await popup.getByRole('option').click(); assert.deepEqual(await caret(), [4, 4, true])
+    await jump(':999:99'); await input.press('Enter'); assert.deepEqual(await caret(), [draft.length, draft.length, true])
+    assert.equal(requests.length, beforeJump, 'local positions never search the workspace')
+
+    await page.locator('[data-world-taskbar^="vscode:"]').nth(0).click()
+    await first.getByRole('button', { name: '搜索文件', exact: true }).click()
+    await first.locator('.world-vscode-quickopen input').fill('README')
+    await first.locator('.world-vscode-quickopen').getByRole('option', { name: 'README.md', exact: true }).waitFor()
+    assert.equal(await second.locator('.world-vscode-quickopen').count(), 0, 'clicking the icon in another window searches only that folder')
+    assert.equal(requests.at(-1).root, '/workspace')
+    await first.locator('.world-vscode-quickopen input').press('Escape')
+
+    await page.locator('[data-world-taskbar^="vscode:"]').nth(1).click()
     await second.locator('textarea').click(); await page.keyboard.press('Control+p')
     mode = 'delayed'; await input.fill('main')
     while (!release) await page.waitForTimeout(10)
-    await input.fill('README'); mode = 'normal'
+    await page.evaluate(() => window.__worldTesting.setFile('/workspace/src/README.md', 'title\ncontent\nlast'))
+    await input.fill('README:2:2'); mode = 'normal'
     await popup.getByRole('option', { name: 'README.md', exact: true }).waitFor()
     release(); await page.waitForTimeout(50)
     assert.equal(await popup.getByRole('option').count(), 1, 'a delayed response cannot replace the current results')
+    assert.equal(requests.at(-1).query, 'README')
+    const beforeColumn = requests.length; await input.fill('README:2:4')
     await input.press('Enter')
     await second.getByRole('tab', { name: /README.md/u }).waitFor()
+    await second.getByTitle('光标位置：行 2, 列 4', {exact:true}).waitFor(); assert.deepEqual(await caret(), [9, 9, true])
+    assert.equal(requests.length, beforeColumn, 'changing only the position reuses filename results')
     assert.equal(await first.getByRole('tab', { name: /README.md/u }).count(), 0)
     await second.locator('textarea').click(); await page.keyboard.press('Control+p')
     mode = 'error'; await input.fill('中文')
     await popup.getByRole('alert').waitFor()
+    const showDetails = popup.getByRole('button', { name: '查看详情' })
+    await showDetails.click()
+    const details = second.getByRole('dialog', { name: '错误详情' }), raw = details.getByRole('textbox', { name: '错误原文' })
+    assert.equal(await first.getByRole('dialog', { name: '错误详情' }).count(), 0)
+    assert.equal(await raw.inputValue(), failure)
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: 'http://127.0.0.1' })
+    const copy = details.getByRole('button', { name: '复制错误信息' })
+    await copy.click(); await details.getByText('已复制错误信息').waitFor()
+    assert.equal((await page.evaluate(() => navigator.clipboard.readText())).replaceAll('\r\n','\n'), failure)
+    // Both clipboard paths refused: leave the exact source selected and the original search intact.
+    await page.evaluate(() => { navigator.clipboard.writeText = async () => { throw Error('denied') }; document.execCommand = () => false })
+    await copy.click(); await details.getByText('未能自动复制，请选中原文手动复制。').waitFor()
+    assert.deepEqual(await raw.evaluate(n => [n.selectionStart,n.selectionEnd]), [0,failure.length])
+    await raw.press('Escape'); await details.waitFor({ state: 'detached' })
+    assert.ok(await showDetails.evaluate(n => n === document.activeElement))
+    assert.equal(await input.inputValue(), '中文')
     mode = 'normal'; await popup.getByRole('button', { name: '重试', exact: true }).click()
     await popup.getByRole('option', { name: /中文窗口/u }).waitFor()
     await page.setViewportSize({ width: 360, height: 740 })
@@ -158,6 +207,9 @@ export async function checkQuickOpen(browser, bundleText, shotsDir) {
     await popup.getByText('没有匹配的文件。', { exact: true }).waitFor()
     await input.press('Escape')
     await popup.waitFor({ state: 'detached' })
+    await second.getByRole('button', { name: '搜索文件', exact: true }).click()
+    await input.waitFor()
+    await input.press('Escape')
     assert.deepEqual(errors, [])
     console.log(`Quick open passed: ${JSON.stringify(geometry)}; single blank instance, same-turn launches, minimized reuse, unique folder windows, unchanged history/drafts, Ctrl+P ownership, search and phone.`)
   } finally { await page.close() }

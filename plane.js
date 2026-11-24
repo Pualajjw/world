@@ -167,7 +167,7 @@ const overlapsBy = (a, b, slack = 2) =>
 
 /** 摆完之后，把压在别人身上的自定义位置让回网格——窗口小了装不下用户原来挑的地方。 */
 function yieldCollisions(slots) {
-  if (slots.length < 2) return
+  if (slots.length < 2 || !slots.some(slot => slot.saved)) return
   // 容器还没量出尺寸时（首帧、面板隐藏）所有 rect 都是 0，这时候做碰撞判断会误伤位置记忆。
   const probe = slots[0].icon.getBoundingClientRect()
   if (probe.width < 8 || probe.height < 8) return

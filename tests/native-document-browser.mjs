@@ -147,7 +147,11 @@ try {
   await page.setViewportSize({ width: 1280, height: 800 })
   await page.evaluate(() => { document.body.dataset.worldLayout = 'desktop' })
   await file('broken.pdf').click()
-  await preview().getByRole('alert').waitFor()
+  const nativeAlert = preview().getByRole('alert'); await nativeAlert.waitFor()
+  await preview().getByRole('button', { name: '查看详情' }).click()
+  const detail = page.getByRole('dialog', { name: '错误详情' })
+  assert.ok((await detail.getByRole('textbox', { name: '错误原文' }).inputValue()).trim())
+  await detail.getByRole('button', { name: '关闭错误详情' }).click()
   assert.equal(await page.locator('.world-vscode-textarea:visible').count(), 0)
   holdBytes = true
   await file('b.pdf').click()

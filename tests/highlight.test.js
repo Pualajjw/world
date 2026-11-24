@@ -1,9 +1,11 @@
 /** The tokenizer must never lose or reorder a single character: the editor paints its rows instead of the text. */
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { highlight, languageOf, plainLines, MAX_HIGHLIGHT } from '../highlight.js'
+import { highlight, createHighlighter, powerScriptLineTokens, languageOf, plainLines, syntaxLine } from '../highlight.js'
 
 const SAMPLES = {
+  powerbuilder: '$PBExportHeader$w_test.srw\n@w_test.srw.event open;\nString ls_text = "中文~"引号~""\n/* 块注释\n第二行 */\nIF IsNull(ls_text) THEN\nMessageBox("标题", ls_text, Information!)\nEND IF\n@end event\n',
+  ini: '[section]\nname = "world"\nflag = true\n; comment\n',
   javascript: 'const answer = 42 // 注释\nfunction greet(name) {\n  return `hi ${name}`\n}\n/* 块注释\n   第二行 */\nclass Thing extends Base {}\n',
   typescript: 'import type { A } from "./a"\nexport interface B<T> { value: T }\nconst x: number = 1_000\n',
   json: '{\n  "name": "world",\n  "count": 3,\n  "ok": true,\n  "list": [1, 2.5, -3e4]\n}\n',
@@ -25,6 +27,49 @@ const SAMPLES = {
 }
 
 const flatten = lines => lines.map(line => line.map(token => token.text).join('')).join('\n')
+
+test('incremental highlighting matches a fresh scan through edits, undo and language switches', () => {
+  const cached = createHighlighter()
+  let seed = 173
+  const random = limit => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed % limit }
+  const insertions = ['a', '\n', '/*', '*/', '//', '\\', '~', '"', "'", '`', '"""', "'''", '--[[', ']]', '#', '']
+  for (const [language, original] of Object.entries(SAMPLES)) {
+    let source = original
+    for (let step = 0; step < 80; step++) {
+      const result = cached(source, language)
+      assert.deepEqual(result, highlight(source, language), `${language}, edit ${step}`)
+      const saved = JSON.stringify(result)
+      const from = random(source.length + 1), to = Math.min(source.length, from + random(5))
+      source = source.slice(0, from) + insertions[random(insertions.length)] + source.slice(to)
+      assert.deepEqual(cached(source, language), highlight(source, language), `${language}, after edit ${step}`)
+      assert.equal(JSON.stringify(result), saved, 'cached prefix must never mutate a previous render')
+      if (step % 9 === 0) source = original
+    }
+  }
+})
+
+test('incremental highlighting reuses complete prefix rows and restarts multiline tokens safely', () => {
+  const cached = createHighlighter()
+  const source = 'const a = 1\n/* first\nsecond */\nconst b = 2\n'
+  const first = cached(source, 'javascript')
+  assert.equal(cached(source, 'javascript'), first)
+  const appended = cached(source + 'const c = 3', 'javascript')
+  for (let i = 0; i < 4; i++) assert.equal(appended.lines[i], first.lines[i], 'unchanged prefix row is reused')
+  const edited = source.replace('second */', 'second') + 'const c = 3'
+  const comment = cached(edited, 'javascript')
+  assert.equal(comment.lines[0], first.lines[0])
+  assert.deepEqual(comment, highlight(edited, 'javascript'), 'deleting a block terminator recolours the following code')
+  assert.deepEqual(cached(source, 'javascript'), first, 'undo restores all original token types')
+})
+
+test('incremental cache preserves tokens across the former size limit', () => {
+  const cached = createHighlighter(), source = 'let value = 1\n'
+  cached(source, 'javascript')
+  const large = 'x'.repeat(200_001)
+  assert.deepEqual(cached(large, 'javascript'), highlight(large, 'javascript'))
+  assert.deepEqual(cached(source, 'javascript'), highlight(source, 'javascript'))
+  assert.deepEqual(cached(source, null), highlight(source, null))
+})
 
 test('tokenizing is lossless for every supported language', () => {
   for (const [language, source] of Object.entries(SAMPLES)) {
@@ -120,10 +165,11 @@ test('python triple-quoted strings survive multiple lines', () => {
   assert.ok(lines.flat().some(token => token.type === 'kw' && token.text === 'def'))
 })
 
-test('oversized and unknown sources fall back to plain rows', () => {
-  const huge = 'a'.repeat(MAX_HIGHLIGHT + 1)
+test('known syntax past 200k remains highlighted; unknown files stay plain', () => {
+  const huge = 'a'.repeat(200_001) + ' return 42'
   const big = highlight(huge, 'javascript')
-  assert.equal(big.plain, true)
+  assert.equal(big.plain, false)
+  assert.ok(big.lines[0].some(t => t.text === 'return' && t.type === 'ctl'))
   assert.equal(big.lines.length, 1)
   assert.equal(big.lines[0][0].type, 'punc')
   const unknown = highlight('hello\nworld', null)
@@ -142,4 +188,33 @@ test('language detection follows extensions and known filenames', () => {
   assert.equal(languageOf('scripts/build.ps1'), 'powershell')
   assert.equal(languageOf('nope.bin'), null)
   assert.equal(languageOf('no-extension'), null)
+})
+
+test('live PowerScript lines match the source lexer across multiline comments, escapes and PB directives', () => {
+  const source = SAMPLES.powerbuilder + ' /*a*/ /* still open\n\n*/return 42 // done'
+  const state = { blockComment: false }
+  assert.deepEqual(source.split('\n').map(line => powerScriptLineTokens(line, state)), highlight(source, 'powerbuilder').lines)
+  assert.equal(state.blockComment, false)
+})
+
+test('virtual viewport syntax carries lexical context between physical lines', () => {
+  for (const [lang, source] of Object.entries(SAMPLES)) {
+    if (lang === 'text') continue
+    const state = {}, rows = source.split('\n').map(line => syntaxLine(line, lang, state))
+    assert.deepEqual(rows, highlight(source, lang).lines, lang)
+  }
+})
+
+test('PowerScript backspace reuses shifted suffix rows only in the same lexical context', () => {
+  const cached = createHighlighter(), code = 'return 42', source = `// title\n/* start\n${code}\n*/\n${code}\n\n${code}\n`
+  const old = cached(source,'powerbuilder'), deleted = source.replace(`${code}\n\n`,`${code}\n`)
+  const joined = cached(deleted,'powerbuilder')
+  assert.equal(joined.lines[5],old.lines[6]); assert.deepEqual(joined, highlight(deleted,'powerbuilder'))
+  const open = deleted.replace('*/','*'), recolored = cached(open,'powerbuilder')
+  assert.notEqual(recolored.lines[4],joined.lines[4]); assert.equal(recolored.lines[4],joined.lines[2])
+  assert.deepEqual(recolored,highlight(open,'powerbuilder')); assert.deepEqual(cached(source,'powerbuilder'),old)
+  for (const line of ['string s = "~\"hi~\""', '//\ud800', '$PBExportHeader$m.srm\r', 'x'.repeat(100001)]) {
+    const text = `${line}\n/*\n${line}\n*/\n${line}`
+    assert.deepEqual(cached(text,'powerbuilder'), highlight(text,'powerbuilder'))
+  }
 })

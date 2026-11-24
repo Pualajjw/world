@@ -31,7 +31,11 @@ export async function checkStartSearch(browser, bundleText) {
     assert.equal(await page.locator('[data-world-app-card="world-tasks"]').count(), 1)
     assert.equal(await page.locator('[data-world-icon-id="plugin:world-trash"]').count(), 1, 'the bin stays on the desktop')
 
+    const menu = page.locator('.world-start')
+    const visibility = () => menu.evaluate(node => getComputedStyle(node).contentVisibility)
+    assert.equal(await visibility(), 'hidden', 'unopened menu skips layout and paint at startup')
     await openMenu()
+    assert.equal(await visibility(), 'visible', 'first open paints the real menu immediately')
     const search = page.locator('[data-world-start-search]')
     await search.waitFor()
     assert.equal(await search.evaluate(node => getComputedStyle(node).userSelect), 'text',
@@ -66,6 +70,8 @@ export async function checkStartSearch(browser, bundleText) {
     assert.equal(await page.locator('.world-start').evaluate(node => node.classList.contains('open')), true, 'the first Escape only clears the query')
     await page.keyboard.press('Escape')
     await page.waitForFunction(() => !document.querySelector('.world-start').classList.contains('open'))
+
+    assert.equal(await visibility(), 'visible', 'closing a previously opened menu keeps its fade-out')
 
     // Enter 打开高亮的那一条，菜单收起。
     await openMenu()

@@ -42,6 +42,7 @@ export function InternetTaskbar({ rpc, onOpen }) {
 export function InternetPage({ rpc, visible = true }) {
   const [config, setConfig] = React.useState(null), [state, setState] = React.useState(null)
   const [action, setAction] = React.useState(''), [error, setError] = React.useState(''), [notice, setNotice] = React.useState('')
+  const [savedAutoStart, setSavedAutoStart] = React.useState(false)
   const [pollError, setPollError] = React.useState('')
   const [showSecret, setShowSecret] = React.useState(false), [follow, setFollow] = React.useState(true)
   const [pageVisible, setPageVisible] = React.useState(() => !document.hidden)
@@ -67,7 +68,9 @@ export function InternetPage({ rpc, visible = true }) {
       const value = await call(operation, payload, controller.signal)
       if (!alive.current || controller.signal.aborted) return
       setState(value)
-      if (value.config) setConfig(value.config)
+      if (value.config) { setConfig(value.config); setSavedAutoStart(value.config.autoStart === true) }
+      else if (operation === 'start') setSavedAutoStart(value.autoStart === true)
+      if (operation === 'save' || operation === 'start') window.dispatchEvent(new Event('world-startup-change'))
       if (operation === 'save') setNotice('配置已保存。')
     } catch (cause) { if (alive.current && !controller.signal.aborted) setError(cause.message || String(cause)) }
     finally { lock.current = false; if (alive.current) setAction('') }
@@ -81,14 +84,20 @@ export function InternetPage({ rpc, visible = true }) {
         const controller = new AbortController(); polling.current = controller
         try {
           const value = await call('status', {}, controller.signal)
-          if (!stopped && alive.current && !controller.signal.aborted) { setState(value); setPollError('') }
+          if (!stopped && alive.current && !controller.signal.aborted) {
+            setState(value); setPollError('')
+            if (typeof value.autoStart === 'boolean' && value.autoStart !== savedAutoStart) {
+              setConfig(draft => draft.autoStart === savedAutoStart ? {...draft,autoStart:value.autoStart} : draft)
+              setSavedAutoStart(value.autoStart)
+            }
+          }
         } catch (cause) { if (!stopped && alive.current && !controller.signal.aborted) setPollError(cause.message || String(cause)) }
       }
       if (!stopped) timer = window.setTimeout(tick, 1000)
     }
     void tick()
     return () => { stopped = true; window.clearTimeout(timer); polling.current?.abort() }
-  }, [visible, pageVisible, Boolean(config), call])
+  }, [visible, pageVisible, Boolean(config), call, savedAutoStart])
   React.useEffect(() => {
     if (follow && logView.current) logView.current.scrollTop = logView.current.scrollHeight
   }, [state?.logs, follow])
@@ -99,14 +108,17 @@ export function InternetPage({ rpc, visible = true }) {
     ['secret', '网络密钥', '请输入网络密钥'], ['peer', '节点地址', 'udp://118.178.196.123:11010'],
   ]
   return h('div', { className: 'world-resource-manager world-internet', 'data-world-internet': true, 'aria-busy': busy },
-    h('form', { className: 'world-internet-form', onSubmit: event => { event.preventDefault(); void run('start', { config }) } },
+    h('form', { className: 'world-internet-form', onSubmit: event => { event.preventDefault(); void run('start', { config, expectedAutoStart:savedAutoStart }) } },
       ...fields.map(([key, label, placeholder]) => h('label', { key }, label,
         h('input', { type: key === 'secret' && !showSecret ? 'password' : 'text', value: config?.[key] || '',
           'aria-label': label, placeholder, disabled: disabled || !config, required: key !== 'directory',
           autoComplete: 'off', spellCheck: false, onChange: edit(key) }))),
       h('div', { className: 'world-internet-actions' },
+        h('label', { className: 'world-internet-autostart', title: '保存后下次 World 启动时连接，不影响当前连接。Windows 可能提示管理员授权。' },
+          h('input', { type: 'checkbox', checked: config?.autoStart === true, disabled: busy || !config || state?.supported === false,
+            onChange: event => { const checked = event.target.checked; setConfig(value => ({ ...value, autoStart: checked })); setNotice('') } }), '随 World 启动上网'),
         h('button', { type: 'button', disabled: busy || !config, 'aria-pressed': showSecret, onClick: () => setShowSecret(value => !value) }, showSecret ? '隐藏密钥' : '显示密钥'),
-        h('button', { type: 'button', disabled: disabled || !config, onClick: () => { void run('save', { config }) } }, action === 'save' ? '保存中…' : '保存配置'),
+        h('button', { type: 'button', disabled: busy || !config || state?.supported === false || (running && savedAutoStart === config.autoStart), onClick: () => { void run('save', { config, expectedAutoStart:savedAutoStart }) } }, action === 'save' ? '保存中…' : '保存配置'),
         h('button', { type: 'submit', className: 'is-primary', disabled: disabled || !config }, action === 'authorize' ? '等待授权…' : action === 'start' ? '启动中…' : '启动上网'),
         h('button', { type: 'button', disabled: busy || !running, onClick: () => { void run('stop') } }, action === 'stop' ? '停止中…' : '停止'))),
     h('div', { className: 'world-internet-status', role: 'status' },

@@ -31,6 +31,7 @@ export async function checkVscodeFormats(browser, bundleText, shotsDir) {
       }
       if (phone) await showFiles()
       await page.getByRole('button', { name: 'w_gbk.srw', exact: true }).click()
+      await page.getByRole('button',{name:'返回源码',exact:true}).click()
       const editor = page.locator('.world-vscode-textarea')
       await editor.waitFor()
       assert.equal(await editor.inputValue(), source)
@@ -52,6 +53,7 @@ export async function checkVscodeFormats(browser, bundleText, shotsDir) {
       }
       if (phone) await showFiles()
       await page.getByRole('button', { name: 'w_utf8.srw', exact: true }).click()
+      await page.getByRole('button',{name:'返回源码',exact:true}).click()
       await page.waitForFunction(() => document.querySelector('.world-vscode-textarea')?.readOnly === false)
       assert.equal(await editor.inputValue(), source)
       await editor.press('Control+End'); await editor.press('Enter'); await editor.type('// edited')

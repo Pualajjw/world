@@ -132,7 +132,7 @@ export function replaceText(text, matcher, replacement, regex = false) {
   return { text: next, count }
 }
 
-export function createVscodeSearch(ctx, { FsError, writableRoots } = {}) {
+export function createVscodeSearch(ctx, { FsError, writableRoots, fs = ctx.fs } = {}) {
   const lifetime = new AbortController()
   const fail = (message, code = 'SEARCH_FAILED') => { throw new FsError(message, code) }
 
@@ -159,8 +159,8 @@ export function createVscodeSearch(ctx, { FsError, writableRoots } = {}) {
     const cwd = session.header?.cwd
     const requested = typeof payload.root === 'string' && payload.root ? payload.root : ''
     if (!requested && !cwd) fail('这个会话还没有工作目录。', 'SEARCH_NO_WORKSPACE')
-    const root = await ctx.fs.resolve(requested || cwd, { cwd, signal })
-    const info = await ctx.fs.stat(root, signal)
+    const root = await fs.resolve(requested || cwd, { cwd, signal })
+    const info = await fs.stat(root, signal)
     if (!info) fail('要搜索的文件夹不存在。', 'SEARCH_NO_WORKSPACE')
     if (info.type !== 'directory') fail('只能搜索文件夹。', 'SEARCH_NO_WORKSPACE')
     return root
@@ -199,7 +199,7 @@ export function createVscodeSearch(ctx, { FsError, writableRoots } = {}) {
       if (Date.now() > deadline) { truncated = true; break }
       const directory = queue[cursor++]
       let entries
-      try { entries = await ctx.fs.listDir(directory.target, signal) }
+      try { entries = await fs.listDir(directory.target, signal) }
       catch { skipped++; continue }
       for (const entry of entries) {
         if (signal.aborted) break
@@ -219,7 +219,7 @@ export function createVscodeSearch(ctx, { FsError, writableRoots } = {}) {
         if (typeof entry.size === 'number' && entry.size > MAX_FILE_BYTES) { skipped++; continue }
         scanned++
         let bytes
-        try { bytes = await ctx.fs.readBytes(entry.target, signal, MAX_FILE_BYTES) }
+        try { bytes = await fs.readBytes(entry.target, signal, MAX_FILE_BYTES) }
         catch { skipped++; continue }
         if (bytes.includes(0)) { skipped++; continue }
         const text = new TextDecoder('utf-8').decode(bytes)
@@ -233,7 +233,7 @@ export function createVscodeSearch(ctx, { FsError, writableRoots } = {}) {
 
     files.sort((left, right) => left.path.localeCompare(right.path))
     return {
-      root: ctx.fs.processPath(root), query, files, total, fileCount: files.length,
+      root: fs.processPath(root), query, files, total, fileCount: files.length,
       scanned, skipped, truncated, tookMs: Date.now() - started,
     }
   }
@@ -252,14 +252,14 @@ export function createVscodeSearch(ctx, { FsError, writableRoots } = {}) {
       if (Date.now() - started > TIME_BUDGET) { truncated = true; break }
       const directory = queue[cursor++]
       let entries
-      try { entries = await ctx.fs.listDir(directory.target, signal) }
+      try { entries = await fs.listDir(directory.target, signal) }
       catch { signal.throwIfAborted(); skipped++; continue }
       for (const entry of entries) {
         signal.throwIfAborted()
         if (++visited > MAX_FILES_SCANNED || Date.now() - started > TIME_BUDGET || matches.length >= MAX_MATCH_FILES) {
           truncated = true; break walk
         }
-        if (!ctx.fs.contains(root, entry.target)) { skipped++; continue }
+        if (!fs.contains(root, entry.target)) { skipped++; continue }
         const path = directory.path ? `${directory.path}/${entry.name}` : entry.name
         if (entry.type === 'directory') {
           if (!SKIPPED_DIRS.has(entry.name)) queue.push({ path, target: entry.target })
@@ -273,7 +273,7 @@ export function createVscodeSearch(ctx, { FsError, writableRoots } = {}) {
     }
     signal.throwIfAborted()
     matches.sort((a, b) => a.rank - b.rank || a.path.localeCompare(b.path))
-    return { root: ctx.fs.processPath(root), query, files: matches.map(({ path }) => ({ path })),
+    return { root: fs.processPath(root), query, files: matches.map(({ path }) => ({ path })),
       fileCount: matches.length, scanned, skipped, truncated, tookMs: Date.now() - started }
   }
 
@@ -296,18 +296,18 @@ export function createVscodeSearch(ctx, { FsError, writableRoots } = {}) {
     if (paths.length > MAX_REPLACE_FILES) fail(`一次最多替换 ${MAX_REPLACE_FILES} 个文件。`, 'SEARCH_TOO_MANY_FILES')
 
     const root = await scopeFor(payload, signal)
-    const rootDir = ctx.fs.processPath(root)
+    const rootDir = fs.processPath(root)
     const session = await sessionFor(payload.sessionId, signal)
     const policy = ctx.sandboxPolicy.resolve({ session })
     if (policy.mode === 'read-only') fail('只读模式下不能替换文件。', 'FS_SANDBOX_DENIED')
     const writable = policy.mode === 'workspace-write' && typeof writableRoots === 'function'
-      ? await Promise.all(writableRoots(policy).map(path => ctx.fs.resolve(path, { signal })))
+      ? await Promise.all(writableRoots(policy).map(path => fs.resolve(path, { signal })))
       : null
     // 编辑器里有未保存修改的文件由前端点名跳过：盘上替换成功也会被下一次保存覆盖。
     const dirty = new Set()
     for (const value of Array.isArray(payload?.skip) ? payload.skip : []) {
       if (typeof value !== 'string' || !value) continue
-      try { dirty.add(ctx.fs.processPath(await ctx.fs.resolve(value, { cwd: rootDir, signal }))) }
+      try { dirty.add(fs.processPath(await fs.resolve(value, { cwd: rootDir, signal }))) }
       catch { dirty.add(value) }
     }
 
@@ -319,18 +319,18 @@ export function createVscodeSearch(ctx, { FsError, writableRoots } = {}) {
     for (const path of paths) {
       if (signal.aborted) break
       try {
-        const target = await ctx.fs.resolve(path, { cwd: rootDir, signal })
-        if (!ctx.fs.contains(root, target)) { skip(path, '不在当前文件夹里'); continue }
-        if (dirty.has(ctx.fs.processPath(target))) { skip(path, '有未保存的修改'); continue }
-        if (writable && !writable.some(directory => ctx.fs.contains(directory, target))) {
+        const target = await fs.resolve(path, { cwd: rootDir, signal })
+        if (!fs.contains(root, target)) { skip(path, '不在当前文件夹里'); continue }
+        if (dirty.has(fs.processPath(target))) { skip(path, '有未保存的修改'); continue }
+        if (writable && !writable.some(directory => fs.contains(directory, target))) {
           skip(path, '在会话可写目录之外'); continue
         }
-        const before = await ctx.fs.stat(target, signal)
+        const before = await fs.stat(target, signal)
         if (!before) { skip(path, '文件已不存在'); continue }
         if (before.type !== 'file') { skip(path, '只能替换普通文件'); continue }
         if (typeof before.size === 'number' && before.size > MAX_FILE_BYTES) { skip(path, '文件过大'); continue }
-        const bytes = await ctx.fs.readBytes(target, signal, MAX_FILE_BYTES)
-        const after = await ctx.fs.stat(target, signal)
+        const bytes = await fs.readBytes(target, signal, MAX_FILE_BYTES)
+        const after = await fs.stat(target, signal)
         if (!after || after.version !== before.version) { skip(path, '读取时文件被改动'); continue }
         if (bytes.includes(0)) { skip(path, '二进制文件不能替换'); continue }
         let raw
@@ -343,7 +343,7 @@ export function createVscodeSearch(ctx, { FsError, writableRoots } = {}) {
         if (!changed.count) { skip(path, '文件已变化，没有匹配'); continue }
         const content = bom + changed.text
         if (Buffer.byteLength(content, 'utf8') > MAX_FILE_BYTES) { skip(path, '替换后文件过大'); continue }
-        await ctx.fs.writeText(target, content, { kind: 'replaceIfVersion', version: before.version }, signal, policy)
+        await fs.writeText(target, content, { kind: 'replaceIfVersion', version: before.version }, signal, policy)
         files.push({ path, replacements: changed.count })
         total += changed.count
       } catch (error) {

@@ -68,10 +68,10 @@ async function setup(t, options = {}) {
   await writeFile(join(workspace, 'sub', 'inner.txt'), 'inner\n')
   const context = new Context()
   await context.plugin(LocalFs, { cwd: workspace })
-  const subprocess = createSubprocess()
+  const subprocess = options.subprocess || createSubprocess()
   const service = createWorldTerminal({ fs: context.fs }, {
     FsError, subprocess,
-    ...(options.toolDirs ? { toolDirs: options.toolDirs } : {}),
+    ...options,
   })
   t.after(async () => {
     await service.dispose()
@@ -305,6 +305,31 @@ test('without pbnpm the terminal leaves PATH alone', async t => {
   assert.deepEqual(info.tools, [])
   await run(service, workspace, 'echo hi')
   assert.equal(subprocess.spawns.at(-1).env.PATH, undefined)
+})
+
+test('Markdown PBTest launches only the validated saved selection, as argv not shell text', { skip: process.platform !== 'win32' }, async t => {
+  const source = '```pbtest\nsubroutine test_one()\nend subroutine\n```'
+  let document
+  const spawns = []
+  const { workspace, service } = await setup(t, { openDocument: async () => document, toolDirs: () => [workspace],
+    subprocess: { spawn(spec) { spawns.push(spec); return { done: Promise.resolve({ exitCode: 0 }), terminate() {} } } } })
+  const path = join(workspace, '中文 %PATH% & example.md')
+  await writeFile(path, source)
+  // An inert placeholder is enough to inspect launches, without requiring a PB runtime in CI.
+  await writeFile(join(workspace, 'pbnpm.exe'), '')
+  document = { path, source, version: 'v1', encoding: 'UTF-8' }
+  const start = params => service.call('pbtest', { path, version: 'v1', ...params })
+  await assert.rejects(start({ version: 'stale' }), /已变更/)
+  await assert.rejects(start({ blockIndex: 2 }), /不存在/)
+  await assert.rejects(start({ blockIndex: 1, caseName: 'bogus' }), /不存在/)
+  assert.equal(spawns.length, 0)
+  for (const [selection, expected] of [[{}, []], [{ blockIndex: 1 }, ['--markdown-block', `${path}::markdown:1`]],
+    [{ blockIndex: 1, caseName: 'test_one' }, ['--markdown-block', `${path}::markdown:1`, '--filter', '::test_one']]]) {
+    await start(selection)
+    const { argv, cwd } = spawns.at(-1)
+    assert.deepEqual(argv.slice(2), [join(workspace, 'pbnpm.exe'), 'test', path, '--engine', 'c', '--ensure-runtime', '-v', ...expected])
+    assert.equal(cwd, workspace)
+  }
 })
 
 after(() => hooks.deregister())

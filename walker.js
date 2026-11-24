@@ -49,29 +49,62 @@ export function DeskWalker({ phase = 'idle' } = {}) {
     const state = { x: 0, y: 0, speed: 0, dir: -1, walking: false }
     const goal = { x: 0, y: 0 }
     let pointer = null
+    let pointerDirty = false
+    /** 「抓着哪扇窗」有没有算过：null（指针在桌面上）也是结果，不能每帧重算。 */
+    let gripChecked = false
     let last = performance.now()
     let raf = 0
     let path = []
-    let layoutKey = ''
     let grip = null
     let targetKey = ''
+    let lastTransform = ''
+    let lastFace = ''
+    let lastGrabbing = ''
+
+    // 地面只在视口尺寸变化时变（任务栏高度读的是 CSS 变量，靠 resize 兜底）。
+    // 逐帧读会 getComputedStyle 一次根元素，等于每帧强制一次样式计算。
+    let groundCache = null, groundKey = ''
+    const ground = () => {
+      const key = `${viewW()}x${viewH()}`
+      if (key !== groundKey) { groundKey = key; groundCache = groundOf(viewW(), viewH()) }
+      return groundCache
+    }
+
+    // 图标 rect 与图层列表同理：只有当图标增删、容器尺寸或平面/景深切换时才需要重读。
+    // 缓存住以后，静止与行走的每一帧都只剩一次 wrap.getBoundingClientRect。
+    let layout = null
+    const invalidate = () => { layout = null }
+    const measure = () => {
+      const icons = [...wrap.querySelectorAll('.world-desktop-icon')]
+      const rects = icons.map(el => el.getBoundingClientRect())
+      // 容器的位置一起量：每帧再读一次会让「写 transform → 读 rect」变成强制同步布局
+      layout = { rect: wrap.getBoundingClientRect(), ground: ground(), icons, rects,
+        plane: icons.map(el => Boolean(el.parentElement && el.parentElement.classList.contains('is-plane'))) }
+      return layout
+    }
+    const plan = () => layout || measure()
 
     const windowTarget = () => {
       if (!pointer) return null
+      // 先把可见性和 z-index 一次读出来再排序：比较器里现读会让每次指针移动
+      // 都按 n log n 次 getComputedStyle 排队（八扇窗就是四十来次），而它们一帧内不会变。
       const frames = [...document.querySelectorAll('.world-window-frame, .world-vscode-window, .world-plugin-window, .world-external-window')]
-        .filter(el => {
+        .map(el => {
           const style = getComputedStyle(el)
-          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'
-        }).sort((a, b) => (Number(getComputedStyle(b).zIndex) || 0) - (Number(getComputedStyle(a).zIndex) || 0))
-      for (const el of frames) {
+          return { el, z: Number(style.zIndex) || 0,
+            visible: style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' }
+        })
+        .filter(item => item.visible)
+        .sort((a, b) => b.z - a.z)
+      for (const { el } of frames) {
         const r = el.getBoundingClientRect()
         if (pointer.x < r.left || pointer.x > r.right || pointer.y < r.top || pointer.y > r.bottom) continue
-        const ground = groundOf(viewW(), viewH())
+        const world = ground()
         // Raised arm: shoulder (61.5,62), hand (85.5,62), relative to feet (42,148).
-        const slope = (1 - ground.scaleAt(ground.horizon)) / (ground.near - ground.horizon)
-        const base = ground.scaleAt(ground.horizon) - slope * ground.horizon
-        const y = ground.clampY((pointer.y + 86 * base) / (1 - 86 * slope))
-        const scale = ground.scaleAt(y)
+        const slope = (1 - world.scaleAt(world.horizon)) / (world.near - world.horizon)
+        const base = world.scaleAt(world.horizon) - slope * world.horizon
+        const y = world.clampY((pointer.y + 86 * base) / (1 - 86 * slope))
+        const scale = world.scaleAt(y)
         const choices = [{ x: r.left - 43.5 * scale, y, dir: 1, edge: r.left },
           { x: r.right + 43.5 * scale, y, dir: -1, edge: r.right }]
           .filter(p => p.x >= WIDTH / 2 * scale && p.x <= viewW() - WIDTH / 2 * scale)
@@ -82,67 +115,75 @@ export function DeskWalker({ phase = 'idle' } = {}) {
       return null
     }
 
-    const plan = () => {
-      const ground = groundOf(viewW(), viewH())
-      const rects = [...document.querySelectorAll('.world-icons.is-plane > .world-desktop-icon')]
-        .map(icon => icon.getBoundingClientRect()).filter(rect => rect.width && rect.height)
-      const key = JSON.stringify(rects.map(r => [r.left, r.top, r.right, r.bottom])) + `${viewW()},${viewH()}`
-      return { ground, rects, key }
-    }
-    const reroute = layout => {
-      layoutKey = layout.key
-      path = routeAroundIcons(state, goal, iconObstacles(layout.rects, layout.ground, WIDTH, HEIGHT), layout.ground, WIDTH)
+    const reroute = () => {
+      const current = plan()
+      // 平面上的图标才是障碍；宽高为 0 的（隐藏或还没量到）不算
+      const rects = current.rects.filter((rect, i) => current.plane[i] && rect.width && rect.height)
+      path = routeAroundIcons(state, goal, iconObstacles(rects, current.ground, WIDTH, HEIGHT), current.ground, WIDTH)
     }
 
     const aim = (clientX, clientY) => {
-      const ground = groundOf(viewW(), viewH())
-      const y = ground.clampY(clientY)
+      const world = ground()
+      const y = world.clampY(clientY)
       // 远处的角色更小，横向留边也要按缩放后的宽度算
-      const margin = WIDTH * ground.scaleAt(y) / 2 + 4
+      const margin = WIDTH * world.scaleAt(y) / 2 + 4
       goal.x = Math.min(Math.max(clientX, margin), viewW() - margin)
       goal.y = y
-      reroute(plan())
+      reroute()
     }
 
     const reset = () => {
-      const ground = groundOf(viewW(), viewH())
+      const world = ground()
       state.x = viewW() * .62
-      state.y = ground.near - 96
+      state.y = world.near - 96
       state.speed = 0
       goal.x = state.x
       goal.y = state.y
     }
 
-    const paint = rect => {
-      const scale = groundOf(viewW(), viewH()).scaleAt(state.y)
-      const tx = state.x - rect.left - WIDTH / 2
-      const ty = state.y - rect.top - HEIGHT
-      host.style.transform = `translate3d(${tx.toFixed(1)}px, ${ty.toFixed(1)}px, 0) scale(${scale.toFixed(3)})`
-      face.style.transform = `scaleX(${state.dir})`
-      const layers = [...wrap.querySelectorAll('.world-desktop-icon')].map(el => ({ el, y: el.getBoundingClientRect().bottom }))
+    // 只写真正变了的样式：transform 每帧重写会让层合成器每帧重建，
+    // z-index 每帧全区重写会连带触发整棵图标层的样式重算。
+    const paint = () => {
+      const current = plan()
+      const scale = current.ground.scaleAt(state.y)
+      const tx = state.x - current.rect.left - WIDTH / 2
+      const ty = state.y - current.rect.top - HEIGHT
+      const transform = `translate3d(${tx.toFixed(1)}px, ${ty.toFixed(1)}px, 0) scale(${scale.toFixed(3)})`
+      if (transform !== lastTransform) { lastTransform = transform; host.style.transform = transform }
+      const faceTransform = `scaleX(${state.dir})`
+      if (faceTransform !== lastFace) { lastFace = faceTransform; face.style.transform = faceTransform }
+      if (document.body.dataset.worldDepth !== 'on') return
+      const layers = current.icons.map((el, i) => ({ el, y: current.rects[i].bottom }))
       layers.push({ el: host, y: state.y })
-      if (document.body.dataset.worldDepth === 'on') {
-        layers.sort((a, b) => a.y - b.y).forEach(({ el }, i) => { el.style.zIndex = String(i + 1) })
-      }
+      // 同一深度时它站在图标后面：绕行终点正好是图标底边，平手就压住图标的字是没道理的。
+      layers.sort((a, b) => (a.y - b.y) || (a.el === host ? -1 : b.el === host ? 1 : 0))
+      layers.forEach(({ el }, i) => { const z = String(i + 1); if (el.style.zIndex !== z) el.style.zIndex = z })
     }
 
     const step = now => {
-      raf = window.requestAnimationFrame(step)
+      raf = 0
       const dt = Math.min(Math.max((now - last) / 1000, 0), .05)
       last = now
-      if (!dt) return
+      if (!dt) { raf = window.requestAnimationFrame(step); return }
 
-      const nextGrip = windowTarget()
+      // 只有指针真的动过才重新找「抓着哪扇窗」：每找一次要对每个窗口做三次
+      // getComputedStyle，而上一帧刚写过 transform，这一次读就是强制同步样式计算——
+      // 走动时每帧一次，实测 2 秒里 121 次样式重算。窗口移动必然伴随指针移动，不会漏；
+      // 「指针不在窗口上」也是有效结果，不能因为拿到 null 就每帧重找。
+      const dirty = pointerDirty || !gripChecked
+      pointerDirty = false
+      gripChecked = true
+      const nextGrip = dirty ? windowTarget() : grip
       const key = nextGrip ? `${nextGrip.x},${nextGrip.y},${nextGrip.dir}` : ''
       if (key !== targetKey) {
         targetKey = key
         grip = nextGrip
-        if (grip) { goal.x = grip.x; goal.y = grip.y; reroute(plan()) }
+        if (grip) { goal.x = grip.x; goal.y = grip.y; reroute() }
         else if (pointer) aim(pointer.x, pointer.y)
+      } else if (dirty && pointer && !grip) {
+        aim(pointer.x, pointer.y)
       }
 
-      const layout = plan()
-      if (layout.key !== layoutKey) reroute(layout)
       const target = path[0] || state
       const dx = target.x - state.x
       const dy = target.y - state.y
@@ -175,42 +216,70 @@ export function DeskWalker({ phase = 'idle' } = {}) {
       }, 0)
       const walking = state.walking ? remaining > WALK_OFF : remaining > WALK_ON
       const grabbing = grip && !grip.unreachable && !walking && Math.hypot(state.x - grip.x, state.y - grip.y) < ARRIVE
-      host.dataset.grabbing = grabbing ? 'on' : 'off'
+      const grabbingValue = grabbing ? 'on' : 'off'
+      if (grabbingValue !== lastGrabbing) { lastGrabbing = grabbingValue; host.dataset.grabbing = grabbingValue }
       if (grabbing) state.dir = grip.dir
       if (walking !== state.walking) {
         state.walking = walking
         host.dataset.walking = walking ? 'on' : 'off'
       }
-      paint(wrap.getBoundingClientRect())
+      paint()
+
+      // 站定了就停掉循环：没有目标、指针也没动时，桌面上一帧都不用算。
+      // 指针一动、图标/窗口变化或视口改变都会 wake()，所以不会漏掉响应。
+      if (path.length || dirty) raf = window.requestAnimationFrame(step)
     }
 
+    const wake = () => {
+      if (raf) return
+      last = performance.now()
+      raf = window.requestAnimationFrame(step)
+    }
+
+    // 指针只做记录：真正的选目标、重排路线都交给下一帧的 step，
+    // 免得 pointermove 每秒几百次时每次都跑一遍 windowTarget（每个窗口三次 getComputedStyle）。
     const onMove = event => {
       pointer = { x: event.clientX, y: event.clientY }
-      const nextGrip = windowTarget()
-      if (nextGrip) {
-        grip = nextGrip
-        targetKey = `${grip.x},${grip.y},${grip.dir}`
-        goal.x = grip.x
-        goal.y = grip.y
-        reroute(plan())
-      } else { grip = null; targetKey = ''; aim(pointer.x, pointer.y) }
+      pointerDirty = true
+      wake()
     }
 
     const onResize = () => {
+      invalidate()
+      gripChecked = false
       if (pointer) aim(pointer.x, pointer.y)
       else aim(goal.x, goal.y)
+      wake()
     }
 
+    // 图标增删、3D/平面切换、窗口开关都会改变障碍与图层顺序：缓存作废并立刻重排。
+    const iconWatcher = new MutationObserver(() => { invalidate(); wake() })
+    iconWatcher.observe(wrap, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] })
+    const depthWatcher = new MutationObserver(() => { invalidate(); wake() })
+    depthWatcher.observe(document.body, { attributes: true, attributeFilter: ['data-world-depth'] })
+    // 容器自己的位置/尺寸变了（宿主侧栏收起、任务栏换高度都不经过 window resize）：
+    // 缓存的 rect 与图标矩形一起作废，否则它会在错位的地方走。
+    const sizeWatcher = new ResizeObserver(() => { invalidate(); wake() })
+    sizeWatcher.observe(wrap)
+    // 右键菜单里的「整理图标」只写 style.left/top，既不改 class 也不增删节点，
+    // 上面几个观察器都看不见。按一次指针就把缓存作废一次（每个手势多量一遍图标，可忽略）。
+    const onPointerDown = () => { invalidate(); gripChecked = false; wake() }
+    window.addEventListener('pointerdown', onPointerDown, { passive: true })
+
     reset()
-    paint(wrap.getBoundingClientRect())
+    paint()
     window.addEventListener('pointermove', onMove, { passive: true })
     window.addEventListener('pointerover', onMove, { passive: true })
     window.addEventListener('resize', onResize)
-    raf = window.requestAnimationFrame(step)
+    wake()
     return () => {
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerover', onMove)
       window.removeEventListener('resize', onResize)
+      window.removeEventListener('pointerdown', onPointerDown)
+      iconWatcher.disconnect()
+      depthWatcher.disconnect()
+      sizeWatcher.disconnect()
       if (raf) window.cancelAnimationFrame(raf)
     }
   }, [])

@@ -7,15 +7,12 @@
  * and native scrolling intact while the text is coloured.
  */
 
-/** Above this many characters colouring costs more than it is worth; the editor falls back to plain text. */
-export const MAX_HIGHLIGHT = 200_000
-
 const TYPE_ALIAS = { kw: 'kw', ctl: 'ctl', fn: 'fn', type: 'type', str: 'str', num: 'num', cmt: 'cmt', key: 'key', tag: 'tag', attr: 'attr', var: 'var', meta: 'meta' }
 
 /** Collects tokens into per-line buckets, splitting on newlines inside a token. */
-function createBuilder() {
-  const lines = [[]]
-  let current = lines[0]
+function createBuilder(prefix = []) {
+  const lines = [...prefix, []]
+  let current = lines[lines.length - 1]
   const push = (type, text) => {
     const last = current[current.length - 1]
     if (last && last.type === type) { last.text += text; return }
@@ -73,9 +70,9 @@ const SQL_CONTROL = new Set([
 ])
 const SQL_KEYWORD = new Set(['null', 'true', 'false', 'primary', 'key', 'foreign', 'references', 'default', 'unique', 'index', 'view'])
 
-const PB_CONTROL = new Set(('if then else elseif end for to step next do loop while until choose case return exit continue try catch finally throw halt goto on event call trigger select from where into using connect disconnect commit rollback fetch declare cursor open close execute prepare describe').split(' '))
-const PB_KEYWORD = new Set(('global local shared public private protected type within forward prototypes variables function subroutine library alias system rpc ref readonly autoinstantiate and or not mod create destroy this super parent ancestor throws dynamic sqlsa sqlca true false null').split(' '))
-const PB_TYPES = new Set(('any blob boolean byte char character date datetime decimal dec double integer int long longlong longptr real string time uint unsignedinteger ulong unsignedlong window userobject application transaction datawindow datastore commandbutton statictext singlelineedit multilineedit').split(' '))
+export const PB_CONTROL = new Set(('if then else elseif end for to step next do loop while until choose case return exit continue try catch finally throw halt goto on event call trigger select from where into using connect disconnect commit rollback fetch declare cursor open close execute prepare describe').split(' '))
+export const PB_KEYWORD = new Set(('global local shared public private protected type within forward prototypes variables function subroutine library alias system rpc ref readonly autoinstantiate and or not mod create destroy this super parent ancestor throws dynamic sqlsa sqlca true false null').split(' '))
+export const PB_TYPES = new Set(('any blob boolean byte char character date datetime decimal dec double integer int long longlong longptr real string time uint unsignedinteger ulong unsignedlong window userobject application transaction datawindow datastore commandbutton statictext singlelineedit multilineedit').split(' '))
 
 const CODE_SPECS = {
   powerbuilder: { line: ['//'], block: [['/*', '*/']], quotes: '\'"', control: PB_CONTROL, keyword: PB_KEYWORD,
@@ -91,7 +88,7 @@ const CODE_SPECS = {
   shell: { line: ['#'], block: [], quotes: '\'"', control: SH_CONTROL, keyword: SH_KEYWORD, varRe: /(?:^|[^\\])\$(?:\{[^}\n]*\}|[A-Za-z_]\w*|[0-9@*#?$!-])/y, keys: /[ \t]*[A-Za-z_]\w*(?=[ \t]*=)/y },
   batch: { line: ['::', 'rem '], block: [], quotes: '"', control: new Set(['if', 'else', 'for', 'goto', 'call', 'exit', 'not', 'exist', 'errorlevel']), keyword: new Set(['echo', 'set', 'setlocal', 'endlocal', 'cd', 'pushd', 'popd', 'start', 'echo.', 'pause', 'type', 'del', 'copy', 'move', 'mkdir']), insensitive: true, varRe: /%[^%\n]*%/y },
   powershell: { line: ['#'], block: [['<#', '#>']], quotes: '\'"', control: PS_CONTROL, keyword: PS_KEYWORD, varRe: /\$(?:\{[^}\n]*\}|[A-Za-z_]\w*)/y },
-  yaml: { line: ['#'], block: [], quotes: '\'"', control: new Set([]), keyword: new Set([]), constant: new Set(['true', 'false', 'null', 'yes', 'no', 'on', 'off', '~']), keys: /[ \t]*(?:-[ \t]+)?(?:"[^"\n]*"|'[^'\n]*'|[^\s:#][^:#\n]*?)(?=[ \t]*:(?:[ \t]|$))/y },
+  yaml: { line: ['#'], block: [], quotes: '\'"', control: new Set([]), keyword: new Set([]), constant: new Set(['true', 'false', 'null', 'yes', 'no', 'on', 'off', '~']), keys: /[ \t]*(?:-[ \t]+)?(?:"[^"\n]*"|'[^'\n]*'|[^\s:#][^:#\n]*?)(?=[ \t]*:(?:[ \t\n]|$))/y },
   toml: { line: ['#'], block: [], quotes: '\'"', control: new Set(['true', 'false']), keyword: new Set([]), keys: /[ \t]*[A-Za-z0-9_.-]+(?=[ \t]*=)/y, sections: true },
   ini: { line: [';', '#'], block: [], quotes: '\'"', control: new Set(['true', 'false', 'on', 'off', 'yes', 'no']), keyword: new Set([]), keys: /[ \t]*[A-Za-z0-9_.-]+(?=[ \t]*=)/y, sections: true, insensitive: true },
 }
@@ -160,24 +157,52 @@ function atLineHead(source, index) {
   return true
 }
 
-/** Plain token rows, used for huge files and unknown languages. */
+/** Plain token rows for files with no known syntax. */
 export function plainLines(source) {
   const builder = createBuilder()
   builder.text('punc', source)
   return builder.lines
 }
 
+function resumeComment(source, builder, state, marker) {
+  if (!state?.blockComment) return 0
+  const close = source.indexOf(marker), end = close < 0 ? source.length : close + marker.length
+  state.blockComment = close < 0
+  builder.text('cmt', source.slice(0, end))
+  return end
+}
+
+function quotedEnd(source, cursor, quote, escape, multiline, state) {
+  while (cursor < source.length) {
+    if (source[cursor] === escape && source[cursor + 1] !== '\n') { cursor += 2; continue }
+    if (source.startsWith(quote, cursor)) { if (state) state.quote = ''; return cursor + quote.length }
+    if (source[cursor] === '\n' && !multiline) break
+    cursor++
+  }
+  if (state) state.quote = multiline ? quote : ''
+  return Math.min(cursor, source.length)
+}
+
 /** Scan a C-like language: line/block comments, quoted strings, numbers, keywords. */
-function scanCode(source, spec) {
-  const builder = createBuilder()
+function scanCode(source, spec, resume, lineState) {
+  const builder = createBuilder(resume?.lines)
   const length = source.length
   const { control, keyword, constant } = spec
-  let index = 0
+  let index = resume?.offset || resumeComment(source, builder, lineState, spec.block?.[0]?.[1])
+  if (lineState?.quote) {
+    index = quotedEnd(source, 0, lineState.quote, spec.escape || '\\', true, lineState)
+    builder.text('str', source.slice(0, index))
+  }
   while (index < length) {
     const code = source.charCodeAt(index)
-    if (code === 10) { builder.text('punc', '\n'); index++; continue }
+    if (code === 10) {
+      builder.text('punc', '\n'); index++
+      // Only top-level newlines are restart points, never lines inside a string/comment.
+      resume?.checkpoints.push({ offset: index, line: builder.lines.length - 1 })
+      continue
+    }
 
-    if (spec.metadata && atLineHead(source, index)) {
+    if (spec.metadata && (code === 64 || code === 36) && atLineHead(source, index)) {
       spec.metadata.lastIndex = index
       const match = spec.metadata.exec(source)
       if (match) { builder.text('meta', match[0]); index = spec.metadata.lastIndex; continue }
@@ -191,10 +216,16 @@ function scanCode(source, spec) {
       }
     }
 
-    if (spec.keys && atLineHead(source, index)) {
+    if (spec.keys && (index === 0 || source[index - 1] === '\n')) {
       spec.keys.lastIndex = index
       const match = spec.keys.exec(source)
       if (match && match[0].trim()) { builder.text('key', match[0]); index = spec.keys.lastIndex; continue }
+    }
+
+    if (code === 32 || code === 9) {
+      let end = index + 1
+      while (end < length && (source[end] === ' ' || source[end] === '\t')) end++
+      builder.text('punc', source.slice(index, end)); index = end; continue
     }
 
     if (spec.line?.length) {
@@ -211,6 +242,7 @@ function scanCode(source, spec) {
       const pair = spec.block.find(([open]) => source.startsWith(open, index))
       if (pair) {
         const close = source.indexOf(pair[1], index + pair[0].length)
+        if (lineState) lineState.blockComment = close < 0
         const end = close < 0 ? length : close + pair[1].length
         builder.text('cmt', source.slice(index, end)); index = end; continue
       }
@@ -220,16 +252,9 @@ function scanCode(source, spec) {
       const triple = spec.triples?.find(marker => source.startsWith(marker, index))
       const quote = triple ?? source[index]
       const multiLine = Boolean(triple) || quote === '`'
-      let cursor = index + quote.length
-      while (cursor < length) {
-        const current = source[cursor]
-        if (current === (spec.escape || '\\') && source[cursor + 1] !== '\n') { cursor += 2; continue }
-        if (source.startsWith(quote, cursor)) { cursor += quote.length; break }
-        if (current === '\n' && !multiLine) break
-        cursor++
-      }
-      builder.text('str', source.slice(index, Math.min(cursor, length)))
-      index = Math.min(cursor, length); continue
+      const end = quotedEnd(source, index + quote.length, quote, spec.escape || '\\', multiLine, lineState)
+      builder.text('str', source.slice(index, end)); index = end
+      continue
     }
 
     if (spec.varRe && (code === 36 || code === 37)) {
@@ -279,11 +304,41 @@ function scanCode(source, spec) {
   return builder.lines
 }
 
+/** One physical line for the live SRW stream parser. Only block comments cross lines
+ * in this tokenizer. Both editor surfaces share token rules and theme class names. */
+export function powerScriptLineTokens(line, state) {
+  return scanCode(line, CODE_SPECS.powerbuilder, undefined, state)[0]
+}
+
+/** A PB line is determined by its text and its incoming block-comment state.
+ * Reuse rows across newline insertions/deletions without keeping old document revisions.
+ * Store only .rows after the pass; retaining the scanner would chain previous passes.
+ * One entry per unique line means roughly 9× the text size (a 200 KiB draft ≈ 2 MiB,
+ * the ceiling of the native editor), and the map is rebuilt per pass. */
+export function powerScriptPass(previous) {
+  const rows = [new Map(), new Map()]
+  function scan(line, state) {
+    const mode = state.blockComment ? 1 : 0, map = rows[mode]
+    let entry = map.get(line) || previous?.[mode].get(line)
+    if (!entry) {
+      // A substring can pin an entire textarea snapshot through a single surviving token.
+      // Make one independent UTF-16 string on a miss, not one copy per token or keystroke.
+      // 前缀拼接再切片会生成一个不共享父 buffer 的扁平字符串，比 JSON 往返便宜得多。
+      const own = (' ' + line).slice(1)
+      const tokens = powerScriptLineTokens(own, state)
+      entry = { text: own, tokens, blockComment: Boolean(state.blockComment) }
+    }
+    map.set(entry.text, entry); state.blockComment = entry.blockComment
+    return entry.tokens
+  }
+  return { rows, scan }
+}
+
 /** JSON: keys, strings, numbers and literals. */
-function scanJson(source) {
+function scanJson(source, state) {
   const builder = createBuilder()
   const length = source.length
-  let index = 0
+  let index = resumeComment(source, builder, state, '*/')
   while (index < length) {
     const char = source[index]
     if (char === '\n') { builder.text('punc', '\n'); index++; continue }
@@ -303,6 +358,7 @@ function scanJson(source) {
     }
     if (char === '/' && source[index + 1] === '*') {
       const end = source.indexOf('*/', index + 2)
+      if (state) state.blockComment = end < 0
       const stop = end < 0 ? length : end + 2
       builder.text('cmt', source.slice(index, stop)); index = stop; continue
     }
@@ -325,16 +381,17 @@ function scanJson(source) {
 }
 
 /** CSS/SCSS: selectors before `{`, declarations inside it. */
-function scanCss(source) {
+function scanCss(source, state) {
   const builder = createBuilder()
   const length = source.length
-  let index = 0
-  let inBlock = false
+  let index = resumeComment(source, builder, state, '*/')
+  let inBlock = state?.inBlock || false
   while (index < length) {
     const char = source[index]
     if (char === '\n') { builder.text('punc', '\n'); index++; continue }
     if (char === '/' && source[index + 1] === '*') {
       const end = source.indexOf('*/', index + 2)
+      if (state) state.blockComment = end < 0
       const stop = end < 0 ? length : end + 2
       builder.text('cmt', source.slice(index, stop)); index = stop; continue
     }
@@ -401,20 +458,22 @@ function scanCss(source) {
     }
     builder.text('punc', char); index++
   }
+  if (state) state.inBlock = inBlock
   return builder.lines
 }
 
 /** HTML/XML: comments, tag names, attribute names and values. */
-function scanMarkup(source) {
+function scanMarkup(source, state) {
   const builder = createBuilder()
   const length = source.length
-  let index = 0
-  let inTag = false
+  let index = resumeComment(source, builder, state, '-->')
+  let inTag = state?.inTag || false
   while (index < length) {
     const char = source[index]
     if (char === '\n') { builder.text('punc', '\n'); index++; continue }
     if (source.startsWith('<!--', index)) {
       const end = source.indexOf('-->', index + 4)
+      if (state) state.blockComment = end < 0
       const stop = end < 0 ? length : end + 3
       builder.text('cmt', source.slice(index, stop)); index = stop; continue
     }
@@ -458,23 +517,116 @@ function scanMarkup(source) {
     builder.text('punc', source.slice(index, cursor))
     index = cursor
   }
+  if (state) state.inTag = inTag
   return builder.lines
 }
 
+// Keep only primitives in state: the viewport tokenizer checkpoints it with a shallow copy.
+const PB_FENCES = new Set(['pbtest', 'powerscript', 'powerbuilder'])
+const embeddedCpp = { ...CODE_SPECS.clike,
+  keyword: new Set('alignas auto const constexpr extern inline namespace new nullptr operator private public sizeof static struct template typedef typename union using virtual volatile'.split(' ')),
+  types: new Set('bool char double float int int32_t int64_t long short signed uint32_t uint64_t unsigned void'.split(' ')) }
+
+export function markdownRegion(line, state) {
+  // Without a backtick or tilde no fence marker can start, so the line keeps the current
+  // region. This is the per-line hot path for prose and for code inside a fence.
+  if (line.indexOf('`') < 0 && line.indexOf('~') < 0) return state.fence ? (state.pbFence ? 'pb' : 'other') : 'prose'
+  const match = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line.replace(/\r$/u, ''))
+  if (state.fence) {
+    if (!match || match[1][0] !== state.fence[0] || match[1].length < state.fence.length || match[2].trim())
+      return state.pbFence ? 'pb' : 'other'
+    state.fence = ''; state.fenceLang = ''; state.pbFence = false
+    return 'close'
+  }
+  if (!match || (match[1][0] === '`' && match[2].includes('`'))) return 'prose'
+  state.fence = match[1]
+  state.fenceLang = match[2].trim().split(/[\s:;,?{]/u, 1)[0].toLowerCase()
+  state.pbFence = PB_FENCES.has(state.fenceLang)
+  state.blockComment = false; state.quote = ''; state.native = ''
+  return 'open'
+}
+
+function embeddedLine(line, state) {
+  if (!state.blockComment && !state.quote) {
+    if (!state.native) {
+      const begin = /^\s*@(c|cpb|cs|cspb|rust|rustpb|go|gopb|pypb)(?:\s|$)/iu.exec(line)
+      if (begin) { state.native = begin[1].toLowerCase(); return [{ type: 'meta', text: line }] }
+    } else if (/^\s*@end\s+(\w+)\s*$/iu.exec(line)?.[1].toLowerCase() === state.native) {
+      state.native = ''; return [{ type: 'meta', text: line }]
+    }
+  }
+  const spec = !state.native ? CODE_SPECS.powerbuilder : state.native === 'pypb' ? CODE_SPECS.python : embeddedCpp
+  return scanCode(line, spec, undefined, state)[0]
+}
+
+/** Local fence ordinals match pbnpm --markdown-block (including shared-only PB fences).
+ * Leave includes, metadata, and test compilation to the CLI, using the original file. */
+// The lexical part is independent of line numbers and previously discovered tests.
+// A CM leaf can replay its sparse events whenever its incoming fence/comment state matches.
+const testLead = /^(?:@|(?:end|forward|type|public|private|protected|global|local|subroutine|function)\b)/i
+export function markdownTestEvent(line, state) {
+  const region = markdownRegion(line, state)
+  if (region === 'open' && state.pbFence) return true
+  if (region !== 'pb') return null
+  // In ordinary PB strings close at EOL. A non-declaration only needs the lexer
+  // when it might change the state carried into the next line.
+  if (!state.native && !state.quote && !state.blockComment && !line.includes('/*') && !testLead.test(line.trimStart())) return null
+  const tokens = embeddedLine(line, state)
+  if (state.native) return null
+  const code = tokens.map(t => t.type === 'cmt' ? ' ' : t.text).join('').trim()
+  return testLead.test(code) ? code : null
+}
+export function markdownTestCollector() {
+  const blocks = []
+  let block, routine, section = ''
+  function accept(code, n) {
+    if (code === true) {
+      block = { index: blocks.length + 1, line: n, cases: [] }; blocks.push(block)
+      routine = null; section = ''; return
+    }
+    if (section) { if (section.test(code)) section = ''; return }
+    if (/^(?:forward|type)\s+prototypes$/i.test(code)) { section = /^end\s+prototypes$/i; return }
+    if (/^@[\w]+\.sr\w\..*;$/i.test(code)) { section = /^@(?:[\w]+\.sr\w\.)?end\s/i; return }
+    const signature = /^(?:(?:public|private|protected|global|local)\s+)?(subroutine|function)\s+(?:\w+\s+)?(\w+)\s*\([^)]*\)\s*;?$/i.exec(code)
+    if (signature) routine = { kind: signature[1].toLowerCase(), name: signature[2], line: n }
+    else if (routine && /^end\s+(subroutine|function)\s*;?$/i.exec(code)?.[1].toLowerCase() === routine.kind) {
+      if (/^test_/i.test(routine.name)) block.cases.push({ name: routine.name, line: routine.line })
+      routine = null
+    }
+  }
+  function finish() {
+    // The native --filter is a substring match. Never label a prefix collision a single-case run.
+    for (const { cases } of blocks) {
+      const names = cases.map(c => c.name.toLowerCase()).sort()
+      const ambiguous = new Set(names.filter((name, i) => names[i + 1]?.startsWith(name)))
+      for (const c of cases) if (ambiguous.has(c.name.toLowerCase())) c.ambiguous = true
+    }
+    return blocks
+  }
+  return { accept, finish }
+}
+export function markdownTestBlocks(source) {
+  const state = {}, collector = markdownTestCollector()
+  let n = 0
+  for (const line of source.split('\n')) {
+    n++; const event = markdownTestEvent(line, state)
+    if (event !== null) collector.accept(event, n)
+  }
+  return collector.finish()
+}
+
 /** Markdown: fences, headings, quotes, list bullets and inline emphasis. */
-function scanMarkdown(source) {
+function scanMarkdown(source, state = {}) {
   const builder = createBuilder()
   const lines = source.split('\n')
-  let fence = ''
   for (let index = 0; index < lines.length; index++) {
-    const line = lines[index]
-    const fenceMatch = /^\s*(`{3,}|~{3,})/u.exec(line)
-    if (fence) {
-      builder.text('str', line)
-      if (fenceMatch && fenceMatch[1][0] === fence[0] && fenceMatch[1].length >= fence.length) fence = ''
-    } else if (fenceMatch) {
-      fence = fenceMatch[1]
+    const line = lines[index], region = markdownRegion(line, state)
+    if (region === 'open' || region === 'close') {
       builder.text('kw', line)
+    } else if (region === 'pb') {
+      for (const token of embeddedLine(line, state)) builder.text(token.type, token.text)
+    } else if (region === 'other') {
+      builder.text('str', line)
     } else if (/^\s*#{1,6}\s/u.test(line)) {
       builder.text('kw', line)
     } else if (/^\s*>/u.test(line)) {
@@ -502,19 +654,55 @@ function scanMarkdown(source) {
   return builder.lines
 }
 
-/**
- * Token rows for `source`. Unknown languages and oversized files come back as a
- * single plain token per line so the caller can paint them exactly like before.
- */
+const markupScanners = { json: scanJson, css: scanCss, html: scanMarkup, xml: scanMarkup, markdown: scanMarkdown }
+
+function scanKnown(text, language, state) {
+  if (Object.hasOwn(CODE_SPECS, language)) return scanCode(text, CODE_SPECS[language], undefined, state)
+  if (Object.hasOwn(markupScanners, language)) return markupScanners[language](text, state)
+  return null
+}
+
+/** Stateful line tokenizer for virtual editors. */
+export function syntaxLine(line, language, state) {
+  return scanKnown(line, language, state)?.[0] ?? []
+}
+
 export function highlight(source, language) {
-  const text = String(source ?? '')
-  if (!language || text.length > MAX_HIGHLIGHT) return { lines: plainLines(text), plain: true }
-  let lines
-  if (language === 'json') lines = scanJson(text)
-  else if (language === 'css') lines = scanCss(text)
-  else if (language === 'html' || language === 'xml') lines = scanMarkup(text)
-  else if (language === 'markdown') lines = scanMarkdown(text)
-  else if (CODE_SPECS[language]) lines = scanCode(text, CODE_SPECS[language])
-  else lines = plainLines(text)
-  return { lines, plain: false }
+  const text = String(source ?? ''), lines = scanKnown(text, language)
+  return lines ? { lines, plain: false } : { lines: plainLines(text), plain: true }
+}
+
+/** Per-editor cache: keep complete unchanged lines and rescan from a safe lexical boundary. */
+export function createHighlighter() {
+  let previous = null
+  return (source, language) => {
+    const text = String(source ?? '')
+    if (previous?.language === language && previous.text === text) return previous.result
+    if (language === 'powerbuilder') {
+      const pass = powerScriptPass(previous?.pbRows), state = {}
+      const result = { lines: text.split('\n').map(line => pass.scan(line, state)), plain: false }
+      previous = { text, language, result, pbRows: pass.rows }
+      return result
+    }
+    if (!Object.hasOwn(CODE_SPECS, language)) {
+      const result = highlight(text, language)
+      previous = { text, language, result }
+      return result
+    }
+    let offset = 0, lines = [], checkpoints = [{ offset: 0, line: 0 }]
+    if (previous?.language === language && previous.checkpoints) {
+      const limit = Math.min(text.length, previous.text.length)
+      let same = 0
+      while (same < limit && text.charCodeAt(same) === previous.text.charCodeAt(same)) same++
+      let index = previous.checkpoints.length - 1
+      while (index > 0 && previous.checkpoints[index].offset > same) index--
+      const point = previous.checkpoints[index]
+      offset = point.offset
+      lines = previous.result.lines.slice(0, point.line)
+      checkpoints = previous.checkpoints.slice(0, index + 1)
+    }
+    const result = { lines: scanCode(text, CODE_SPECS[language], { offset, lines, checkpoints }), plain: false }
+    previous = { text, language, result, checkpoints }
+    return result
+  }
 }

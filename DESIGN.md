@@ -276,7 +276,7 @@ main（keyed，宿主 AppFrame 声明）
 | 语言 | 扩展名 / 文件名映射到 16 个家族：JS/TS、JSON、CSS、HTML/XML、Markdown、Python、Shell、Batch、PowerShell、YAML、TOML、INI、C 系、Ruby、Lua、SQL |
 | 配色 | Dark+ 一套 token 色：注释 `#6a9955`、字符串 `#ce9178`、关键字 `#569cd6`、控制流 `#c586c0`、函数 `#dcdcaa`、类型 `#4ec9b0`、数字 `#b5cea8`、键/属性 `#9cdcfe`、常量 `#4fc1ff` |
 | 选区 | textarea 文字透明，`::selection` 用 `rgba(38,79,120,.7)` 盖在高亮层上——选中的字仍然读得出来，这是透明文字方案最容易翻车的地方 |
-| 退化 | 超过 `200_000` 字符、或语言不认识时直接返回纯文本行，不为颜色拖慢窗口 |
+| 退化 | 未识别语言使用纯文本；较大源码走虚拟视口着色，不设字符数上限 |
 
 #### 输入手感
 

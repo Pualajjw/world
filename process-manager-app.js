@@ -1,4 +1,5 @@
 import React from 'react'
+import { StartupPage } from './startup-app.js'
 import { StoragePage } from './storage-manager-app.js'
 import { ProcessPortsPage } from './process-ports-app.js'
 
@@ -18,22 +19,23 @@ export const PROCESS_APPS = [
   { key: 'world-processes', label: '进程管理器', icon: ProcessesGlyph, description: 'DSH 进程 · 端口占用 · 存储明细与空间清理' },
 ]
 
-export function ProcessesPage({ rpc, visible = true }) {
+export function ProcessesPage({ rpc, visible = true, autoSample = true }) {
   const [tab, setTab] = React.useState('processes')
   return h('div', { className: 'world-resource-manager' },
     h('div', { className: 'world-resource-tabs', role: 'tablist', 'aria-label': '资源管理视图' },
-      ...[['processes', '进程'], ['ports', '端口占用'], ['storage', '存储与清理']].map(([id, label]) =>
+      ...[['processes', '进程'], ['ports', '端口占用'], ['storage', '存储与清理'], ['startup','启动项']].map(([id, label]) =>
         h('button', { type: 'button', key: id, role: 'tab', 'aria-selected': tab === id,
           onClick: () => setTab(id) }, label))),
     h('div', { className: 'world-resource-panel', hidden: tab !== 'processes', role: 'tabpanel', 'aria-label': '进程' },
-      h(ProcessList, { rpc, visible: visible && tab === 'processes' })),
+      h(ProcessList, { rpc, visible: visible && tab === 'processes', autoSample })),
     h('div', { className: 'world-resource-panel', hidden: tab !== 'ports', role: 'tabpanel', 'aria-label': '端口占用' },
       tab === 'ports' && h(ProcessPortsPage, { rpc, visible })),
+    tab === 'startup' && h('div',{className:'world-resource-panel',role:'tabpanel','aria-label':'启动项'}, h(StartupPage,{rpc,visible})),
     h('div', { className: 'world-resource-panel', hidden: tab !== 'storage', role: 'tabpanel', 'aria-label': '存储与清理' },
       h(StoragePage, { rpc, visible: visible && tab === 'storage' })))
 }
 
-function ProcessList({ rpc, visible = true }) {
+function ProcessList({ rpc, visible, autoSample }) {
   const [snapshot, setSnapshot] = React.useState(null)
   const [error, setError] = React.useState('')
   const [busy, setBusy] = React.useState(false)
@@ -76,7 +78,7 @@ function ProcessList({ rpc, visible = true }) {
     }
   }, [request])
   React.useEffect(() => {
-    if (!visible || !pageVisible || paused) return
+    if (!visible || !pageVisible || paused || !autoSample) return
     let stopped = false, timer
     const tick = async () => {
       const started = performance.now()
@@ -85,7 +87,7 @@ function ProcessList({ rpc, visible = true }) {
     }
     void tick()
     return () => { stopped = true; window.clearTimeout(timer) }
-  }, [visible, pageVisible, paused, refresh])
+  }, [visible, pageVisible, paused, autoSample, refresh])
   React.useEffect(() => {
     if (!visible || !pageVisible) { snapshotController.current?.abort(); fileController.current?.abort() }
   }, [visible, pageVisible])

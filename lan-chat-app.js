@@ -36,7 +36,7 @@ function Cap({ label, onClick, close, className, pressed, children }) {
   }, children)
 }
 
-export function LanChatWindow({
+export function LanChatWindow({ toolHistory,
   rect, state, rpc, zIndex, pinned = false, onTogglePin,
   onActivate, onClose, onMinimize, onToggleMaximize,
   onDragStart, onDragMove, onDragEnd, onResizeStart,
@@ -113,6 +113,7 @@ export function LanChatWindow({
     'data-world-app': 'lan-chat', 'aria-label': '局域网聊天', 'aria-hidden': minimized,
     style, onPointerDown: onActivate,
   },
+  toolHistory,
   h('header', {
     className: 'world-vscode-titlebar',
     onPointerDown: onDragStart, onPointerMove: onDragMove, onPointerUp: onDragEnd, onPointerCancel: onDragEnd,

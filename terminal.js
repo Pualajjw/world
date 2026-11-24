@@ -14,9 +14,11 @@
  * 先落成临时 .cmd 再整份执行——引号、括号、`&&`、中文都能原样活下来，顺带 `chcp 65001`
  * 把输出固定成 UTF-8。
  */
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { existsSync } from 'node:fs'
+import { delimiter, dirname, isAbsolute, join } from 'node:path'
+import { markdownTestBlocks } from './highlight.js'
 import { createJobRunner } from './job-runner.js'
 
 const MAX_LINE = 4096
@@ -64,7 +66,7 @@ export function escapePercentForBatch(line) {
   return out
 }
 
-export function createWorldTerminal(ctx, { subprocess, FsError, toolDirs = () => [] }) {
+export function createWorldTerminal(ctx, { subprocess, FsError, toolDirs = () => [], openDocument }) {
   const fail = (message, code = 'WORLD_TERMINAL') => { throw new FsError(message, code) }
   const runner = createJobRunner({
     spawn: spec => subprocess.spawn(spec), fail,
@@ -225,6 +227,37 @@ export function createWorldTerminal(ctx, { subprocess, FsError, toolDirs = () =>
           .slice(0, COMPLETE_LIMIT)
           .map(entry => ({ name: entry.name, type: entry.type }))
         return { dir, items }
+      }
+
+      if (operation === 'pbtest') {
+        if (!isWindows()) fail('PBTest 需要 Windows 上的 pbnpm。')
+        if (!/\.(md|markdown)$/iu.test(payload.path) || !openDocument) fail('请选择已打开的 Markdown 文档。')
+        const doc = await openDocument(payload, active)
+        if (doc.version !== payload.version || !doc.version) fail('磁盘文件已变更，请重新打开后运行。')
+        if (doc.encoding !== 'UTF-8' || !isAbsolute(doc.path) || !/\.(md|markdown)$/iu.test(doc.path) ||
+            !(await stat(doc.path).catch(() => null))?.isFile()) fail('只能运行本机磁盘上的 UTF-8 Markdown。')
+        const blocks = markdownTestBlocks(doc.source)
+        if (!blocks.length) fail('文档内没有 PBTest 代码块。')
+        const args = ['test', doc.path, '--engine', 'c', '--ensure-runtime', '-v']
+        if (payload.blockIndex !== undefined || payload.caseName !== undefined) {
+          const block = blocks.find(b => b.index === payload.blockIndex)
+          if (!block) fail('所选 PBTest 代码块不存在。')
+          args.push('--markdown-block', `${doc.path}::markdown:${block.index}`)
+          if (payload.caseName !== undefined) {
+            const item = block.cases.find(c => c.name === payload.caseName)
+            if (!item || item.ambiguous) fail('所选用例不存在，或名称无法唯一筛选。')
+            args.push('--filter', `::${item.name}`)
+          }
+        }
+        const dirs = [...toolDirs(), ...(process.env.PATH || '').split(delimiter)]
+        const exe = dirs.filter(dir => isAbsolute(dir)).map(dir => join(dir, 'pbnpm.exe')).find(path => existsSync(path))
+        if (!exe) fail('找不到 pbnpm.exe，请安装 pbnpm 插件或将其加入 PATH。')
+        runner.prune()
+        if (runner.full()) fail('已有太多命令在运行，请稍后重试。', 'WORLD_TERMINAL_BUSY')
+        // No shell interpolation: Markdown paths and selectors are individual argv entries.
+        return runner.start({ argv: [process.execPath, join(import.meta.dirname, 'pbnpm-run.mjs'), exe, ...args],
+          cwd: dirname(doc.path), signal: active, env: { ELECTRON_RUN_AS_NODE: '1', WORLD_PBNPM_MERGE: '1' },
+          stdio: { stdin: 'ignore', stdout: { maxBytes: MAX_OUTPUT }, stderr: { maxBytes: 4096 } } })
       }
 
       if (operation === 'run') {

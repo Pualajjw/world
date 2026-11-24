@@ -99,7 +99,7 @@ function BrowserError({ error, onRetry, onExternal }) {
  * @param {boolean} props.active 是否前台
  * @param {boolean} props.suspended 开始菜单打开 / 其它应用窗口在前台时隐藏原生视图
  */
-export function BrowserWindow({
+export function BrowserWindow({ toolHistory,
   rect, state, active, suspended, zIndex, pinned = false, onTogglePin,
   onActivate, onClose, onMinimize, onToggleMaximize,
   onDragStart, onDragMove, onDragEnd, onResizeStart, onTakeOver,
@@ -401,7 +401,8 @@ export function BrowserWindow({
     'data-world-app': 'browser', 'data-world-browser-mode': compat ? 'iframe' : 'webview',
     'aria-label': '浏览器', 'aria-hidden': minimized, style, onPointerDown: onActivate,
   },
-    h('header', {
+    toolHistory,
+  h('header', {
       className: 'world-vscode-titlebar',
       onPointerDown: onDragStart, onPointerMove: onDragMove, onPointerUp: onDragEnd, onPointerCancel: onDragEnd,
       onDoubleClick: event => { if (!event.target.closest('button')) onToggleMaximize() },

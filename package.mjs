@@ -2,6 +2,7 @@
 import { readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { packagePlugin } from '../project-tree/package-plugin.mjs'
+import { publishWorldIndex } from './package-index.mjs'
 
 const root = import.meta.dirname
 const output = resolve(root, 'dist')
@@ -9,9 +10,14 @@ await packagePlugin(root, { output, platform: 'universal' })
 
 // dist 只留最新一版 tgz：安装只认 tgz，旧包都能从源码重建，留着只是白占空间。
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
+// 先发布已生成的包，再删旧文件；索引更新失败时保留旧包供当前源继续使用。
+const published = await publishWorldIndex(root, manifest)
+if (published) console.log(`Updated local world index: ${published.path}`)
 const keep = new Set([`${manifest.meta.title}-${manifest.version}-universal.tgz`, `${manifest.meta.title}-${manifest.version}-universal.sha256`])
-const stale = (await readdir(output)).filter(name => !keep.has(name))
-for (const name of stale) await rm(join(output, name), { recursive: true, force: true })
+const stale = (await readdir(output, { withFileTypes: true }))
+  .filter(entry => entry.isFile() && /^world-\d+\.\d+\.\d+(?:-[\w.-]+)?\.(?:tgz|zip|sha256)$/u.test(entry.name) && !keep.has(entry.name))
+  .map(entry => entry.name)
+for (const name of stale) await rm(join(output, name), { force: true })
 if (stale.length) console.log(`Pruned ${stale.length} older artifact(s) from dist`)
 
 // 校验文件里原来还写着 zip 的哈希，但 zip 已经删了——只留 tgz 那一行，免得照着它去核一个不存在的文件。

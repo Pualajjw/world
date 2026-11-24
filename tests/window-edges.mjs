@@ -98,8 +98,26 @@ export async function checkWindowEdges(browser, bundleText) {
     assert.equal(right.h, left.h, '两边高度一致')
 
     // 应用窗口走同一套边缘判定：VSCode 甩到右边也要贴住右边界与任务栏
+    await page.evaluate(() => {
+      window.__worldWorkspaceList = ({ path }) => path === '/workspace' ? { ok: true, value: {
+        entries: Array.from({ length: 1200 }, (_, i) => ({ name: `file-${i}.txt`, type: 'file' })),
+      } } : null
+    })
     await page.locator('[data-world-icon-id="vscode"]').dblclick()
     await page.waitForFunction(() => document.querySelectorAll('.world-vscode-window').length === 1)
+    const editor = page.locator('[data-world-vscode-key]')
+    const row = editor.getByRole('button', { name: 'file-0.txt', exact: true })
+    await row.waitFor()
+    const inheritedRect = () => row.evaluate(node => {
+      const css = getComputedStyle(node)
+      return ['x', 'y', 'w', 'h'].map(key => css.getPropertyValue(`--vscode-${key}`))
+    })
+    const original = await editor.boundingBox(), inherited = await inheritedRect()
+    await editor.getByRole('button', { name: '最大化 Visual Studio Code' }).click()
+    assert.deepEqual(await editor.boundingBox(), { x: 0, y: 40, width: 1280, height: 712 })
+    assert.deepEqual(await inheritedRect(), inherited, 'maximizing must not invalidate file rows via inherited window coordinates')
+    await editor.getByRole('button', { name: '还原 Visual Studio Code' }).click()
+    assert.deepEqual(await editor.boundingBox(), original)
     await fling(page, '.world-vscode-titlebar', { x: 150, y: 20 }, { x: 1278, y: 300 })
     const vscode = await rectOf(page, '.world-vscode-window')
     assert.equal(vscode.right, 1280, 'VSCode 窗口也要贴住右边界')

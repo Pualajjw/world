@@ -124,6 +124,10 @@ test('PowerBuilder projects come from both registries without duplicates', async
     const service = createWorkspaceRoots(ctx, { FsError: FakeFsError, toolDirs: () => [join(home, 'bin')] })
     const result = await service.call('scan', {})
     assert.equal(result.projects.length, 2)
+    const selected = await service.call('scan', {root: workspaceDir})
+    assert.deepEqual(selected.currentProject.libraryNames, ['a.pbl'])
+    assert.equal((await service.project(workspaceDir)).pbtPath, pbt)
+    assert.equal(await service.project(join(workspaceDir, 'a.pbl')), null, 'only exact registered roots are executable')
     const byKind = Object.fromEntries(result.projects.map(item => [item.kind, item]))
     assert.equal(byKind.pbt.root.replace(/\\/gu, '/'), workspaceDir.replace(/\\/gu, '/'))
     assert.equal(byKind.exe.pbVersion, 80)
@@ -136,6 +140,52 @@ test('PowerBuilder projects come from both registries without duplicates', async
   } finally {
     if (previous === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previous
+  }
+})
+
+test('object navigation lists only registered library names, without the explorer cap or reading bodies', async () => {
+  const home = await workspace(), root = join(home, 'demo.workspace')
+  await mkdir(join(home, 'pbnpm-pbd'), { recursive: true })
+  await writeFile(join(home, 'pbnpm-pbd', 'projects.json'), JSON.stringify({ projects: [{ root,
+    pbtPath: join(home, 'demo.exe'), libraries: ['demo.exe.pbd', '../other.pbl', 'missing.pbl'].map(name => ({ name })) }] }))
+  const old = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    const ctx = fakeContext({ directories: [root] }), reads = []
+    ctx.fs.listDir = async path => {
+      reads.push(path.split('/').pop())
+      if (!path.endsWith('/demo.exe.pbd')) throw Error('unavailable')
+      return [...Array.from({ length: 2500 }, (_, i) => ({ type: 'file', name: `obj${i}.sru` })),
+        { type: 'file', name: 'OBJ2499.SRW' }, { type: 'directory', name: 'nested.srw' }, { type: 'file', name: 'extra.txt' }]
+    }
+    const roots = createWorkspaceRoots(ctx, { FsError: FakeFsError, toolDirs: () => [] })
+    await assert.rejects(roots.call('objects', { root: home }), { code: 'WORLD_ROOTS_PROJECT' })
+    const { libraries, skipped } = await roots.call('objects', { root })
+    assert.deepEqual(reads, ['demo.exe.pbd', 'missing.pbl'])
+    assert.deepEqual(skipped, ['missing.pbl'])
+    assert.equal(libraries.length, 1); assert.equal(libraries[0][1].length, 2501)
+    assert.deepEqual(libraries[0][1].slice(-2), ['obj2499.sru', 'OBJ2499.SRW'])
+  } finally {
+    if (old === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = old
+  }
+})
+
+test('EXE mounts retain the binary entry and the virtual source alias from a real PBD', {skip: process.platform !== 'win32'}, async () => {
+  const home = await workspace(), root = join(home, 'demo.pbd.workspace')
+  const path = join(import.meta.dirname, '../../../../pypower/tests/res/pbcode_test.pbl/test_decompile_all_branches.pbd')
+  await mkdir(join(home, 'pbnpm-pbd'), { recursive: true })
+  await writeFile(join(home, 'pbnpm-pbd', 'projects.json'), JSON.stringify({ projects: [{ root,
+    pbtPath: join(home, 'demo.exe'), libraries: [{ name: 'alias.pbd', path }] }] }))
+  const old = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    const service = createWorkspaceRoots(fakeContext({ directories: [root] }), { FsError: FakeFsError, toolDirs: () => [] })
+    const result = await service.call('objects', { root, binaryNames: true })
+    assert.deepEqual(result, { libraries: [['alias.pbd', [['test_decompile_all_branches.sra', 'test_decompile_all_branches.apl']]]], skipped: [] })
+  } finally {
+    if (old === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = old
   }
 })
 

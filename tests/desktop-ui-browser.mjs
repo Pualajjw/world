@@ -50,19 +50,21 @@ try {
     const svg = await pointerSvg.boundingBox()
     assert.ok(Math.abs(svg.x - point.x) < .05 && Math.abs(svg.y - point.y) < .05, 'the arrow tip uses actual viewport CSS coordinates')
   }
+  const cardPoint = async () => { const card = await page.locator('.world-control-card').boundingBox()
+    return {x:card.x+(card.width-28)/2,y:card.y-28-8} }
   await pointerSvg.waitFor()
-  await assertPointer({ x: 800, y: 496 })
+  await assertPointer(await cardPoint())
   const pointerStyle = await page.locator('[data-world-assistant-pointer]').evaluate(node => {
     const svg = node.querySelector('svg'), label = node.querySelector('span'), bounds = node.getBoundingClientRect(), box = label.getBoundingClientRect()
     return { width: svg.getBoundingClientRect().width, height: svg.getBoundingClientRect().height, color: getComputedStyle(node).color,
       stroke: getComputedStyle(svg).stroke, strokeWidth: getComputedStyle(svg).strokeWidth, pointerEvents: getComputedStyle(node).pointerEvents,
-      labelX: box.x - bounds.x, labelY: box.y - bounds.y, labelFont: getComputedStyle(label).fontSize, labelPadding: getComputedStyle(label).padding,
+      labelX: box.x - bounds.x, labelClear: box.bottom <= bounds.bottom, labelFont: getComputedStyle(label).fontSize, labelPadding: getComputedStyle(label).padding,
       labelRadius: getComputedStyle(label).borderRadius, labelBackground: getComputedStyle(label).backgroundColor }
   })
   assert.deepEqual(pointerStyle, { width: 28, height: 28, color: 'rgb(76, 194, 255)', stroke: 'rgb(255, 255, 255)', strokeWidth: '1px',
-    pointerEvents: 'none', labelX: 20, labelY: 20, labelFont: '12px', labelPadding: '2px 6px', labelRadius: '4px', labelBackground: 'rgba(32, 32, 34, 0.82)' })
+    pointerEvents: 'none', labelX: 20, labelClear: true, labelFont: '12px', labelPadding: '2px 6px', labelRadius: '4px', labelBackground: 'rgba(32, 32, 34, 0.82)' })
   await page.mouse.move(50, 70)
-  await assertPointer({ x: 800, y: 496 })
+  await assertPointer(await cardPoint())
   assert.equal((await state()).state.control.owner, 'assistant', 'physical mouse movement remains independent')
   await page.locator('[data-world-assistant-toggle]').click()
   assert.equal(await pointerSvg.isVisible(), true, 'collapsing the card keeps the pointer visible')

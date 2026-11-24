@@ -5,12 +5,19 @@ function desktopBounds() {
     : { left: 0, top: 0, right: innerWidth, bottom: innerHeight }
 }
 
+export const POINTER_SIZE = 28
+export const PANEL_GAP = 8
+export function anchorPoint(rect, kind) {
+  return kind === 'record' ? { x: rect.left, y: rect.top + rect.height / 2 }
+    : { x: rect.left + (rect.width - POINTER_SIZE) / 2, y: rect.top - POINTER_SIZE - PANEL_GAP }
+}
+
 /** Independent assistant cursor: only an action from the current grant can move it. */
 const CLICK_ACTIONS = { click: 'click', double_click: 'double', context_click: 'context' }
 const TYPE_ACTIONS = new Set(['fill', 'type_text', 'select_option'])
 
 export function createAssistantPointer({ getControl, getBounds = desktopBounds }) {
-  let state = { visible: false, controlId: null, x: 0, y: 0, pulse: null }
+  let state = { visible: false, controlId: null, x: 0, y: 0, pulse: null, anchor: null, headingHalf: 0 }
   let pulseId = 0
   const listeners = new Set()
   const pulseFor = (action, x, y) => {
@@ -32,25 +39,31 @@ export function createAssistantPointer({ getControl, getBounds = desktopBounds }
   const sync = () => {
     const control = getControl()
     if (control.owner !== 'assistant' || !control.controlId) {
-      publish({ ...state, visible: false, controlId: null, pulse: null })
+      publish({ ...state, visible: false, controlId: null, pulse: null, anchor: null, headingHalf: 0 })
       return
     }
     if (state.controlId === control.controlId) return
-    const bounds = getBounds()
-    publish({ visible: true, controlId: control.controlId, pulse: null,
-      ...clamp({ x: (bounds.left + bounds.right) / 2, y: (bounds.top + bounds.bottom) / 2 }) })
+    // Wait for the committed conversation card. Do not flash at the viewport centre.
+    publish({ ...state, visible: false, controlId: control.controlId, pulse: null, anchor: null, headingHalf: 0 })
   }
   return {
     getSnapshot: () => state,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
     sync,
     resize() { sync(); if (state.visible) publish({ ...state, ...clamp(state) }) },
+    follow(rect, anchor, controlId, initial = false) {
+      const control = getControl()
+      if (!controlId || control.owner !== 'assistant' || controlId !== control.controlId || !rect.width || !rect.height) return
+      // Ordinary resize/scroll notifications must not override an explicit desktop input.
+      if (!initial && state.anchor !== anchor) return
+      publish({ ...state, visible: true, controlId, anchor, headingHalf: anchor === 'record' ? rect.height / 2 : 0, ...clamp(anchorPoint(rect, anchor)) })
+    },
     move(point, controlId, action) {
       const control = getControl()
       if (control.owner !== 'assistant' || !controlId || control.controlId !== controlId
         || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return false
       const next = clamp(point)
-      publish({ ...state, visible: true, controlId, ...next, pulse: pulseFor(action, next.x, next.y) })
+      publish({ ...state, visible: true, controlId, anchor: null, headingHalf: 0, ...next, pulse: pulseFor(action, next.x, next.y) })
       return true
     },
   }

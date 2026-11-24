@@ -11,14 +11,17 @@ function fixture() {
     resize: value => { bounds = value; pointer.resize() } }
 }
 
-test('the assistant pointer starts at the work-area center only after a grant', () => {
+test('a new grant waits for the card; its arrow is horizontally centred with an 8px gap', () => {
   const f = fixture()
   f.pointer.sync()
   assert.equal(f.pointer.getSnapshot().visible, false)
   f.grant('grant-1')
-  assert.deepEqual(f.pointer.getSnapshot(), { visible: true, controlId: 'grant-1', x: 640, y: 396, pulse: null })
+  assert.equal(f.pointer.getSnapshot().visible, false)
+  const card = {left:800, top:440, width:372, height:240}
+  f.pointer.follow(card, 'home', 'grant-1', true)
+  assert.deepEqual(f.pointer.getSnapshot(), { visible:true, controlId:'grant-1', x:972, y:404, pulse:null, anchor:'home', headingHalf:0 })
   f.pointer.move({ x: 111.125, y: 220.5 }, 'grant-1')
-  f.pointer.sync()
+  f.pointer.sync(); f.pointer.follow(card, 'home', 'grant-1')
   assert.equal(f.pointer.getSnapshot().x, 111.125, 'ordinary control updates must not reset the pointer')
 })
 
@@ -30,7 +33,11 @@ test('takeover and a later handoff reject every stale movement from the old gran
   assert.equal(f.pointer.move({ x: 500, y: 600 }, 'grant-1'), false)
   f.grant('grant-2')
   assert.equal(f.pointer.move({ x: 500, y: 600 }, 'grant-1'), false)
-  assert.deepEqual(f.pointer.getSnapshot(), { visible: true, controlId: 'grant-2', x: 640, y: 396, pulse: null })
+  const summary = {left:35, top:200, width:480, height:20}
+  f.pointer.follow(summary, 'record', 'grant-1', true)
+  assert.equal(f.pointer.getSnapshot().visible, false)
+  f.pointer.follow(summary, 'record', 'grant-2', true)
+  assert.deepEqual(f.pointer.getSnapshot(), {visible:true,controlId:'grant-2',x:35,y:210,pulse:null,anchor:'record',headingHalf:10})
 })
 
 test('CSS coordinates retain subpixel precision while resize and out-of-range input remain within the work area', () => {

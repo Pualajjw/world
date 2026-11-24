@@ -11,10 +11,13 @@
  *
  * 这里不复制任何实现，只回答「有什么可以打开」和「pbnpm 在哪」。
  */
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { pbPythonRuntime } from './pb-actions.js'
 import { readFile } from 'node:fs/promises'
 import { existsSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { extname, join, resolve } from 'node:path'
+import { extname, isAbsolute, join, resolve } from 'node:path'
 
 /** 登记文件里最多读这么多工程：侧栏是给人点的，不是给脚本翻的。 */
 const MAX_PROJECTS = 40
@@ -62,7 +65,7 @@ function imaLocation(ctx) {
 }
 
 /** 登记文件是别的插件的私有格式，读不懂就当没有，不因为一行坏数据拦住整个列表。 */
-async function readProjects(ctx, { plugin, parts }, signal) {
+async function readProjects(ctx, { plugin, parts }, signal, onlyRoot) {
   let raw
   try { raw = await readFile(join(dshHome(), ...parts), 'utf8') }
   catch { return [] }
@@ -74,10 +77,12 @@ async function readProjects(ctx, { plugin, parts }, signal) {
   for (const item of list) {
     signal?.throwIfAborted()
     if (!item || typeof item.root !== 'string' || !item.root) continue
-    if (typeof item.pbtPath !== 'string' || !item.pbtPath) continue
+    if (!isAbsolute(item.root) || typeof item.pbtPath !== 'string' || !isAbsolute(item.pbtPath)) continue
+    if (onlyRoot && resolve(item.root).toLowerCase() !== resolve(onlyRoot).toLowerCase()) continue
+    const extension = extname(item.pbtPath).toLowerCase()
+    if (extension !== '.pbt' && !(plugin === 'pbnpm-pbd' && extension === '.exe')) continue
     const info = await stat(ctx, item.root, signal)
     if (!info || info.type !== 'directory') continue
-    const extension = extname(item.pbtPath).toLowerCase()
     out.push({
       id: `${plugin}:${item.pbtPath}`,
       plugin,
@@ -86,10 +91,29 @@ async function readProjects(ctx, { plugin, parts }, signal) {
       root: item.root,
       pbtPath: item.pbtPath,
       pbVersion: Number.isInteger(item.pbVersion) ? item.pbVersion : null,
+      libraryNames: (Array.isArray(item.libraries) ? item.libraries : []).map(lib => lib?.name).filter(name => typeof name === 'string'),
+      // Only a host-side exact project lookup gets the original binary paths. Never accept
+      // paths or PCode settings from an objects RPC, nor trust a workspace-local marker.
+      ...(onlyRoot && plugin === 'pbnpm-pbd' ? { compiled: (Array.isArray(item.libraries) ? item.libraries : [])
+        .filter(lib => /^[^/\\:]+\.pbd$/i.test(lib?.name) && typeof lib.path === 'string' && isAbsolute(lib.path) && /\.(?:pbd|exe)$/i.test(lib.path))
+        .map(lib => [lib.name, lib.path]), pcodeVersion: Number.isInteger(item.pcodeVersion) ? item.pcodeVersion : 0 } : {}),
       libraries: Array.isArray(item.libraries) ? item.libraries.length : 0,
     })
   }
   return out
+}
+
+const exec = promisify(execFile)
+async function compiledObjects(project, signal) {
+  if (!project.compiled?.length) return new Map()
+  try {
+    // One isolated worker per cold project index, not a Python startup for every PBD.
+    const job = exec(pbPythonRuntime(), ['-I', '-B', join(import.meta.dirname, 'pb-object-index.py')],
+      { signal, windowsHide: true, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })
+    job.child.stdin.on('error', () => {}) // exec reports spawn failures / early exits
+    job.child.stdin.end(JSON.stringify({ libraries: project.compiled, pcodeVersion: project.pcodeVersion }))
+    return new Map(JSON.parse((await job).stdout))
+  } catch { signal?.throwIfAborted(); return new Map() }
 }
 
 /** 宿主 fs.stat 对虚拟根也会作答；不存在的路径返回 undefined。 */
@@ -106,8 +130,38 @@ export function createWorkspaceRoots(ctx, { FsError, toolDirs }) {
   const fail = (message, code) => { throw new FsError(message, code) }
 
   return {
+    async project(root, signal) {
+      if (typeof root !== 'string' || !isAbsolute(root)) return null
+      for (const registry of REGISTRIES) {
+        const [hit] = await readProjects(ctx, registry, signal, root)
+        if (hit) return hit
+      }
+      return null
+    },
     /** One scan answers everything the explorer needs; nothing here is a file write. */
     async call(operation, payload, signal) {
+      if (operation === 'objects') {
+        const project = await this.project(payload?.root, signal)
+        if (!project) fail('未找到当前 PowerBuilder 工程。', 'WORLD_ROOTS_PROJECT')
+        const libraries = [], skipped = [], compiled = await compiledObjects(project, signal)
+        for (const library of new Set(project.libraryNames)) {
+          signal?.throwIfAborted()
+          if (!/^[^/\\:]+\.(?:pbl|pbd)$/i.test(library)) continue
+          if (compiled.has(library)) {
+            const pairs = compiled.get(library)
+            libraries.push([library, payload.binaryNames === true ? pairs : pairs.map(([source]) => source)])
+            continue
+          }
+          try {
+            // The overlay lists the library's directory, never exporting/decompiling a body.
+            // Unlike the explorer listing, this must include names beyond its display cap.
+            const target = await ctx.fs.resolve(join(project.root, library), { signal })
+            const entries = await ctx.fs.listDir(target, signal)
+            libraries.push([library, entries.filter(e => e.type === 'file' && /^[^/\\:]+\.sr[a-z0-9]+$/i.test(e.name)).map(e => e.name)])
+          } catch { signal?.throwIfAborted(); skipped.push(library) }
+        }
+        return { libraries, skipped }
+      }
       if (operation !== 'scan') fail('不支持的目录探测操作。', 'WORLD_ROOTS_OP')
       const active = signal ?? AbortSignal.timeout(5000)
       const location = imaLocation(ctx)
@@ -140,7 +194,9 @@ export function createWorkspaceRoots(ctx, { FsError, toolDirs }) {
         dir,
         exe: join(dir, 'pbnpm.exe'),
       }))
-      return { ima, projects: projects.slice(0, MAX_PROJECTS), truncated: projects.length > MAX_PROJECTS, tools }
+      const currentProject = typeof payload?.root === 'string' && payload.root
+        ? projects.find(p => resolve(p.root).toLowerCase() === resolve(payload.root).toLowerCase()) : null
+      return { ima, currentProject: currentProject || null, projects: projects.slice(0, MAX_PROJECTS).map(({ libraryNames, ...p }) => p), truncated: projects.length > MAX_PROJECTS, tools }
     },
   }
 }

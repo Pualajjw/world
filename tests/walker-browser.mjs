@@ -86,6 +86,8 @@ try {
   const frame = await page.locator('.world-window-frame').boundingBox()
   await page.mouse.move(frame.x + frame.width / 2, frame.y + frame.height / 2)
   await page.waitForFunction(() => document.querySelector('.world-walker').dataset.grabbing === 'on', null, { timeout: 15000 })
+  // 抬手是 240ms 的过渡（.wn-arm-a 的 transition）：不等它转完，量到的是还垂着的那只手
+  await page.waitForTimeout(350)
   const grip = await page.evaluate(() => {
     const r = document.querySelector('.world-window-frame').getBoundingClientRect()
     const hand = document.querySelector('.wn-arm-a circle:last-child').getBoundingClientRect()
@@ -105,6 +107,7 @@ try {
   })
   await page.mouse.move(frame.x + frame.width - 40, frame.y + frame.height / 2)
   await page.waitForFunction(() => document.querySelector('.world-walker').dataset.grabbing === 'on', null, { timeout: 15000 })
+  await page.waitForTimeout(350)
   const rightGap = await page.evaluate(() => {
     const edge = document.querySelector('.world-window-frame').getBoundingClientRect().right
     const hand = document.querySelector('.wn-arm-a circle:last-child').getBoundingClientRect()

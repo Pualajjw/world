@@ -20,6 +20,11 @@ export async function checkProcesses(browser, bundleText, shotsDir) {
   try {
     await page.exposeBinding('__worldDesktopCall', () => ({ ok: true }))
     await page.exposeBinding('__worldBrainCall', () => ({ sessionId: 'session-1', setupRequired: false }))
+    const startupRows=[{id:'lanchat',name:'局域网聊天',state:'enabled'},{id:'mobile',name:'手机连接',state:'enabled'}]
+    await page.exposeBinding('__worldStartupCall',(_,op,p)=>{
+      if (op==='list') return {ok:true,value:startupRows}
+      assert.equal(op,'set');const row=startupRows.find(r=>r.id===p.id); row.state=p.state; return {ok:true,value:{state:p.state}}
+    })
     await page.exposeBinding('__worldProcessesCall', (_source, operation, payload) => {
       calls.push({ operation, payload })
       if (operation === 'snapshot') return mode === 'error'
@@ -48,6 +53,23 @@ export async function checkProcesses(browser, bundleText, shotsDir) {
     await page.locator('.world-start-button').click()
     await page.locator('[data-world-app-card="world-processes"] .world-app-open').click()
     const win = page.locator('[data-world-plugin="world-processes"]')
+    await win.getByRole('tab',{name:'启动项'}).click()
+    const mobile=win.getByRole('group',{name:'手机连接'})
+    await mobile.waitFor()
+    if (shotsDir) {await mkdir(shotsDir,{recursive:true});await win.screenshot({path:join(shotsDir,'startup-desktop.png')})}
+    await page.setViewportSize({width:360,height:740})
+    await page.waitForFunction(()=>document.querySelector('[data-world-plugin="world-processes"]')?.getBoundingClientRect().width<=360)
+    const geometryStartup=await win.getByRole('tablist').evaluate(n=>({width:n.clientWidth,overflow:n.scrollWidth>n.clientWidth}))
+    assert.equal(geometryStartup.overflow,false)
+    if (shotsDir) await win.screenshot({path:join(shotsDir,'startup-phone.png')})
+    await page.setViewportSize({width:1280,height:800})
+    await mobile.getByRole('button',{name:'关闭'}).click();await mobile.getByText('已关闭').waitFor()
+    await mobile.getByRole('button',{name:'启用'}).click();await mobile.getByText('已启用').waitFor()
+    await mobile.getByRole('button',{name:'删除'}).click();await page.getByRole('alertdialog').getByRole('button',{name:'取消'}).click()
+    await mobile.getByRole('button',{name:'删除'}).click();await page.getByRole('alertdialog').getByRole('button',{name:'删除启动项'}).click()
+    await mobile.waitFor({state:'hidden'}); await win.getByText('可添加的应用').click()
+    await mobile.getByRole('button',{name:'加入并启用'}).click();await mobile.getByText('已启用').waitFor()
+    await win.getByRole('tab',{name:'进程',exact:true}).click()
     const tableRows = win.locator('tbody tr')
     await tableRows.first().waitFor()
     assert.equal(await tableRows.count(), 3)

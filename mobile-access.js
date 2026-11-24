@@ -108,10 +108,11 @@ export function createMobileAccess(options) {
     restored = true
     if (!selectedHost) selectedHost = value.host
   }
-  async function open(payload, signal) {
+  async function open(payload, signal, remember = true) {
     if (stopped) throw failure('手机连接服务已停止。')
     signal?.throwIfAborted()
     await restore()
+    if (stopped) throw failure('手机连接服务已停止。')
     const rows = interfaces()
     const addresses = config.host ? [{ name: '已配置地址', address: mobileBindAddress(config.host) }] : mobileNetworkAddresses(rows)
     let host = config.host
@@ -121,11 +122,40 @@ export function createMobileAccess(options) {
     }
     if (!listeners.has(host)) listeners.set(host, createMobileListener({ ...options, credential, config: { ...config, host } }))
     const value = await listeners.get(host).call('open', {}, signal)
-    selectedHost = host
-    void credential.remember(host).catch(() => {})
+    if (remember) { await credential.remember(host); selectedHost = host }
     return value
   }
+  async function startupHost() {
+    await restore()
+    if (config.host) return mobileBindAddress(config.host)
+    if (!selectedHost || !mobileNetworkAddresses(interfaces()).some(row => row.address === selectedHost))
+      throw failure('请先在「手机连接」选择可用网卡并生成二维码。')
+    return selectedHost
+  }
   return {
+    startupHost,
+    async startSaved(signal) {
+      await restore()
+      const host = config.host ? mobileBindAddress(config.host) : selectedHost
+      if (!host) throw failure('请先在「手机连接」选定网卡。')
+      // EasyTier may be starting alongside World. Wait for this exact interface and
+      // the upstream web listener, not a replacement interface or an arbitrary address.
+      const until = Date.now() + (options.startupWaitMs ?? 30000)
+      for (;;) {
+        signal?.throwIfAborted(); if (stopped) return
+        const hasHost = config.host || mobileNetworkAddresses(interfaces()).some(row => row.address === host)
+        let origin
+        try { origin = options.webServer?.()?.getOrigin() } catch { /* web service not bound yet */ }
+        if (hasHost && origin) {
+          try { await open({host}, signal, false); return } catch (error) {
+            // An explicit WORLD_MOBILE_HOST may be a VPN address not bound yet.
+            if (error.cause?.code !== 'EADDRNOTAVAIL' || Date.now() >= until) throw error
+          }
+        }
+        if (Date.now() >= until) throw failure(hasHost ? '网页入口尚未就绪，未自动启动手机连接。' : '上次选择的网卡不可用，未自动启动手机连接。')
+        await new Promise(resolve => setTimeout(resolve,250))
+      }
+    },
     async call(operation, payload, signal) {
       if (stopped) throw failure('手机连接服务已停止。')
       signal?.throwIfAborted()
@@ -322,7 +352,7 @@ function createMobileListener({ connection, webServer, chat, config = {}, interf
         for (const socket of sockets) socket.destroy()
         if (server?.listening) await new Promise(resolve => server.close(resolve))
         server = null; starting = null
-        throw failure(error.code === 'EADDRINUSE' ? '手机连接端口已被占用，请设置 WORLD_MOBILE_PORT 后重启。' : error.code === 'EACCES' ? '无法监听该网络地址，请检查端口权限。' : error.code === 'WORLD_MOBILE' ? error.message : '手机连接入口启动失败，请检查网络地址和证书配置。')
+        throw Object.assign(failure(error.code === 'EADDRINUSE' ? '手机连接端口已被占用，请设置 WORLD_MOBILE_PORT 后重启。' : error.code === 'EACCES' ? '无法监听该网络地址，请检查端口权限。' : error.code === 'WORLD_MOBILE' ? error.message : '手机连接入口启动失败，请检查网络地址和证书配置。'), {cause:error})
       })
       await starting
       signal?.throwIfAborted()

@@ -34,6 +34,20 @@ const worldManifest = manifest => {
     fail('更新包的名称、版本或 DSH 插件声明不正确，未安装。')
   return manifest
 }
+const missingFile = error => error?.code === 'ENOENT' || /^ENOENT\b/u.test(error?.message || '')
+const stalePackage = error => missingFile(error) || /该 TGZ 已不在仓库索引中/u.test(error?.message || '')
+const sourceNameOf = listing => `pbpkg · ${listing.sources?.find(source => source.id === listing.activeSourceId)?.name || '当前源'}`
+function worldUpdateRow(listing) {
+  const rows = (listing.rows || []).filter(row => row.packageName === WORLD_PACKAGE || /^world-(?:\d+\.\d+\.\d+|latest)(?:-[\w.-]+)?\.tgz$/iu.test(row.filename || row.path?.split('/').at(-1) || ''))
+    .filter(row => !row.packageName || row.packageName === WORLD_PACKAGE)
+    .sort((a, b) => {
+      const version = row => row.packageVersion || /world-(\d+\.\d+\.\d+(?:-[\w.]+)?)-universal\.tgz$/iu.exec(row.filename || '')?.[1]
+        || /world-(\d+\.\d+\.\d+)/iu.exec(row.filename || row.path || '')?.[1]
+      return semver(version(a)) && semver(version(b)) ? compareVersions(version(b), version(a)) : 0
+    })
+  if (!rows.length) fail('pbpkg 当前源没有 world 更新包，请在 pbpkg 中检查或切换源。')
+  return rows.find(row => /(?:-universal)?\.tgz$/iu.test(row.filename || row.path)) || rows[0]
+}
 
 /** The launcher's installation anchor identifies DSH; Node/Electron versions are unrelated. */
 export async function readDshVersion(profile, { readText = file => readFile(file, 'utf8') } = {}) {
@@ -132,6 +146,44 @@ export function createWorldUpdates({ currentVersion, manager: getManager, profil
       blockReason: developmentLink ? 'world 当前通过开发目录链接加载，请先以 TGZ 或 GitHub 方式安装后再使用内置升级。' : '',
       job: structuredClone(job) }
   }
+  async function pbpkgUpdate(active) {
+    const list = async () => {
+      try { return await callPbpkg('list', {}, active) }
+      catch (error) {
+        active.throwIfAborted()
+        if (missingFile(error)) fail('pbpkg 当前源目录或 index.json 不存在，请在 pbpkg 中检查源路径后重试。', 'WORLD_UPDATE_SOURCE_MISSING')
+        throw error
+      }
+    }
+    let listing = await list(), row = worldUpdateRow(listing)
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let artifact
+      try { artifact = await callPbpkg('prepare', { path: row.path, sourceId: row.sourceId || listing.activeSourceId }, active) }
+      catch (error) {
+        active.throwIfAborted()
+        if (!stalePackage(error)) throw error
+        if (!attempt) {
+          // Publishing may replace the index between list and prepare. Retry only a changed row in the same source.
+          const fresh = await list()
+          if (fresh.activeSourceId !== listing.activeSourceId) fail('更新来源已变化，请重新检查。')
+          const next = worldUpdateRow(fresh)
+          if (next.path !== row.path || next.sha256 !== row.sha256) { listing = fresh; row = next; continue }
+        }
+        const filename = row.filename || row.path?.split(/[\\/]/u).at(-1) || 'world TGZ'
+        fail(`${sourceNameOf(listing)} 的索引引用了不存在的安装包「${filename}」。请在该源重新打包 world 并更新 index.json，或在 pbpkg 中切换到有效源后重试。`, 'WORLD_UPDATE_SOURCE_INCOMPLETE')
+      }
+      active.throwIfAborted()
+      if (artifact.sha256 !== row.sha256) fail('pbpkg 更新包已变化，请重新检查。')
+      let verified
+      try { verified = await verifyArtifact(artifact, cacheDir) }
+      catch (error) {
+        active.throwIfAborted()
+        if (missingFile(error)) fail('本地更新包缓存已失效，请重试以重新获取并校验更新包。', 'WORLD_UPDATE_CACHE_MISSING')
+        throw error
+      }
+      return { ...verified, digest: artifact.sha256, sourceName: sourceNameOf(listing) }
+    }
+  }
   async function check(signal) {
     if (checking || starting || job.state === 'installing') fail('正在检查或升级，请等待完成。', 'WORLD_UPDATE_BUSY')
     checking = true; candidate = null
@@ -140,22 +192,7 @@ export function createWorldUpdates({ currentVersion, manager: getManager, profil
       let manifest, spec, sourceName, digest
       if (details.source === 'pbpkg') {
         if (!details.pbpkgEnabled) fail('已安装 pbpkg，但尚未启用。请先启用 pbpkg，再检查 world 更新。')
-        const listing = await callPbpkg('list', {}, active)
-        const rows = (listing.rows || []).filter(row => row.packageName === WORLD_PACKAGE || /^world-(?:\d+\.\d+\.\d+|latest)(?:-[\w.-]+)?\.tgz$/iu.test(row.filename || row.path?.split('/').at(-1) || ''))
-          .filter(row => !row.packageName || row.packageName === WORLD_PACKAGE)
-          .sort((a, b) => {
-            const version = row => row.packageVersion || /world-(\d+\.\d+\.\d+(?:-[\w.]+)?)-universal\.tgz$/iu.exec(row.filename || '')?.[1]
-              || /world-(\d+\.\d+\.\d+)/iu.exec(row.filename || row.path || '')?.[1]
-            return semver(version(a)) && semver(version(b)) ? compareVersions(version(b), version(a)) : 0
-          })
-        if (!rows.length) fail('pbpkg 当前源没有 world 更新包，请在 pbpkg 中检查或切换源。')
-        const row = rows.find(row => /(?:-universal)?\.tgz$/iu.test(row.filename || row.path)) || rows[0]
-        const artifact = await callPbpkg('prepare', { path: row.path, sourceId: row.sourceId || listing.activeSourceId }, active)
-        active.throwIfAborted()
-        if (artifact.sha256 !== row.sha256) fail('pbpkg 更新包已变化，请重新检查。')
-        const verified = await verifyArtifact(artifact, cacheDir)
-        manifest = verified.manifest; spec = verified.spec; digest = artifact.sha256
-        sourceName = `pbpkg · ${listing.sources?.find(source => source.id === listing.activeSourceId)?.name || '当前源'}`
+        ;({ manifest, spec, digest, sourceName } = await pbpkgUpdate(active))
       } else {
         const commit = await json('https://api.github.com/repos/Pualajjw/world/commits/HEAD', active)
         if (!/^[a-f\d]{40}$/u.test(commit.sha)) fail('GitHub 未返回可验证的提交号。')

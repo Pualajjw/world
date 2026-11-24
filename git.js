@@ -1,5 +1,7 @@
 /** Session-scoped Git operations for the built-in editor. */
-import { isAbsolute } from 'node:path'
+import { isAbsolute, join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { parseGitDiff } from './git-diff.js'
 
 const MAX_OUTPUT = 256 * 1024
 const MAX_STATUS = 400
@@ -7,8 +9,9 @@ const MAX_COMMITS = 20
 const MAX_MESSAGE = 4000
 const MAX_PATH = 1024
 
-const TIMEOUT = { status: 20_000, diff: 20_000, stage: 30_000, unstage: 30_000, commit: 60_000, pull: 180_000, push: 300_000 }
-const MUTATIONS = new Set(['stage', 'unstage', 'commit', 'pull', 'push'])
+const TIMEOUT = { status: 20_000, diff: 20_000, stage: 30_000, unstage: 30_000, 'stage-hunk': 30_000, 'unstage-hunk': 30_000, discard: 30_000, commit: 60_000, pull: 180_000, push: 300_000 }
+const MUTATIONS = new Set(['stage', 'unstage', 'stage-hunk', 'unstage-hunk', 'discard', 'commit', 'pull', 'push'])
+const DIFF_OPTIONS = ['--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', '--no-relative', '--unified=3', '--inter-hunk-context=0']
 
 /** Split `git status --porcelain=v1 -z --branch` into a branch header and file entries. */
 export function parseStatus(raw) {
@@ -61,9 +64,10 @@ export function gitFailure(stderr, stdout) {
   return String(stdout || '').replace(/\r/gu, '').trim().split('\n').filter(Boolean).at(-1) || 'Git 命令执行失败。'
 }
 
-export function createVscodeGit(ctx, { FsError, writableRoots, subprocess }) {
+export function createVscodeGit(ctx, { FsError, subprocess }) {
   const lifetime = new AbortController()
   const running = new Set()
+  const mutating = new Set()
   const fail = (message, code = 'GIT_FAILED') => { throw new FsError(message, code) }
 
   async function sessionFor(id, signal) {
@@ -80,7 +84,7 @@ export function createVscodeGit(ctx, { FsError, writableRoots, subprocess }) {
     } finally { await handle.close() }
   }
 
-  async function run(argv, { cwd, signal, timeout }) {
+  async function run(argv, { cwd, signal, timeout, input }) {
     const active = signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal
     active.throwIfAborted()
     let timedOut = false
@@ -93,7 +97,7 @@ export function createVscodeGit(ctx, { FsError, writableRoots, subprocess }) {
           GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_PAGER: 'cat',
           GIT_OPTIONAL_LOCKS: '0', LC_ALL: 'C',
         },
-        stdio: { stdin: 'ignore', stdout: { maxBytes: MAX_OUTPUT }, stderr: { maxBytes: MAX_OUTPUT } },
+        stdio: { stdin: input === undefined ? 'ignore' : { data: input }, stdout: { maxBytes: MAX_OUTPUT }, stderr: { maxBytes: MAX_OUTPUT } },
       })
     } catch (error) {
       fail(`无法启动 git：${String(error?.message || error)}`, 'GIT_UNAVAILABLE')
@@ -151,15 +155,17 @@ export function createVscodeGit(ctx, { FsError, writableRoots, subprocess }) {
     return { root: root.trim().replace(/\\/gu, '/'), prefix: prefix.trim().replace(/\\/gu, '/') }
   }
 
-  async function assertWritable(session, root, signal) {
+  /**
+   * 只读模式仍然拦住写操作。其余情况不再自己判「仓库根必须在会话可写目录内」：
+   *
+   * git 是宿主 subprocess 跑的，真正的写入边界由它的沙箱策略决定 —— 越界时 git 会直接
+   * 报 permission denied，原因清楚。业务层拿仓库根再判一次，只会在「工作区是仓库的子
+   * 目录」这种最常见的情况下误拦：仓库根在会话工作区的上一层，而 .git 本身完全可写。
+   * 用户打开的就是自己的盘，能不能写由文件系统说了算，不由会话工作目录推算。
+   */
+  async function assertWritable(session) {
     const policy = ctx.sandboxPolicy.resolve({ session })
-    if (!policy) return
-    if (policy.mode === 'read-only') fail('只读模式下不能执行 Git 写操作。', 'FS_SANDBOX_DENIED')
-    if (policy.mode !== 'workspace-write') return
-    const target = await ctx.fs.resolve(root, { signal })
-    const roots = await Promise.all(writableRoots(policy).map(path => ctx.fs.resolve(path, { signal })))
-    if (!roots.some(candidate => ctx.fs.contains(candidate, target)))
-      fail('Git 仓库位于会话可写目录之外，写操作已被拦截。', 'FS_SANDBOX_DENIED')
+    if (policy?.mode === 'read-only') fail('只读模式下不能执行 Git 写操作。', 'FS_SANDBOX_DENIED')
   }
 
   /** Reject anything that could escape the repository or act as a pathspec magic. */
@@ -187,19 +193,23 @@ export function createVscodeGit(ctx, { FsError, writableRoots, subprocess }) {
     if (untracked) {
       if (paths.length !== 1) fail('一次只能查看一个文件的 Diff。', 'GIT_INVALID_PATH')
       // --no-index 把未跟踪文件当成「从空文件新增」；有差异时退出码是 1，不是失败
-      result = await run(['git', 'diff', '--no-index', '--no-color', '--no-ext-diff', '--unified=3', '--', '/dev/null', paths[0]],
+      result = await run(['git', '--literal-pathspecs', 'diff', '--no-index', ...DIFF_OPTIONS, '--', '/dev/null', paths[0]],
         { cwd: root, signal, timeout: TIMEOUT.diff })
       if (result.signal || result.timedOut) fail('读取 Diff 超时。', 'GIT_TIMEOUT')
       if (result.code !== 0 && result.code !== 1) fail(gitFailure(result.stderr, result.stdout), 'GIT_FAILED')
     } else {
-      result = await run(['git', 'diff', ...(staged ? ['--cached'] : []), '--no-color', '--no-ext-diff', '--unified=3', '--', ...paths],
+      result = await run(['git', '--literal-pathspecs', 'diff', ...(staged ? ['--cached'] : []), ...DIFF_OPTIONS, '--', ...paths],
         { cwd: root, signal, timeout: TIMEOUT.diff })
       if (result.signal || result.timedOut) fail('读取 Diff 超时。', 'GIT_TIMEOUT')
       if (result.code !== 0) fail(gitFailure(result.stderr, result.stdout), 'GIT_FAILED')
     }
+    const patch = result.stdout, parsed = parseGitDiff(patch)
     return {
       paths, staged, untracked,
-      patch: result.stdout.replace(/\r\n?/gu, '\n'),
+      patch,
+      snapshot: createHash('sha256').update(JSON.stringify({ paths, staged, patch })).digest('hex'),
+      canStageHunks: !result.lossy && !untracked && parsed.canApply,
+      hunkCount: parsed.hunks.length,
       truncated: Boolean(result.lossy),
     }
   }
@@ -299,8 +309,79 @@ export function createVscodeGit(ctx, { FsError, writableRoots, subprocess }) {
     return result.code === 0 ? result.stdout.replace(/\r/gu, '').trim() : ''
   }
 
+  async function commitInfo(root, hash, signal) {
+    if (typeof hash !== 'string' || !/^(?:[a-f\d]{40}|[a-f\d]{64})$/u.test(hash)) fail('提交 Hash 无效。', 'GIT_INVALID_COMMIT')
+    const result = await must(['git', 'rev-list', '--parents', '-n', '1', hash, '--'], { cwd: root, signal, timeout: TIMEOUT.status })
+    const [commit, ...parents] = result.stdout.trim().split(' ')
+    if (result.lossy || commit !== hash || parents.some(parent => !/^(?:[a-f\d]{40}|[a-f\d]{64})$/u.test(parent)))
+      fail('提交记录无效或不完整。', 'GIT_INVALID_COMMIT')
+    return { commit, parent: parents[0] || null, merge: parents.length > 1 }
+  }
+
+  async function commitFiles(root, payload, signal) {
+    const info = await commitInfo(root, payload.commit, signal)
+    const argv = info.parent ? ['git', 'diff', '--name-status', '-z', '--find-renames', info.parent, info.commit, '--']
+      : ['git', 'diff-tree', '--root', '--no-commit-id', '-r', '--name-status', '-z', '--find-renames', info.commit, '--']
+    const result = await must(argv, { cwd: root, signal, timeout: TIMEOUT.diff })
+    if (result.lossy) return { ...info, files: [], truncated: true }
+    const fields = result.stdout.split('\0'), files = []
+    if (fields.pop() !== '') fail('提交文件列表不完整。', 'GIT_FAILED')
+    for (let i = 0; i < fields.length;) {
+      const status = fields[i++], first = fields[i++], moved = /^[RC]\d*$/u.test(status)
+      const path = moved ? fields[i++] : first
+      if (!/^[ACDMRTUXB]\d*$/u.test(status) || !first || !path) fail('提交文件列表不完整。', 'GIT_FAILED')
+      files.push({ path, from: moved ? first : '', status: status[0] })
+    }
+    return { ...info, files: files.slice(0, MAX_STATUS), truncated: files.length > MAX_STATUS }
+  }
+
+  async function commitDiff(root, payload, signal) {
+    const paths = normalizePaths(payload.paths)
+    if (paths.length > 2) fail('一次只能查看一个文件的 Diff。', 'GIT_INVALID_PATH')
+    const info = await commitInfo(root, payload.commit, signal)
+    const argv = info.parent ? ['git', '--literal-pathspecs', 'diff', ...DIFF_OPTIONS, '--find-renames', info.parent, info.commit, '--', ...paths]
+      : ['git', '--literal-pathspecs', 'diff-tree', '--root', '--no-commit-id', '-r', '-p', ...DIFF_OPTIONS, '--find-renames', info.commit, '--', ...paths]
+    const result = await must(argv, { cwd: root, signal, timeout: TIMEOUT.diff })
+    return { ...info, paths, patch: result.stdout, truncated: Boolean(result.lossy), canStageHunks: false }
+  }
+
+  async function discardPlan(root, payload, signal) {
+    const paths = [...new Set(normalizePaths(payload.paths))]
+    const options = { cwd: root, signal, timeout: TIMEOUT.discard }
+    const status = await must(['git', '--literal-pathspecs', 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--', ...paths], options)
+    if (status.lossy) fail('文件状态过多，请减少选择后重试。', 'GIT_STALE_DIFF')
+    const files = parseStatus(status.stdout).files
+    const selected = paths.map(path => files.find(file => file.path === path))
+    if (selected.some(file => !file || file.conflicted || (!file.untracked && !file.unstaged)))
+      fail('文件状态已变化或包含冲突，请刷新后重试；冲突文件需先解决冲突。', 'GIT_STALE_DIFF')
+    const index = await must(['git', '--literal-pathspecs', 'ls-files', '--stage', '-z', '--', ...paths], options)
+    if (index.lossy) fail('暂存区状态过长，请减少选择后重试。', 'GIT_STALE_DIFF')
+    const entries = []
+    for (const file of selected) {
+      const entry = await ctx.fs.lstat(join(root, file.path), { cwd: root }, signal)
+      if ((entry && (!entry.version || !['file', 'symlink'].includes(entry.type))) || (!entry && file.worktree !== 'D'))
+        fail('文件状态已变化，不能放弃更改。', 'GIT_STALE_DIFF')
+      entries.push([file.path, file.index, file.worktree, entry?.type, entry?.version])
+    }
+    const snapshot = createHash('sha256').update(JSON.stringify([root, payload.sessionId, index.stdout, entries])).digest('hex')
+    return { snapshot, files: selected.map(file => ({ path: file.path, removed: file.untracked })) }
+  }
+
+  async function discard(root, payload, signal) {
+    if (payload.confirmed !== true) fail('放弃更改需要先确认。', 'GIT_CONFIRM_REQUIRED')
+    const { snapshot, files } = await discardPlan(root, payload, signal)
+    if (snapshot !== payload.snapshot) fail('文件或暂存区在确认前后发生了变化，未放弃更改。请刷新后重新确认。', 'GIT_STALE_DIFF')
+    const options = { cwd: root, signal, timeout: TIMEOUT.discard }
+    const tracked = files.filter(file => !file.removed).map(file => file.path)
+    const untracked = files.filter(file => file.removed).map(file => file.path)
+    if (tracked.length) await must(['git', '--literal-pathspecs', 'restore', '--worktree', '--', ...tracked], options)
+    // Only exact untracked file paths from status; no directory, ignored-file or nested-repo deletion flags.
+    if (untracked.length) await must(['git', '--literal-pathspecs', 'clean', '-f', '--', ...untracked], options)
+    return { discarded: files }
+  }
+
   async function call(operation, payload, signal) {
-    if (operation !== 'status' && operation !== 'diff' && operation !== 'log' && !MUTATIONS.has(operation)) fail('不支持的 Git 操作。', 'GIT_FAILED')
+    if (!['status', 'diff', 'log', 'commit-files', 'commit-diff', 'prepare-discard'].includes(operation) && !MUTATIONS.has(operation)) fail('不支持的 Git 操作。', 'GIT_FAILED')
     const active = signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal
     const task = (async () => {
       active.throwIfAborted()
@@ -310,18 +391,44 @@ export function createVscodeGit(ctx, { FsError, writableRoots, subprocess }) {
       // Diff 是只读的：只读模式下也能看，不经过 assertWritable
       if (operation === 'diff') return readDiff(root, payload, active)
       if (operation === 'log') return readLog(root, active)
-      await assertWritable(session, root, active)
+      if (operation === 'commit-files') return commitFiles(root, payload, active)
+      if (operation === 'commit-diff') return commitDiff(root, payload, active)
+      await assertWritable(session)
+      if (operation === 'prepare-discard') return discardPlan(root, payload, active)
+      if (mutating.has(root)) fail('该仓库有 Git 操作正在执行，请稍后重试。', 'GIT_BUSY')
+      mutating.add(root)
+      try {
       const timeout = TIMEOUT[operation]
 
+      if (operation === 'stage-hunk' || operation === 'unstage-hunk') {
+        const paths = normalizePaths(payload.paths)
+        if (paths.length !== 1) fail('一次只能操作一个文件的更改块。', 'GIT_INVALID_PATH')
+        const staged = operation === 'unstage-hunk'
+        const diff = await readDiff(root, { paths, staged }, active)
+        if (typeof payload.snapshot !== 'string' || payload.snapshot !== diff.snapshot)
+          fail('差异已变化，请刷新 Diff 后重试，未修改暂存区。', 'GIT_STALE_DIFF')
+        const input = diff.canStageHunks && parseGitDiff(diff.patch).hunkPatch(payload.hunk, staged)
+        if (!input) fail('这个差异不能逐块操作，请使用整文件暂存或取消暂存。', 'GIT_HUNK_UNSUPPORTED')
+        const argv = ['git', 'apply', '--cached', '--whitespace=nowarn', ...(staged ? ['--reverse'] : [])]
+        await must([...argv, '--check', '-'], { cwd: root, signal: active, timeout, input })
+        await must([...argv, '-'], { cwd: root, signal: active, timeout, input })
+        return { status: await readStatus(cwd, active), output: '' }
+      }
+      if (operation === 'discard') return { ...await discard(root, payload, active), status: await readStatus(cwd, active), output: '' }
+
       if (operation === 'stage' || operation === 'unstage') {
-        const paths = normalizePaths(payload?.paths)
+        const paths = [...new Set(normalizePaths(payload?.paths))]
+        // Large multi-directory selections can exceed the Windows command-line limit.
+        const batch = paths.length > 1
+        const args = batch ? ['--pathspec-from-file=-', '--pathspec-file-nul'] : ['--', ...paths]
+        const options = { cwd: root, signal: active, timeout, ...(batch ? { input: paths.join('\0') + '\0' } : {}) }
         if (operation === 'stage') {
-          await must(['git', 'add', '--', ...paths], { cwd: root, signal: active, timeout })
+          await must(['git', '--literal-pathspecs', 'add', ...args], options)
         } else {
-          const result = await run(['git', 'reset', '-q', 'HEAD', '--', ...paths], { cwd: root, signal: active, timeout })
+          const result = await run(['git', '--literal-pathspecs', 'reset', '-q', 'HEAD', ...args], options)
           if (result.code !== 0 && /ambiguous argument 'HEAD'/u.test(result.stderr)) {
             // 还没有第一个提交时 HEAD 不存在，改用从索引里移除
-            await must(['git', 'rm', '--cached', '-q', '-r', '--', ...paths], { cwd: root, signal: active, timeout })
+            await must(['git', '--literal-pathspecs', 'rm', '--cached', '-q', '-r', ...args], options)
           } else if (result.code !== 0) {
             fail(gitFailure(result.stderr, result.stdout), 'GIT_FAILED')
           }
@@ -373,6 +480,7 @@ export function createVscodeGit(ctx, { FsError, writableRoots, subprocess }) {
       }
 
       fail('不支持的 Git 操作。', 'GIT_FAILED')
+      } finally { mutating.delete(root) }
     })()
     return task
   }

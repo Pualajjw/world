@@ -92,6 +92,20 @@ export function createDesktopBridge({ timeoutMs = 15000, pollMs = 20000, leaseMs
         remove(client, failure('桌面已关闭。', 'WORLD_DESKTOP_OFFLINE'))
         return {}
       }
+      if (operation === 'invoke') {
+        // Only the app holding this desktop connection can spend this one-shot capability.
+        // A generic successful mailbox reply is NOT permission to run a host tool.
+        const command = client.commands.get(payload.commandId), grant = client.state.control
+        const offer = command?.payload
+        if (!command?.delivered || !command.invoke || offer.action !== 'app_invoke' || Date.now() >= command.expiresAt
+          || grant?.owner !== 'assistant' || grant.controlId !== offer.controlId || grant.sessionId !== offer.actor.sessionId
+          || payload.appId !== offer.appId || payload.tool !== offer.tool || payload.receiptId !== offer.receiptId)
+          throw failure('应用调用已撤回或与本次授权不匹配。', 'WORLD_APP_TOOL_REVOKED')
+        const invoke = command.invoke
+        command.invoke = null
+        invoke()
+        return { started: true }
+      }
       if (operation === 'reply') {
         const command = client.commands.get(payload.commandId)
         if (!command?.delivered) return { accepted: false }
@@ -125,7 +139,7 @@ export function createDesktopBridge({ timeoutMs = 15000, pollMs = 20000, leaseMs
         deliver(client)
       })
     },
-    request(payload, { desktopId, signal } = {}) {
+    request(payload, { desktopId, signal, invoke } = {}) {
       assertLive()
       signal?.throwIfAborted()
       expire()
@@ -148,7 +162,7 @@ export function createDesktopBridge({ timeoutMs = 15000, pollMs = 20000, leaseMs
         const abort = () => finish(signal.reason || failure('操作已取消。', 'WORLD_DESKTOP_CANCELLED'))
         const commandTimer = setTimeout(() => finish(failure(
           '等待桌面确认超时；操作可能已经执行，请先查看桌面状态，不要直接重试。', 'WORLD_DESKTOP_TIMEOUT')), timeoutMs)
-        client.commands.set(id, { id, expiresAt, payload, delivered: false, finish })
+        client.commands.set(id, { id, expiresAt, payload, invoke, delivered: false, finish })
         signal?.addEventListener('abort', abort, { once: true })
         deliver(client)
       })

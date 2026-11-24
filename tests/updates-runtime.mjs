@@ -28,7 +28,8 @@ await cp(bootstrap, join(source, 'package'), { recursive: true })
 await writeFile(join(source, 'package/package.json'), JSON.stringify({ ...manifest, version: '9.0.0' }))
 execFileSync(process.platform === 'win32' ? 'tar.exe' : 'tar', ['-czf', 'world-9.0.0-universal.tgz', 'package'], { cwd: source, windowsHide: true })
 const bytes = await readFile(join(source, 'world-9.0.0-universal.tgz'))
-await writeFile(join(source, 'index.json'), JSON.stringify({ schema: 1, packages: { world: { type: 'tgz', path: 'world-9.0.0-universal.tgz', size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') } } }))
+const sourceIndex = { schema: 1, packages: { world: { type: 'tgz', path: 'world-9.0.0-universal.tgz', size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') } } }
+await writeFile(join(source, 'index.json'), JSON.stringify({ ...sourceIndex, packages: { world: { ...sourceIndex.packages.world, path: 'missing/world-9.0.0-universal.tgz' } } }))
 await mkdir(join(home, 'pbpkg'), { recursive: true })
 await writeFile(join(home, 'pbpkg/sources.json'), JSON.stringify({ version: 1, activeSourceId: 'update-test', sources: [
   { id: 'update-test', name: '隔离升级源', type: 'local', location: source, indexPath: 'index.json' },
@@ -56,6 +57,9 @@ try {
   }, { operation, payload })
   const info = await call('info')
   assert.equal(info.source, 'pbpkg'); assert.ok(info.dshVersion, 'DSH version must come from the real runtime anchor')
+  await assert.rejects(call('check'), /WORLD_UPDATE_SOURCE_INCOMPLETE/u)
+  assert.equal(JSON.parse(await readFile(join(profile, 'node_modules/@local/dsh-world/package.json'), 'utf8')).version, manifest.version)
+  await writeFile(join(source, 'index.json'), JSON.stringify(sourceIndex))
   const checked = await call('check')
   assert.equal(checked.available, true); assert.equal(checked.latestVersion, '9.0.0'); assert.match(checked.sourceName, /隔离升级源/u)
   const started = await call('install', { token: checked.token, confirmed: true })
@@ -88,7 +92,7 @@ try {
   await page.locator('[data-world-update-open]').click()
   await dialog.getByText('最新版本：v9.0.1', { exact: true }).waitFor()
   console.log(JSON.stringify({ result: 'passed', run, dshVersion: info.dshVersion, source: checked.sourceName,
-    installedVersion: installed.version, detectedNextVersion: '9.0.1', restartRequired: state.restartRequired, nativeInstaller: true }))
+    installedVersion: installed.version, detectedNextVersion: '9.0.1', restartRequired: state.restartRequired, nativeInstaller: true, missingSourceRecovered: true }))
 } catch (error) {
   console.error('Private diagnostics:', run)
   const log = await readFile(join(run, 'host.log'), 'utf8').catch(() => '')

@@ -1,4 +1,5 @@
 import React from 'react'
+import { MobileStartup } from './startup-app.js'
 import { qrSvg } from './mobile-qr.js'
 import { worldConfirm } from './world-confirm.js'
 import { copyMobileAddress } from './mobile-clipboard.js'
@@ -30,7 +31,7 @@ export function MobileConnect({ rpc, onClose }) {
     const key = event => {
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close.current() }
       if (event.key === 'Tab') {
-        const controls = [...card.current.querySelectorAll('button:not(:disabled),select:not(:disabled)')]
+        const controls = [...card.current.querySelectorAll('button:not(:disabled),select:not(:disabled),input:not(:disabled)')]
         const index = controls.indexOf(document.activeElement)
         event.preventDefault(); controls[(index + (event.shiftKey ? -1 : 1) + controls.length) % controls.length]?.focus()
       }
@@ -109,7 +110,8 @@ export function MobileConnect({ rpc, onClose }) {
             : h(React.Fragment, null,
               h('div', { className: 'world-mobile-qr', role: 'img', 'aria-label': '手机连接二维码', dangerouslySetInnerHTML: { __html: result.svg } }),
               h('p', { className: 'world-mobile-note' }, '手机与电脑连接同一网络后扫码，直接打开 world。'),
-              h('p', { className: 'world-mobile-note is-quiet' }, '二维码长期有效，重启 DSH 后仍可扫描。'))),
+              h('p', { className: 'world-mobile-note is-quiet' }, '二维码长期有效，重启 DSH 后仍可扫描。')),
+      h(MobileStartup,{rpc,ready:Boolean(result) && !busy})),
     copyState === 'failed' && h('p', { className: 'world-mobile-note', role: 'alert' }, '复制失败，请重试或扫描二维码。'),
     h('div', { className: 'world-wallpaper-foot' },
       h('button', { type: 'button', className: 'world-mobile-reset', onClick: reset, disabled: !result || busy }, '重置链接'),

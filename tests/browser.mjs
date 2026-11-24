@@ -41,6 +41,7 @@ import { checkTerminalSsh } from './ssh-browser.mjs'
 import { checkPluginRoots } from './roots-browser.mjs'
 import { checkPhoneDesktop } from './phone-browser.mjs'
 import { checkWindowEdges } from './window-edges.mjs'
+import { checkWindowDrag } from './window-drag-browser.mjs'
 import { createDesktopBrain } from '../desktop-brain.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -115,8 +116,8 @@ try {
   await themeStyle.evaluate(node => node.remove())
 
   assert.equal(await page.locator('.world-desktop-icon').count(), 4)
-  // 任务栏：开始按钮 + 3D 景深开关（窗口按钮在有窗口时才出现）
-  assert.equal(await page.locator('.world-taskbar-center button').count(), 1)
+  assert.equal(await page.locator('.world-taskbar-center button').count(), 3)
+  assert.equal(await page.getByRole('button', { name: '查看她的回复' }).isDisabled(), true)
   assert.equal(await page.locator('.world-depth-toggle').count(), 1)
   // 0.2.95 起默认进平面桌面（原来的普通桌面），3D 景深要点任务栏那颗按钮才打开。
   assert.equal(await page.locator('body').getAttribute('data-world-depth'), 'off')
@@ -128,8 +129,8 @@ try {
   await page.waitForFunction(() => document.body.dataset.worldDepth === 'on')
   assert.equal(await page.locator('.world-desktop-icon').first().evaluate(element => getComputedStyle(element).perspective), 'none')
   // DSH + VSCode + 局域网聊天 + 浏览器 + 终端（0.2.37 起浏览器、0.2.81 起终端默认已安装）
-  // 内置入口含 DSH 进程管理器与上网；新增入口不改变桌面上的图标。
-  assert.equal(await page.locator('.world-start').locator('.world-app-card').count(), 12)
+  // 内置入口含 DSH 进程管理器、上网与 0.3.46 的调试日志；新增入口不改变桌面上的图标。
+  assert.equal(await page.locator('.world-start').locator('.world-app-card').count(), 14)
   assert.equal(await page.locator('.world-app-card[data-world-app-card="browser"]').count(), 1)
   assert.equal(await page.locator('[data-world-browser-icon]').count(), 1)
   assert.equal(await page.locator('.world-app-card[data-world-app-card="terminal"]').count(), 1)
@@ -302,6 +303,9 @@ try {
     const rect = element.getBoundingClientRect()
     return { x: Math.round(rect.x), y: Math.round(rect.y) }
   })
+  // 窗口入场动画还没结束就取 boundingBox，拖拽起点会偏、甩不到顶边：
+  // 先把这段动画 finish 掉（dockWindow 里也是这么做的）
+  await page.evaluate(() => { for (const animation of document.querySelector('.world-titlebar')?.closest('section')?.getAnimations() ?? []) animation.finish() })
   const snapBar = await page.locator('.world-titlebar').boundingBox()
   await page.mouse.move(snapBar.x + snapBar.width / 2, snapBar.y + snapBar.height / 2)
   await page.mouse.down()
@@ -349,6 +353,43 @@ try {
   await page.waitForFunction(() => document.body.dataset.worldWindow === 'closed')
   assert.equal(await page.locator('#root .app-frame').evaluate(element => getComputedStyle(element, '::before').webkitAppRegion), 'drag')
   await checkDesktopTitlebar()
+
+  // 任务栏留言：不打开任何对话，一句话按 Enter 直接插进她的会话；发完立刻能接着写下一句。
+  await page.evaluate(() => {
+    window.__worldHerMessages = []
+    window.__worldHerMessage = async (operation, payload) => {
+      if (operation !== 'insert') throw new Error(`unexpected operation ${operation}`)
+      window.__worldHerMessages.push(String(payload.text || ''))
+      if (payload.text === '这句会被拒绝') throw Object.assign(new Error('她还没到家'), { code: 'WORLD_HER_MESSAGE_UNBOUND' })
+      return { sessionId: 'session-1' }
+    }
+  })
+  const herBox = page.locator('[data-world-her-message]')
+  assert.equal(await herBox.count(), 1)
+  assert.equal(await herBox.getAttribute('data-world-her-message'), 'ready')
+  const herRect = await herBox.boundingBox(), startRect = await page.locator('.world-start-button').boundingBox()
+  assert.ok(herRect.x + herRect.width <= startRect.x, '留言框贴在开始按钮左边')
+  assert.equal(Math.round(startRect.x + startRect.width / 2), 640, '开始按钮仍然在正中间')
+  const herInput = herBox.locator('input')
+  await herInput.click()
+  await herInput.fill('把窗口挪回左边')
+  await herInput.press('Enter')
+  await page.waitForFunction(() => window.__worldHerMessages.length === 1)
+  assert.deepEqual(await page.evaluate(() => window.__worldHerMessages), ['把窗口挪回左边'])
+  assert.equal(await herInput.inputValue(), '', '发出去就清空，可以接着写下一句')
+  assert.equal(await page.evaluate(() => document.activeElement === document.querySelector('[data-world-her-message] input')), true,
+    '光标留在框里，下一句直接接着打')
+  assert.equal(await page.locator('.world-her-answer, .world-toast').filter({ hasText: /已插队给她|等待答复/ }).count(), 0)
+  await herInput.fill('第二句')
+  await herInput.press('Enter')
+  await page.waitForFunction(() => window.__worldHerMessages.length === 2)
+  assert.deepEqual(await page.evaluate(() => window.__worldHerMessages), ['把窗口挪回左边', '第二句'], '两句话按发送顺序落进会话')
+  await herInput.fill('这句会被拒绝')
+  await herInput.press('Enter')
+  await page.locator('.world-toast.is-error').filter({ hasText: '她还没到家' }).waitFor()
+  assert.equal(await herInput.inputValue(), '这句会被拒绝', '送不出去就把原文放回输入框')
+  await page.locator('.world-toast.is-error button').click()
+  await herInput.fill('')
 
   await page.getByRole('button', { name: '开始' }).click()
   assert.equal(await page.locator('.world-start').evaluate(element => element.classList.contains('open')), true)
@@ -475,13 +516,15 @@ try {
   assert.equal(await page.locator('.world-vscode-status-pos').textContent(), '行 1, 列 3')
   // 换行开关桌面上也有（过去只有手机）：状态栏显示当前状态，点一下等于 Alt+Z
   const wrapToggle = page.locator('.world-vscode-statusbar .world-vscode-status-wrap')
-  assert.equal(await wrapToggle.textContent(), '换行 关', '桌面默认不折行')
+  const wrapOn = () => wrapToggle.evaluate(node => node.classList.contains('is-on'))
+  assert.equal(await wrapToggle.textContent(), '自动换行', '文案跟 VSCode 一致，开关看高亮')
+  assert.equal(await wrapOn(), false, '桌面默认不折行')
   await wrapToggle.click()
-  assert.equal(await wrapToggle.textContent(), '换行 开')
+  assert.equal(await wrapOn(), true)
   assert.equal(await wrapToggle.getAttribute('aria-pressed'), 'true')
   assert.equal(await page.locator('.world-vscode-textarea').evaluate(node => getComputedStyle(node).whiteSpace), 'pre-wrap')
   await wrapToggle.click()
-  assert.equal(await wrapToggle.textContent(), '换行 关')
+  assert.equal(await wrapOn(), false)
   assert.equal(await page.locator('.world-vscode-textarea').evaluate(node => getComputedStyle(node).whiteSpace), 'pre')
   // 状态栏如实报告换行符与编码（保存时会原样写回）
   assert.equal(await page.evaluate(() => document.querySelector('.world-vscode-statusbar')?.textContent?.includes('LF')), true)
@@ -533,41 +576,30 @@ try {
 
   await page.getByRole('button', { name: 'big.txt', exact: true }).click()
   await page.waitForFunction(() => document.querySelector('.world-vscode-statusbar')?.textContent.includes('50000 行'))
-  const largeStats = await page.evaluate(() => ({
-    gutterRows: document.querySelectorAll('.world-vscode-gutter-row').length,
-    lineCount: document.querySelector('.world-vscode-textarea').value.split('\n').length,
-  }))
-  assert.equal(largeStats.lineCount, 50000)
-  assert.ok(largeStats.gutterRows > 0 && largeStats.gutterRows < 100, `gutter rows: ${largeStats.gutterRows}`)
-  await page.locator('.world-vscode-textarea').evaluate(element => {
-    element.scrollTop = 200000
-    element.dispatchEvent(new Event('scroll', { bubbles: true }))
-  })
-  await page.waitForFunction(() => {
-    const first = document.querySelector('.world-vscode-gutter-row')
-    return first && Number(first.textContent) > 1000
-  })
-  const scrolledFirst = await page.locator('.world-vscode-gutter-row').first().textContent()
-  console.log(`Large file check: ${largeStats.lineCount} lines, ${largeStats.gutterRows} gutter rows, scrolled to line ${scrolledFirst}.`)
+  const big = page.locator('.world-vscode-large:visible'), numbers = big.locator('.cm-lineNumbers .cm-gutterElement')
+  assert.ok(await numbers.count() > 0 && await numbers.count() < 150)
+  await big.locator('.cm-scroller').evaluate(node => { node.scrollTop = node.scrollHeight })
+  await numbers.filter({ hasText: /^50000$/ }).waitFor()
+  assert.ok(await numbers.count() < 150, 'only the viewport is mounted after a far scroll')
 
   // 源代码管理：目录树折叠、目录级批量暂存、提交后清空
   await page.getByRole('button', { name: '源代码管理', exact: true }).click()
   assert.equal(await page.locator('.world-vscode-git-group').count(), 2)
   assert.equal(await page.locator('.world-vscode-git-file').count(), 5)
   assert.equal(await page.locator('.world-vscode-git-file.is-dir').count(), 2)
-  await page.locator('.world-vscode-git-history-row').first().waitFor()
+  await page.locator('.world-vscode-git-commit > .world-vscode-git-history-row').first().waitFor()
   const historyToggle = page.locator('.world-vscode-git-history-toggle')
   assert.equal(await historyToggle.getAttribute('aria-expanded'), 'true')
-  assert.equal(await page.locator('.world-vscode-git-history-row').count(), 2)
-  await page.locator('.world-vscode-git-history-row').first().click()
+  assert.equal(await page.locator('.world-vscode-git-commit > .world-vscode-git-history-row').count(), 2)
+  await page.locator('.world-vscode-git-commit > .world-vscode-git-history-row').first().click()
   assert.match(await page.locator('.world-vscode-git-history-detail').innerText(), /World Tester/u)
   assert.match(await page.locator('.world-vscode-git-history-detail pre').innerText(), /支持中文说明/u)
   await historyToggle.click()
-  assert.equal(await page.locator('.world-vscode-git-history-row').count(), 0)
+  assert.equal(await page.locator('.world-vscode-git-commit > .world-vscode-git-history-row').count(), 0)
   await historyToggle.focus()
   await page.keyboard.press('Enter')
-  assert.equal(await page.locator('.world-vscode-git-history-row').count(), 2)
-  await page.locator('.world-vscode-git-history-row').first().click()
+  assert.equal(await page.locator('.world-vscode-git-commit > .world-vscode-git-history-row').count(), 2)
+  await page.locator('.world-vscode-git-commit > .world-vscode-git-history-row').first().click()
   const gitDirs = page.locator('.world-vscode-git-file.is-dir')
   await gitDirs.first().click()
   assert.equal(await page.locator('.world-vscode-git-file').count(), 4)
@@ -613,7 +645,7 @@ try {
   assert.equal(await page.locator('.world-vscode-git-group').last().locator('.world-vscode-git-file.is-dir').count(), 0)
   const changesGroup = page.locator('.world-vscode-git-group-head').filter({ hasText: '更改' })
   await changesGroup.hover()
-  await changesGroup.getByRole('button').click()
+  await changesGroup.getByRole('button', { name: '全部暂存', exact: true }).click()
   assert.equal(await page.locator('.world-vscode-git-group').count(), 1)
   assert.equal(await page.locator('.world-vscode-git-file').count(), 4)
   await page.locator('.world-vscode-git-message').fill('feat: git 面板')
@@ -1248,6 +1280,7 @@ try {
   assert.equal(await page.locator('.world-desktop-titlebar').count(), 0)
   console.log('Browser interactions passed: desktop, root box, drag, maximize, minimize/restore, close, start menu, plugin windows, taskbar restore, dialog ownership, built-in LAN chat app, .worldapp drop install, context-menu uninstall, main-app protection, 3D depth toggle, flat icons, cursor-following mascot, cleanup.')
   await checkWindowEdges(browser, bundle.outputFiles[0].text)
+  await checkWindowDrag(browser, bundle.outputFiles[0].text)
   await checkPhoneDesktop(browser, bundle.outputFiles[0].text, process.env.WORLD_PHONE_SHOTS_DIR)
   await checkBrowserWindow(browser, root, bundle.outputFiles[0].text)
   await checkBrowserHomeSearch(browser, bundle.outputFiles[0].text)

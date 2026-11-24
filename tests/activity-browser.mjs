@@ -69,6 +69,7 @@ export async function checkAssistantActivity(browser, bundleText) {
     event('step/start', { turn: 1, step: 1 })
     await waitPhase('thinking')
     await walkerPhase('thinking')
+    assert.match(await page.locator('.world-assistant-pointer-label').innerText(),/正在思考/)
     assert.match(await status.innerText(), /正在思考/)
     assert.deepEqual(await motion(), { phase: 'thinking', orbit: '4.4s', orbitName: 'world-presence-orbit',
       ping: 'world-presence-ping', shimmer: 'world-status-shimmer' })
@@ -80,6 +81,8 @@ export async function checkAssistantActivity(browser, bundleText) {
       chunk: { type: 'text-delta', index: 1, text: '正在接收会话通知，' } } })
     emit('agent/assistant-stream', { agent, frame: { type: 'chunk', attemptId: 'stream-1', index: 2,
       chunk: { type: 'text-delta', index: 1, text: '回复会实时出现在这里。' } } })
+    await page.waitForFunction(()=>document.querySelector('.world-assistant-pointer-label')?.innerText.includes('回复会实时出现在这里。'))
+    assert.doesNotMatch(await page.locator('.world-assistant-pointer-label').innerText(),/hidden reasoning/)
     event('assistant/message', { turn: 1, step: 1, message: { content: [{ type: 'text', text: '正在接收会话通知，回复会实时出现在这里。' }] } })
     await page.locator('[data-fixture-variant="embedded"]').waitFor()
     assert.equal(await page.locator('[data-world-session-content]').count(), 0, 'native Conversation replaces the public-summary projection')

@@ -14,8 +14,9 @@ import { createInternetConnectionProbe } from './internet-connection.js'
 const PLATFORMS = new Set(['win32', 'darwin', 'linux'])
 export function internetDefaults(platform = process.platform) {
   return { directory: platform === 'win32' ? 'D:\\easytier-windows-x86_64' : '',
-    ipv4: '10.192.168.3', secret: '', peer: 'udp://118.178.196.123:11010' }
+    ipv4: '10.192.168.3', secret: '', peer: 'udp://118.178.196.123:11010', autoStart: false }
 }
+const connectionFields = ['directory', 'ipv4', 'secret', 'peer']
 export const INTERNET_DEFAULTS = Object.freeze(internetDefaults())
 const fail = (message, code = 'WORLD_INTERNET') => { throw Object.assign(new Error(message), { code }) }
 const pathsFor = platform => platform === 'win32' ? win32 : posix
@@ -28,8 +29,9 @@ export const internetPermissionHint = platform => platform === 'win32'
 
 export function normalizeInternetConfig(value, platform = process.platform) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail('请输入 EasyTier 配置。')
-  const config = {}
-  for (const key of Object.keys(INTERNET_DEFAULTS)) {
+  if (value.autoStart !== undefined && typeof value.autoStart !== 'boolean') fail('随 World 启动上网必须为开或关。')
+  const config = { autoStart: value.autoStart === true } // Absent in legacy configurations: never opt in implicitly.
+  for (const key of connectionFields) {
     if (typeof value[key] !== 'string' || /[\x00-\x1f\x7f]/u.test(value[key]) || value[key].length > 4096)
       fail('配置字段必须是单行文本。')
     config[key] = key === 'secret' ? value[key] : value[key].trim()
@@ -54,9 +56,10 @@ export function createWorldInternet({
   dir = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'world'),
   spawnImpl = spawn, platform = process.platform, maxLogChars = 65536, stopMs = 5000,
   checkPrivileges = () => hasInternetPrivileges({ platform }), elevatedSpawnImpl = createElevatedInternetProcess,
-  connectionProbe = createInternetConnectionProbe({ platform }),
+  connectionProbe = createInternetConnectionProbe({ platform }), startup, bootSignal,
 } = {}) {
   const file = join(dir, 'internet.json')
+  let removed = false, savedAutoStart = false
   let configPromise, current = null, disposed = false, queue = Promise.resolve()
   let phase = 'stopped', startedAt = 0, exitCode = null, lastError = '', logs = '', truncated = false
   let privileged = null, privilegeCheck
@@ -88,13 +91,16 @@ export function createWorldInternet({
   const snapshot = () => ({
     supported: PLATFORMS.has(platform), platform, executableName: internetExecutable('', platform),
     requiresElevation: platform === 'win32' && privileged === false, elevated: current?.elevated || privileged === true,
-    phase, running: Boolean(current), pid: current?.child.pid || null,
+    autoStart: savedAutoStart, phase, running: Boolean(current), pid: current?.child.pid || null,
     startedAt, exitCode, error: lastError, logs, truncated,
   })
   async function load() {
     if (!configPromise) configPromise = (async () => {
       try {
-        const value = normalizeInternetConfig(JSON.parse(await readFile(file, 'utf8')), platform)
+        const stored = JSON.parse(await readFile(file, 'utf8'))
+        const value = normalizeInternetConfig(stored, platform)
+        removed = stored.startupRemoved === true; if (removed) value.autoStart = false
+        savedAutoStart = value.autoStart
         secrets.add(value.secret)
         return value
       } catch (error) {
@@ -105,15 +111,27 @@ export function createWorldInternet({
     })()
     return configPromise
   }
-  async function save(value) {
-    if (current) fail('请先停止 EasyTier，再修改配置。', 'WORLD_INTERNET_BUSY')
+  async function save(value, next, expected) {
     const config = normalizeInternetConfig(value, platform)
+    if (typeof expected === 'boolean' && expected !== savedAutoStart) {
+      if (config.autoStart !== expected) fail('启动项已在其他窗口修改，请重新读取配置。')
+      config.autoStart = savedAutoStart // Saving unrelated fields must not restore a removed entry.
+    }
+    const hide = next === 'removed' || (removed && !config.autoStart && next !== 'disabled')
+    if (current) {
+      // Scheduling the next launch doesn't change the live tunnel. Keep network
+      // parameters locked, including when a second window has a stale draft.
+      const saved = await load()
+      if ((!next && saved.autoStart === config.autoStart) || connectionFields.some(key => config[key] !== saved[key]))
+        fail('请先停止 EasyTier，再修改配置。', 'WORLD_INTERNET_BUSY')
+    }
     await mkdir(dir, { recursive: true })
     const temporary = `${file}.${process.pid}.tmp`
     try {
-      await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 })
+      await writeFile(temporary, `${JSON.stringify(hide ? {...config, startupRemoved:true} : config, null, 2)}\n`, { mode: 0o600 })
       await rename(temporary, file)
     } finally { await unlink(temporary).catch(() => {}) }
+    removed = hide; savedAutoStart = config.autoStart
     secrets.add(config.secret)
     configPromise = Promise.resolve(config)
     connectionProbe.invalidate()
@@ -135,11 +153,11 @@ export function createWorldInternet({
     stream?.on('data', bytes => consume(decoder.write(bytes)))
     return () => { consume(decoder.end()); if (pending || dropping) log(source, dropping ? '超长单行日志已省略。' : pending) }
   }
-  async function start(value) {
+  async function start(value, expected) {
     if (!PLATFORMS.has(platform)) fail('上网功能支持 Windows、macOS 和 Linux。')
     if (current) return snapshot()
     connectionProbe.invalidate()
-    const config = value ? await save(value) : normalizeInternetConfig(await load(), platform)
+    const config = value ? await save(value, undefined, expected) : normalizeInternetConfig(await load(), platform)
     let executable = internetExecutable(config.directory, platform)
     if (config.directory) {
       try { if (!(await stat(executable)).isFile()) throw new Error('not a file') }
@@ -224,6 +242,47 @@ export function createWorldInternet({
     if (!exited) fail('EasyTier 尚未退出，请重试停止。', 'WORLD_INTERNET_STOP')
     return snapshot()
   }
+  // The host owns this one-shot task, not the web client. Serialize it with manual
+  // start/stop/save so reopening a window or attaching a phone cannot launch twice.
+  async function autoLaunch() {
+    if (disposed || !PLATFORMS.has(platform)) return
+    let config
+    try { config = await load() } catch {
+      if (!disposed) { phase = 'failed'; lastError = '无法读取上网配置，未自动启动。'; log('系统', lastError) }
+      return
+    }
+    if (disposed || !config.autoStart) return
+    const existing = await connectionProbe.read(config)
+    if (disposed) return
+    if (existing.connected && existing.ipv4 === config.ipv4.split('/')[0]) {
+      log('系统', '已有 EasyTier 连接，跳过自动启动。'); return
+    }
+    log('系统', '随 World 启动上网。')
+    await start()
+  }
+  // Keep legacy internet.json authoritative. Managing this entry neither exposes the
+  // network secret nor creates another copy of the setting in startup.json.
+  const managerConfig = () => load().catch(() => fail('上网配置读取失败，请在「上网」检查配置。'))
+  startup?.register('internet', {
+    name:'上网（EasyTier）', start:autoLaunch,
+    async read() {
+      const config = await managerConfig()
+      return removed || !config.secret ? 'removed' : config.autoStart ? 'enabled' : 'disabled'
+    },
+    write(next, signal) {
+      const work = queue.then(async () => {
+        signal?.throwIfAborted(); if (disposed) fail('上网服务已关闭。')
+        const config = await managerConfig()
+        if (!config.secret) fail('请先在「上网」保存连接配置。')
+        await save({...config,autoStart:next === 'enabled'},next)
+      })
+      queue=work.catch(()=>{}); return work
+    },
+  })
+  queue = queue.then(() => startup ? startup.run('internet',bootSignal) : autoLaunch()).catch(error => {
+    if (disposed || phase === 'failed' && lastError) return
+    phase = 'failed'; lastError = redact(`自动启动上网失败：${error.message}`); log('系统', lastError)
+  })
   return {
     call(operation, payload = {}, signal) {
       signal?.throwIfAborted()
@@ -234,8 +293,8 @@ export function createWorldInternet({
       const task = queue.then(async () => {
         signal?.throwIfAborted()
         if (disposed) fail('上网服务已关闭。')
-        if (operation === 'save') return { ...snapshot(), config: await save(payload.config) }
-        if (operation === 'start') return start(payload.config)
+        if (operation === 'save') return { ...snapshot(), config: await save(payload.config, undefined, payload.expectedAutoStart) }
+        if (operation === 'start') return start(payload.config, payload.expectedAutoStart)
         if (operation === 'stop') return stop()
         if (operation === 'clear') { logs = ''; truncated = false; return snapshot() }
         fail('不支持的上网操作。')

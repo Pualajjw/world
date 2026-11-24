@@ -69,7 +69,14 @@ export async function checkSaveDraft(browser, bundleText, shotsDir) {
       await page.waitForFunction(() => !document.querySelector('.world-vscode-status-msg')?.textContent.includes('正在保存'))
       // The rendered button gives a deterministic acknowledgement that saving has finished.
       await page.getByRole('button', { name: '保存', exact: true }).waitFor()
-      if (scenario === 'failure') await page.locator('.world-vscode-error').filter({ hasText: 'save unavailable' }).waitFor()
+      if (scenario === 'failure') {
+        for (const selector of ['.world-vscode-error', '.world-vscode-statusbar']) {
+          await page.locator(selector).getByRole('button', { name: '查看详情' }).click()
+          const details = page.getByRole('dialog', { name: '错误详情' })
+          assert.equal(await details.getByRole('textbox', { name: '错误原文' }).inputValue(), 'save unavailable')
+          await details.getByRole('button', { name: '关闭错误详情' }).click()
+        }
+      }
       if (scenario === 'switched') {
         assert.equal(await editor.inputValue(), '# Another unsaved draft\n', 'save response must not affect the selected file')
         assert.doesNotMatch(await page.locator('.world-vscode-statusbar').innerText(), /已保存/u,

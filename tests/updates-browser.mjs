@@ -9,7 +9,7 @@ export async function checkUpdates(browser, bundleText, shotsDir) {
   const currentVersion = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version
   for (const source of ['github', 'pbpkg']) {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
-    let installed = 0, releaseInstall, failCheck = false, dropStatus = false, latestVersion = '9.0.0'
+    let installed = 0, releaseInstall, failCheck = false, missingPackage = false, dropStatus = false, latestVersion = '9.0.0'
     const errors = [], calls = []
     const service = createWorldUpdates({ currentVersion, readVersion: async () => '0.2.2-rc.3',
       manager: { listBundles: async () => [
@@ -20,7 +20,10 @@ export async function checkUpdates(browser, bundleText, shotsDir) {
         releaseInstall = () => { installed++; resolve({ application: 'restart-required', version: '9.0.0' }) }
       }) } },
       verifyArtifact: async () => ({ manifest: { name: WORLD_PACKAGE, version: latestVersion }, spec: 'file:C:/cache/update.tgz' }),
-      pbpkg: async operation => { if (failCheck) throw new Error('更新源暂时不可用'); return operation === 'list'
+      pbpkg: async operation => {
+        if (failCheck) throw new Error('更新源暂时不可用')
+        if (missingPackage && operation === 'prepare') throw new Error("ENOENT: no such file or directory, realpath 'E:/plugins/world/dist/world-9.0.0-universal.tgz'")
+        return operation === 'list'
         ? { rows: [{ filename: `world-${latestVersion}-universal.tgz`, path: `world/world-${latestVersion}-universal.tgz`, sha256: 'abc', sourceId: 'team' }], activeSourceId: 'team', sources: [{ id: 'team', name: '团队插件源' }] }
         : { spec: 'file:C:/cache/update.tgz', sha256: 'abc', size: 10 } },
       fetchJson: async url => { if (failCheck) throw new Error('更新源暂时不可用'); return url.includes('/commits/')
@@ -100,6 +103,19 @@ export async function checkUpdates(browser, bundleText, shotsDir) {
         await dialog.getByRole('button', { name: '检查更新', exact: true }).click()
         await dialog.getByRole('alert').filter({ hasText: '更新源暂时不可用' }).waitFor()
         failCheck = false
+        await dialog.getByRole('button', { name: '重试', exact: true }).click()
+        await dialog.getByText('最新版本：v9.0.0', { exact: true }).waitFor()
+        missingPackage = true
+        await dialog.getByRole('button', { name: '检查更新', exact: true }).click()
+        const missing = dialog.getByRole('alert').filter({ hasText: '索引引用了不存在的安装包' })
+        await missing.waitFor()
+        assert.match(await missing.innerText(), /团队插件源.*world-9\.0\.0-universal\.tgz.*重新打包 world.*index\.json/u)
+        assert.doesNotMatch(await dialog.innerText(), /ENOENT|realpath/u)
+        assert.equal(await dialog.getByRole('button', { name: '升级 world', exact: true }).count(), 0)
+        assert.equal(calls.length, 0, 'a missing package never triggers installation')
+        assert.equal(await dialog.evaluate(node => node.scrollWidth > node.clientWidth), false)
+        if (shotsDir) await page.screenshot({ path: join(shotsDir, 'updates-missing-package.png') })
+        missingPackage = false
         await dialog.getByRole('button', { name: '重试', exact: true }).click()
         await dialog.getByText('最新版本：v9.0.0', { exact: true }).waitFor()
         latestVersion = currentVersion

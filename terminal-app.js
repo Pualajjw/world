@@ -223,7 +223,7 @@ function Cap({ label, onClick, close, className, pressed, children }) {
   }, children)
 }
 
-export function TerminalWindow({
+export function TerminalWindow({ toolHistory,
   rect, state, rpc, session, apps, onOpenApp, active, zIndex, pinned = false, onTogglePin,
   onActivate, onClose, onMinimize, onToggleMaximize, onDragStart, onDragMove, onDragEnd, onResizeStart,
 }) {
@@ -1136,6 +1136,7 @@ export function TerminalWindow({
     'aria-label': '终端', 'aria-hidden': minimized,
     style, onPointerDown: onActivate,
   },
+  fatal && toolHistory,
   h('header', {
     className: 'world-vscode-titlebar',
     onPointerDown: onDragStart, onPointerMove: onDragMove, onPointerUp: onDragEnd, onPointerCancel: onDragEnd,
@@ -1192,6 +1193,7 @@ export function TerminalWindow({
           runs.length === 0
             ? '\u200b'
             : runs.map((run, offset) => h('span', { key: offset, style: cssOf(run.style) }, run.text)))),
+        toolHistory,
         h('div', { className: 'world-term-line world-term-input-row' },
           h('span', {
             className: `world-term-prompt${remote ? ' is-remote' : ''}${search ? ' is-search' : ''}`,

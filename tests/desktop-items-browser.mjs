@@ -27,6 +27,11 @@ export async function checkDesktopItems(browser, bundleText) {
     await page.waitForTimeout(160)
   }
   try {
+    const launches = []
+    await page.exposeBinding('__worldOpenWorkspacePath', (_source, { path }) => {
+      launches.push(path)
+      return launches.length === 1 ? { ok: true, value: { opened: true } } : { ok: false, error: { message: '文件不存在' } }
+    })
     await page.exposeBinding('__worldDesktopCall', () => ({ ok: true }))
     await page.exposeBinding('__worldBrainCall', () => ({ sessionId: 'session-1', setupRequired: false }))
     await page.route('http://127.0.0.1/world-items-fixture', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: FIXTURE_HTML }))
@@ -34,13 +39,12 @@ export async function checkDesktopItems(browser, bundleText) {
     await page.evaluate(() => {
       localStorage.setItem('dsh.world.apps', JSON.stringify(['vscode', 'browser']))
       localStorage.setItem('dsh.world.browser.migrated', '1')
-      window.__DSH_HOST_PATHS__ = { pathFor: file => ({ 'notes.txt': 'C:/fixtures/notes.txt', 'docs': 'C:/fixtures/docs' })[file.name] || '' }
     })
     await page.reload()
     await page.addScriptTag({ content: bundleText })
     await open()
     await page.evaluate(() => {
-      window.__DSH_HOST_PATHS__ = { pathFor: file => ({ 'notes.txt': 'C:/fixtures/notes.txt', 'docs': 'C:/fixtures/docs' })[file.name] || '' }
+      window.__DSH_HOST_PATHS__ = { pathFor: file => `C:/fixtures/${file.name}` }
     })
 
     await dropFiles(['notes.txt', 'docs'])
@@ -49,6 +53,11 @@ export async function checkDesktopItems(browser, bundleText) {
     assert.deepEqual(links.map(link => [link.path, link.type]), [['C:/fixtures/notes.txt', 'file'], ['C:/fixtures/docs', 'directory']])
     const notesIcon = page.locator('.world-desktop-icon').filter({ hasText: 'notes.txt' })
     const docsIcon = page.locator('.world-desktop-icon').filter({ hasText: 'docs' })
+
+    const runButton = page.locator('.world-context-menu').getByRole('button', { name: '运行', exact: true })
+    await notesIcon.click({ button: 'right' })
+    assert.equal(await runButton.count(), 0)
+    await page.keyboard.press('Escape')
 
     // Double-click a file link opens the built-in VSCode at its parent folder.
     await notesIcon.dblclick()
@@ -62,6 +71,7 @@ export async function checkDesktopItems(browser, bundleText) {
 
     // Deleting a shortcut only removes the desktop record.
     await docsIcon.click({ button: 'right' })
+    assert.equal(await runButton.count(), 0)
     await page.locator('.world-context-menu').getByRole('button', { name: '删除快捷方式', exact: true }).click()
     const removeCard = page.locator('[data-world-confirm-card]')
     await removeCard.waitFor()
@@ -144,9 +154,69 @@ export async function checkDesktopItems(browser, bundleText) {
     assert.equal(await page.locator('.world-desktop-icon').filter({ hasText: 'docs' }).count(), 1)
     assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('dsh.world.holders') || '[]').length), 0)
 
+    // Dropping a script only creates a shortcut. Run hands the literal path to the host, once per click.
+    const scripts = ['build & test.bat', '构建.CMD']
+    await dropFiles(scripts, 850, 350)
+    for (const [index, name] of scripts.entries()) {
+      const icon = page.locator('.world-desktop-icon').filter({ hasText: name })
+      await icon.click({ button: 'right' })
+      await runButton.waitFor()
+      assert.equal(launches.length, index)
+      await runButton.click()
+      await page.locator('.world-context-menu').waitFor({ state: 'detached' })
+      assert.equal(launches[index], `C:/fixtures/${name}`)
+    }
+    await page.getByRole('alert').filter({ hasText: '无法运行「构建.CMD」：文件不存在' }).waitFor()
+    assert.deepEqual(launches, scripts.map(name => `C:/fixtures/${name}`))
+
+    await page.getByRole('button',{name:'关闭错误提示'}).click()
+    await page.evaluate(() => {
+      window.zipOpenCount = 0
+      window.__worldZipOpen = ({path}) => { window.zipOpenCount++; return new Promise(resolve => {
+        window.finishZip = ok => resolve(ok ? {ok:true,value:{path:`${path}.workspace`}} : {ok:false,error:{message:'目录损坏'}})
+      }) }
+      window.__worldPbdCall = (op,{path}) => ({ok:true,value:op === 'open' ? {path:`${path}.workspace`} : null})
+      window.__worldWorkspaceList = ({path}) => path === 'C:/fixtures/docs' ? {ok:true,value:{path,entries:[{name:'tree.zip',type:'file'}]}} : null
+    })
+    await docsIcon.dblclick()
+    const treeZip = editor.getByRole('button',{name:'tree.zip',exact:true}); await treeZip.waitFor()
+    const transfer = await page.evaluateHandle(() => new DataTransfer())
+    await treeZip.dispatchEvent('dragstart',{dataTransfer:transfer})
+    await page.locator('.world-wall').dispatchEvent('drop',{dataTransfer:transfer,clientX:650,clientY:420})
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('dsh.world.fileLinks')).some(link => link.path === 'C:/fixtures/docs/tree.zip'))
+    const shortcut = page.locator('.world-desktop-icon').filter({hasText:'tree.zip'})
+    await treeZip.dblclick(); const progress = editor.getByRole('status').filter({hasText:'正在打开 tree.zip…'})
+    await progress.waitFor()
+    const geometry = await progress.boundingBox(); assert.ok(geometry.width > 0 && geometry.height > 0)
+    if (process.env.WORLD_ZIP_STATUS_SHOT) await editor.screenshot({path:process.env.WORLD_ZIP_STATUS_SHOT})
+    await shortcut.dispatchEvent('dblclick'); await shortcut.dispatchEvent('dblclick')
+    assert.equal(await page.evaluate(() => window.zipOpenCount),1,'desktop + tree share the pending request')
+    await page.evaluate(() => window.finishZip(true))
+    await editor.locator('.world-vscode-status-root[title*="docs/tree.zip.workspace"]').waitFor(); await progress.waitFor({state:'hidden'})
+    assert.equal(await editor.count(),1,'the same project does not create another window')
+    await editor.getByRole('button',{name:'关闭 Visual Studio Code'}).click()
+    for (const [i,name] of ['archive.ZIP','app.pbt','app.exe'].entries()) {
+      await dropFiles([name], 160 + i*160, 350)
+      const icon = page.locator('.world-desktop-icon').filter({hasText:name})
+      await icon.dblclick()
+      if (name === 'archive.ZIP') {
+        const progress = page.getByRole('status').filter({hasText:'正在打开 archive.ZIP…'})
+        await progress.waitFor(); await icon.dblclick(); assert.equal(await page.evaluate(()=>window.zipOpenCount),2)
+        await page.evaluate(()=>window.finishZip(false)); await progress.waitFor({state:'hidden'})
+        await page.getByRole('alert').filter({hasText:'目录损坏'}).waitFor()
+        await page.getByRole('button',{name:'关闭错误提示'}).click()
+        await icon.dblclick(); await progress.waitFor(); assert.equal(await page.evaluate(()=>window.zipOpenCount),3,'a failed request can retry')
+        await page.evaluate(()=>window.finishZip(true)); await progress.waitFor({state:'hidden'})
+      }
+      const project = page.locator('.world-vscode-window').filter({has:page.locator(`.world-vscode-status-root[title*="C:/fixtures/${name}.workspace"]`)})
+      await project.waitFor()
+      assert.equal(await project.locator('.world-vscode-tab').count(),0)
+      await project.getByRole('button',{name:'关闭 Visual Studio Code'}).click()
+    }
+    assert.deepEqual(launches, scripts.map(name => `C:/fixtures/${name}`), 'double-clicking an EXE never runs it')
     assert.deepEqual(dialogs, [], '确认走世界内卡片，不再弹原生框')
     assert.deepEqual(errors, [])
-    console.log('Desktop items passed: file links (path only), shortcut delete, merge into holder, rename, VSCode collection tree with save, move-out dissolve.')
+    console.log('Desktop items passed: file links (path only), shortcut delete, merge into holder, rename, VSCode collection tree with save, move-out dissolve, ZIP tree entry and ZIP/PBT/EXE desktop project links.')
   } finally {
     await page.close()
   }

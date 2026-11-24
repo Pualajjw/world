@@ -170,7 +170,8 @@ window.__nativeControlProbe = {
   const nativePointer = await page.locator('[data-world-assistant-pointer]').evaluate(node => ({ x: Number(node.dataset.x), y: Number(node.dataset.y),
     width: node.querySelector('svg').getBoundingClientRect().width, height: node.querySelector('svg').getBoundingClientRect().height,
     pointerEvents: getComputedStyle(node).pointerEvents }))
-  assert.deepEqual(nativePointer, { x: 640, y: 396, width: 28, height: 28, pointerEvents: 'none' })
+  const card = await page.locator('.world-control-card').boundingBox()
+  assert.deepEqual(nativePointer, { x: card.x + (card.width - 28) / 2, y: card.y - 36, width: 28, height: 28, pointerEvents: 'none' })
   await panelInput.click()
   await panelInput.fill('在原生网页上方继续同一会话')
   await panelInput.press('Enter')

@@ -52,7 +52,9 @@ export function startDesktopClient({ rpc, getState, execute, onDisconnect, subsc
         try {
           if (Date.now() >= command.expiresAt) throw desktopError('命令已过期。', 'WORLD_DESKTOP_TIMEOUT')
           const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(Math.max(1, command.expiresAt - Date.now()))])
-          const value = command.action === 'state' ? {} : await execute(command, signal)
+          const current = connection
+          const invoke = capability => call('invoke', { ...current, commandId: command.id, ...capability }, signal)
+          const value = command.action === 'state' ? {} : await execute(command, signal, invoke)
           result = { ok: true, value: { ...value, state: getState() } }
         } catch (error) {
           result = { ok: false, error: { code: error.code || 'WORLD_DESKTOP_ACTION', message: String(error.message || error) } }
@@ -69,5 +71,5 @@ export function startDesktopClient({ rpc, getState, execute, onDisconnect, subsc
       }
     }
   })()
-  return { done, dispose() { unsubscribe?.(); lifetime.abort(); disconnect() } }
+  return { done, get desktopId() { return connection?.desktopId }, dispose() { unsubscribe?.(); lifetime.abort(); disconnect() } }
 }

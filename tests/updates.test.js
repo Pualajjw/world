@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { writeFile, mkdtemp, rm } from 'node:fs/promises'
+import { writeFile, mkdtemp, rm, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, dirname, basename } from 'node:path'
 import { gzipSync } from 'node:zlib'
@@ -76,6 +76,69 @@ test('installed pbpkg selects its active source, and disabled/missing package fa
   assert.equal(missing.calls.length, 0)
 })
 
+test('a missing pbpkg package reports the source and repair steps without installing or switching to GitHub', async t => {
+  const calls = []
+  const f = fixture(t, { pbpkg: async operation => {
+    calls.push(operation)
+    if (operation === 'list') return { rows: [{ filename: 'world-0.2.168-universal.tgz', path: 'world/dist/world-0.2.168-universal.tgz', sha256: 'abc' }],
+      activeSourceId: 'local', sources: [{ id: 'local', name: '开发路径', type: 'local' }] }
+    // pbpkg's RPC wrapper may retain only the message, without the original fs error code.
+    throw new Error("ENOENT: no such file or directory, realpath 'E:/plugins/world/dist/world-0.2.168-universal.tgz'")
+  } })
+  f.bundles.push({ name: '@local/dsh-pbpkg', installed: true })
+  await assert.rejects(f.service.call('check'), error => {
+    assert.equal(error.code, 'WORLD_UPDATE_SOURCE_INCOMPLETE')
+    assert.match(error.message, /开发路径.*world-0\.2\.168-universal\.tgz/u)
+    assert.match(error.message, /重新打包 world.*index\.json/u)
+    assert.doesNotMatch(error.message, /ENOENT|realpath/u)
+    return true
+  })
+  assert.deepEqual(calls, ['list', 'prepare', 'list'], 'unchanged missing row is not prepared repeatedly')
+  await assert.rejects(f.service.call('install', { token: 'missing', confirmed: true }), /失效/u)
+  assert.deepEqual(f.calls, [])
+})
+
+test('publication between list and prepare retries a changed row once, only within the same source', async t => {
+  for (const changedSource of [false, true]) {
+    let lists = 0, prepares = 0
+    const f = fixture(t, { pbpkg: async (op, payload) => {
+      if (op === 'list') {
+        lists++
+        const source = changedSource && lists > 1 ? 'other' : 'local'
+        return { rows: [{ path: `world/world-0.2.${149 + lists}-universal.tgz`, sha256: `sha${lists}`, sourceId: source }], activeSourceId: source }
+      }
+      prepares++
+      if (prepares === 1) throw new Error('该 TGZ 已不在仓库索引中，请刷新列表')
+      assert.equal(payload.path, 'world/world-0.2.151-universal.tgz')
+      return { sha256: 'sha2', spec: 'file:C:/cache/new.tgz' }
+    } })
+    f.bundles.push({ name: '@local/dsh-pbpkg', installed: true })
+    if (changedSource) await assert.rejects(f.service.call('check'), /来源已变化/u)
+    else assert.equal((await f.service.call('check')).available, true)
+    assert.equal(prepares, changedSource ? 1 : 2)
+    assert.deepEqual(f.calls, [], 'checking never installs or falls back')
+  }
+})
+
+test('missing source indexes and expired verification caches have distinct errors; checksum failures are not retried', async t => {
+  const missing = Object.assign(new Error('ENOENT: test missing file'), { code: 'ENOENT' })
+  const source = fixture(t, { pbpkg: async () => { throw missing } })
+  source.bundles.push({ name: '@local/dsh-pbpkg', installed: true })
+  await assert.rejects(source.service.call('check'), { code: 'WORLD_UPDATE_SOURCE_MISSING' })
+  const cache = fixture(t, { verifyArtifact: async () => { throw missing } })
+  cache.bundles.push({ name: '@local/dsh-pbpkg', installed: true })
+  await assert.rejects(cache.service.call('check'), { code: 'WORLD_UPDATE_CACHE_MISSING' })
+  let calls = 0
+  const corrupt = fixture(t, { pbpkg: async op => {
+    calls++
+    if (op === 'list') return { rows: [{ path: 'world-0.2.150-universal.tgz', sha256: 'abc' }] }
+    throw new Error('插件包大小或 SHA-256 校验失败，未安装')
+  } })
+  corrupt.bundles.push({ name: '@local/dsh-pbpkg', installed: true })
+  await assert.rejects(corrupt.service.call('check'), /SHA-256/u)
+  assert.equal(calls, 2)
+})
+
 test('simultaneous installs share the synchronous guard, failed installs retain an error and a new check allows retry', async t => {
   const f = fixture(t)
   let release
@@ -122,8 +185,11 @@ test('pbpkg bridge uses only existing list/prepare endpoints and a trusted owner
 })
 
 test('TGZ verification rejects tampering and foreign packages; pbpkg installation receives only the verified file', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'world-updates-'))
-  t.after(async () => { assert.equal(dirname(directory), tmpdir()); assert.ok(basename(directory).startsWith('world-updates-')); await rm(directory, { recursive: true, force: true }) })
+  // `tmpdir()` 在本机是 8.3 短名（C:/Users/ADMINI~1/…），而安装链会把 file: 地址规范成长名。
+  // 断言比的是「同一份文件」，所以先取真实路径，别让用户名形态决定测试结果。
+  const temporary = await realpath(tmpdir())
+  const directory = await realpath(await mkdtemp(join(temporary, 'world-updates-')))
+  t.after(async () => { assert.equal(dirname(directory), temporary); assert.ok(basename(directory).startsWith('world-updates-')); await rm(directory, { recursive: true, force: true }) })
   const make = async value => {
     const payload = Buffer.from(JSON.stringify(value)), header = Buffer.alloc(512)
     header.write('package/package.json'); header.write(payload.length.toString(8).padStart(11, '0'), 124); header[156] = 48

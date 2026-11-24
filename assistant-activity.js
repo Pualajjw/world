@@ -74,6 +74,9 @@ export function createAssistantActivity(ctx, { brain, bridge, workbench, now = D
     else if (['error', 'waiting', 'stopped'].includes(state.phase)) { state = { ...state, running: false }; publish() }
     else update('idle', workbench.getState().summary || '本轮工作已完成。', { running: false })
   }))
+  offs.push(ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
+    if (matches(agent) && message.source?.kind === 'user') transcript.claim(turn, message.source.rpcId)
+  }))
   offs.push(ctx.on('session/event', (session, event) => {
     if (!matches(session)) return
     const data = event.data || {}

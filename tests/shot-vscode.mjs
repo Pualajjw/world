@@ -111,11 +111,12 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('.world-vscode-window').length === 2)
   await page.waitForTimeout(450)
   await page.screenshot({ path: join(shots, 'vscode-multi.png') })
-  // 再开一次相同文件夹：新增独立窗口。
+  // 再开一次：空白窗口只保留一个，这次激活已有的空白窗口，不再新增（0.2.155 起）
   await page.getByRole('button', { name: '开始' }).click()
   await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-open').click()
   await page.waitForTimeout(350)
-  if (await page.locator('.world-vscode-window').count() !== 3) throw new Error('同一个文件夹应该可以再开窗口')
+  const windows = await page.locator('.world-vscode-window').count()
+  if (windows !== 2) throw new Error(`空白窗口只保留一个，实际 ${windows} 个`)
   await page.close()
 
   // 最大化 / 最小化：最大化铺满桌面（顶栏到任务栏之间），最小化后任务栏留一格

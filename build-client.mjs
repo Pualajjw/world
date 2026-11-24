@@ -1,5 +1,5 @@
 /** Build the browser plugin half; React is provided by the DSH client. */
-import { readFile, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 let build
@@ -10,6 +10,10 @@ try {
 }
 
 const root = new URL('.', import.meta.url)
+// Package the pinned native-stream ZIP codec for the host; never load it in the browser bundle.
+await mkdir(new URL('vendor/', root), { recursive: true })
+for (const [src, dest] of [['index-native.min.js', 'zip-native.min.js'], ['LICENSE', 'ZIP-LICENSE.txt']])
+  await copyFile(new URL(`node_modules/@zip.js/zip.js/${src}`, root), new URL(`vendor/${dest}`, root))
 const manifest = JSON.parse(await readFile(new URL('package.json', root), 'utf8'))
 const result = await build({
   absWorkingDir: import.meta.dirname,

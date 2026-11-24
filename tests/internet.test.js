@@ -17,9 +17,13 @@ const waitFor = async predicate => {
   }
 }
 async function fixture(t, { output = '', exit = false, limit, platform = process.platform, usePath = false,
-  privileged = true, elevatedSpawn, stopMs } = {}) {
+  privileged = true, elevatedSpawn, stopMs, connectionProbe } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'world-internet-'))
-  t.after(() => rm(dir, { recursive: true, force: true }))
+  const instances = []
+  t.after(async () => {
+    await Promise.all(instances.map(host => host.dispose()))
+    await rm(dir, { recursive: true, force: true })
+  })
   const bin = join(dir, 'Easy Tier 程序'), data = join(dir, 'state')
   await mkdir(bin)
   const core = join(bin, process.platform === 'win32' ? 'easytier-core.exe' : 'easytier-core')
@@ -42,17 +46,18 @@ async function fixture(t, { output = '', exit = false, limit, platform = process
       calls.push({ exe, args, options })
       return spawn(process.execPath, [script, ...args], options)
   }
-  const service = createWorldInternet({ dir: data, maxLogChars: limit, stopMs,
+  const options = { dir: data, maxLogChars: limit, stopMs, connectionProbe,
     platform, checkPrivileges: async () => privileged, spawnImpl: spawnFixture,
     elevatedSpawnImpl: elevatedSpawn || ((exe, args, options) => {
       const child = spawnFixture(exe, args, options)
       calls.at(-1).elevated = true
       return child
     }),
-  })
-  t.after(() => service.dispose())
+  }
+  const reopen = () => { const host = createWorldInternet(options); instances.push(host); return host }
+  const service = reopen()
   const config = { ...internetDefaults(platform), directory: usePath ? '' : bin, secret: '@test! $ & " quote' }
-  return { service, config, calls, data }
+  return { service, config, calls, data, reopen }
 }
 
 test('normalizes the supplied escaped UDP URL, preserves literal secrets and rejects invalid parameters', () => {
@@ -60,7 +65,7 @@ test('normalizes the supplied escaped UDP URL, preserves literal secrets and rej
   assert.equal(normalizeInternetConfig(config).peer, INTERNET_DEFAULTS.peer)
   assert.equal(normalizeInternetConfig(config).secret, config.secret)
   for (const change of [{ ipv4: '10.999.1.3' }, { ipv4: '10.1.1.1/33' }, { peer: 'udp://host:99999' },
-    { peer: '--daemon' }, { secret: '' }, { directory: 'relative' }, { secret: 'one\ntwo' }])
+    { autoStart: 'true' }, { autoStart: 1 }, { peer: '--daemon' }, { secret: '' }, { directory: 'relative' }, { secret: 'one\ntwo' }])
     assert.throws(() => normalizeInternetConfig({ ...config, ...change }))
 })
 
@@ -91,6 +96,71 @@ test('saves configuration, passes literal argv without a shell, streams both out
   const restarted = await service.call('start'); assert.equal(calls.length, 2)
   await service.dispose()
   await waitFor(() => { try { process.kill(restarted.pid, 0); return false } catch { return true } })
+})
+
+test('only an opted-in host starts once; changing the next launch never changes the live connection', async t => {
+  let probes = 0
+  const { service, config, data, calls, reopen } = await fixture(t, { connectionProbe: {
+    read: async () => { probes++; return { connected: false } }, invalidate() {}, dispose() {},
+  } })
+  const saved = { ...config, autoStart: true }
+  await service.call('save', { config: saved })
+  assert.equal(calls.length, 0); assert.equal(probes, 0)
+  await service.dispose()
+  const host = reopen()
+  // Authorized startup runs on the host before any page/info request. Manual start
+  // arriving during initialization reuses the same process, not a second core.
+  await waitFor(() => calls.length === 1)
+  const state = await host.call('start'); assert.equal(state.phase, 'running')
+  assert.equal(calls.length, 1); assert.equal(probes, 1)
+  assert.equal((await host.call('info')).config.autoStart, true)
+  await assert.rejects(host.call('save', { config: { ...config, ipv4: '10.0.0.7' } }), {code:'WORLD_INTERNET_BUSY'})
+  await host.call('save', { config })
+  assert.equal((await host.call('status')).pid, state.pid)
+  assert.equal(JSON.parse(await readFile(join(data,'internet.json'),'utf8')).autoStart, false)
+  await host.call('stop'); await host.dispose()
+  const off = reopen()
+  await off.call('clear'); assert.equal(calls.length, 1); assert.equal(probes, 1)
+  const { autoStart, ...legacy } = config
+  await writeFile(join(data,'internet.json'),JSON.stringify(legacy))
+  const old = reopen()
+  await old.call('clear'); assert.equal((await old.call('info')).config.autoStart,false)
+  assert.equal(calls.length, 1); assert.equal(probes, 1)
+})
+
+test('a manual launch racing startup shares one child; unloading during startup never spawns one', async t => {
+  let release, checking
+  const { service, config, calls, reopen } = await fixture(t, { connectionProbe: {
+    read: () => new Promise(resolve => { release = () => resolve({connected:false}); checking() }),
+    invalidate() {}, dispose() { release?.() },
+  } })
+  await service.call('save', {config:{...config,autoStart:true}}); await service.dispose()
+  const boot = async () => {
+    const entered = new Promise(resolve => { checking = resolve }); const host = reopen()
+    await entered; return host
+  }
+  const first = await boot(), manual = first.call('start')
+  release(); assert.equal((await manual).running,true); assert.equal(calls.length,1)
+  await first.dispose()
+  const second = await boot(); await second.dispose(); assert.equal(calls.length,1)
+})
+
+test('startup skips a matching existing tunnel and reports a failed attempt without retrying', async t => {
+  let connected = true
+  const { service, config, calls, reopen, data } = await fixture(t, { connectionProbe: {
+    read: async c => ({ connected, ipv4: c.ipv4.split('/')[0] }), invalidate() {}, dispose() {},
+  } })
+  await service.call('save', {config:{...config, directory:join(data,'missing'), autoStart:true}})
+  await service.dispose()
+  const existing = reopen()
+  await existing.call('stop'); assert.match((await existing.call('status')).logs,/跳过自动启动/)
+  assert.equal(calls.length,0); await existing.dispose()
+  connected = false
+  const failed = reopen()
+  await waitFor(async () => (await failed.call('status')).phase === 'failed')
+  const state = await failed.call('status'); assert.match(state.error,/找不到/); assert.ok(!state.logs.includes(config.secret))
+  assert.equal(calls.length,0)
+  await failed.call('start',{config}); assert.equal(calls.length,1)
 })
 
 test('captures immediate failure, final partial stderr and bounded output', async t => {

@@ -21,16 +21,16 @@ const load = path => import(pathToFileURL(join(harness, path)))
 const { Context } = await load('vendor/cordis/lib/index.js')
 const { default: LocalFs } = await load('packages/fs/fs-local/lib/index.js')
 const { FsError } = await load('packages/fs/fs/lib/index.js')
-const { writableRoots } = await load('packages/sandbox/sandbox/lib/index.js')
 
 /** Same contract as the Host subprocess service, backed by node:child_process. */
 function createSubprocess() {
   return {
     spawn(spec) {
       const child = spawnProcess(spec.argv[0], spec.argv.slice(1), {
-        cwd: spec.cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+        cwd: spec.cwd, windowsHide: true, stdio: [typeof spec.stdio.stdin === 'object' ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         env: { ...process.env, ...(spec.env ?? {}) },
       })
+      if (child.stdin) { child.stdin.on('error', () => {}); child.stdin.end(spec.stdio.stdin.data) }
       // Decode only after collection: UTF-8 codepoints may cross pipe chunks.
       const collect = (stream, maxBytes) => {
         let bytes = Buffer.alloc(0), lossy = false
@@ -102,12 +102,14 @@ test('git service stages, commits and guards its inputs', async t => {
   await context.plugin(LocalFs, { cwd: workspace })
   const session = { header: { cwd: workspace } }
   let mode = 'workspace-write'
+  // 会话工作区默认就是仓库本身；测试中途会把它收窄到子目录，验证不再按仓库根拦写
+  let writableRoot = workspace
   const service = createVscodeGit({
     fs: context.fs,
     sessions: { get: id => id === 'session' ? session : undefined },
     get: () => undefined,
-    sandboxPolicy: { resolve: () => ({ mode, workspaceRoot: workspace }) },
-  }, { FsError, writableRoots, subprocess: createSubprocess() })
+    sandboxPolicy: { resolve: () => ({ mode, workspaceRoot: writableRoot }) },
+  }, { FsError, subprocess: createSubprocess() })
   t.after(async () => {
     await service.dispose()
     await context.fiber.dispose()
@@ -167,6 +169,14 @@ test('git service stages, commits and guards its inputs', async t => {
   mode = 'workspace-write'
   assert.equal((await service.call('status', { sessionId: 'session' })).files.length, 1)
 
+  // 工作区是仓库的子目录（仓库根在上一层）时，暂存照样能写：
+  // 能不能写由 git 与文件系统决定，不再按「仓库根必须落在会话可写目录内」拦掉
+  await writeFile(join(workspace, 'sub', 'd.txt'), 'd\n')
+  writableRoot = join(workspace, 'sub')
+  const stagedFromSub = await service.call('stage', { sessionId: 'session', root: join(workspace, 'sub'), paths: ['sub/d.txt'] })
+  assert.equal(stagedFromSub.status.files.some(file => file.path === 'sub/d.txt' && file.staged), true)
+  writableRoot = workspace
+
   // Diff：未跟踪按整份新增、工作区看磁盘、已暂存看索引，且只读模式下仍然可看
   const untrackedDiff = await service.call('diff', { sessionId: 'session', paths: ['c.txt'], untracked: true })
   assert.equal(untrackedDiff.untracked, true)
@@ -208,7 +218,7 @@ test('log reads real repositories without writes and scopes every request', asyn
     sessions: { get: id => id === 'session' ? session : undefined },
     get: () => undefined,
     sandboxPolicy: { resolve: () => ({ mode: 'read-only', workspaceRoot: workspace }) },
-  }, { FsError, writableRoots, subprocess: createSubprocess() })
+  }, { FsError, subprocess: createSubprocess() })
   const log = root => service.call('log', { sessionId: 'session', ...(root ? { root } : {}) })
   const command = async (root, ...args) => assert.equal(await git(['-C', root, ...args]), 0)
   const init = async root => {

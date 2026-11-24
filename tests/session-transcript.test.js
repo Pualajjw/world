@@ -36,6 +36,14 @@ test('abandoned stream does not leave a phantom assistant reply', () => {
   assert.equal(transcript.snapshot().messages.length, 0)
 })
 
+test('taskbar replies follow the claimed input, not the most recent assistant message', () => {
+  const transcript = createSessionTranscript()
+  const answer = (turn, step) => transcript.event({ type: 'assistant/message', data: { turn, step, message: { content: [{ type: 'text', text: 'answer' }] } } })
+  transcript.claim(3, 'world-taskbar-first'); answer(2, 0); answer(3, 0)
+  transcript.claim(3, 'ordinary-input'); answer(3, 1)
+  assert.deepEqual(transcript.snapshot().messages.map(row => row.requestId), [undefined, 'world-taskbar-first', undefined])
+})
+
 test('replayed stream frames are ignored and tool failures use DSH toolCallId', () => {
   const transcript = createSessionTranscript()
   transcript.stream({ type: 'start', attemptId: 'one', turn: 2, step: 3 })

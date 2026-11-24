@@ -1,4 +1,5 @@
 import React from 'react'
+import { errorMessage } from './vscode-error-details.js'
 
 const h = React.createElement
 export const ASSISTANT_CONVERSATION_SLOT = 'world.assistant.conversation'
@@ -22,7 +23,7 @@ export function AssistantConversationContent({ sessionId, useSession, useConvers
     variant: 'embedded', phase: settling ? 'settling' : hero ? 'hero' : 'active', hero,
   }, {
     slots: NATIVE_VIEWS,
-    fallback: h('p', { role: 'alert' }, '当前 DSH 无法加载原生对话视图，请接管后检查插件是否已更新。'),
+    fallback: h('p', { role: 'alert' }, errorMessage('当前 DSH 无法加载原生对话视图，请接管后检查插件是否已更新。')),
   })
 }
 
@@ -58,7 +59,7 @@ function ResidentConversation({ sessionId, conversationSeat, children }) {
     try { return conversationSeat.claim(sessionId) }
     catch (error) { setError(String(error?.message || error)) }
   }, [conversationSeat, sessionId])
-  if (error) return h('p', { role: 'alert' }, `无法交接对话输入区：${error}`)
+  if (error) return h('p', { role: 'alert' }, errorMessage(`无法交接对话输入区：${error}`))
   return active === sessionId ? children : null
 }
 
@@ -80,7 +81,7 @@ export function AssistantConversation({ sessionId, sessions, SessionProvider, re
     return () => { abort.abort(); reference?.release() }
   }, [sessions, sessionId])
   if (!connection || connection.sessionId !== sessionId) return h('p', { role: 'status' }, '正在打开固定助手对话…')
-  if (connection.error) return h('p', { role: 'alert' }, `无法打开固定助手对话：${connection.error}`)
+  if (connection.error) return h('p', { role: 'alert' }, errorMessage(`无法打开固定助手对话：${connection.error}`))
   return h(SessionProvider, { session: connection.reference },
     h(ResidentConversation, { sessionId, conversationSeat }, renderSlot(ASSISTANT_CONVERSATION_SLOT, {})))
 }

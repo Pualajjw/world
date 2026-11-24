@@ -175,20 +175,20 @@ test('invalid edits, stale identities and cancellation leave the stored profile 
 
 test('a canceled write waiting for the shared lock cannot change preferences later', async t => {
   const { file, ctx } = await fixture(t)
-  let announce
-  announce = () => {}
+  let announce = () => {}
   const brain = createDesktopBrain(ctx, { file, atomic: { ...atomic,
     withFileLock: (...args) => { announce(); return atomic.withFileLock(...args) } } })
   const initial = await brain.call('configure', { sessionId: 'a' })
   const before = await readFile(file, 'utf8'), cancel = new AbortController()
-  let pending
   const attempting = new Promise(resolve => { announce = resolve })
   await atomic.withFileLock(file, async () => {
-    pending = brain.call('update_profile', { expectedRevision: initial.revision, expectedSessionId: 'a', profile: { name: '不应保存' } }, cancel.signal)
-    await attempting
-    cancel.abort()
+    // Observe rejection immediately and require it before the competing holder unlocks.
+    const payload = { expectedRevision: initial.revision, expectedSessionId: 'a', profile: { name: '不应保存' } }
+    await Promise.all([
+      assert.rejects(brain.call('update_profile', payload, cancel.signal), { name: 'AbortError' }),
+      attempting.then(() => cancel.abort()),
+    ])
   })
-  await assert.rejects(pending, { name: 'AbortError' })
   assert.equal(await readFile(file, 'utf8'), before)
 })
 

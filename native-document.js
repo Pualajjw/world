@@ -1,4 +1,5 @@
 import React from 'react'
+import { errorMessage } from './vscode-error-details.js'
 
 const h = React.createElement
 export const DOCUMENT_SLOT = 'world.vscode.document'
@@ -10,7 +11,7 @@ class NativePreviewBoundary extends React.Component {
   state = { error: '' }
   static getDerivedStateFromError(error) { return { error: error.message || String(error) } }
   render() {
-    return this.state.error ? h('p', { role: 'alert' }, `文档预览失败：${this.state.error}`) : this.props.children
+    return this.state.error ? h('p', { role: 'alert' }, errorMessage(`文档预览失败：${this.state.error}`)) : this.props.children
   }
 }
 
@@ -116,8 +117,8 @@ export function NativeDocument({ path, sessionId, sessions, SessionProvider, ren
       },
     },
   }), [address, identity, path, sessionId, visible, onOpen, onClose])
-  const fallback = h('p', { role: 'alert' }, '当前 DSH 未提供原生文档预览组件，请更新宿主并启用文档预览插件。')
-  if (connection?.error) return h('p', { role: 'alert' }, `无法打开文档预览：${connection.error}`)
+  const fallback = h('p', { role: 'alert' }, errorMessage('当前 DSH 未提供原生文档预览组件，请更新宿主并启用文档预览插件。'))
+  if (connection?.error) return h('p', { role: 'alert' }, errorMessage(`无法打开文档预览：${connection.error}`))
   if (!connection) return h('div', { className: 'world-vscode-loading', role: 'status' }, `正在打开 ${path.split(/[\\/]/u).at(-1)}…`)
   return h(SessionProvider, { session: connection.reference },
     renderSlot(DOCUMENT_SLOT, {}, { entryKey: SOURCE_KEY, hookContext: useTabInfo, fallback }))

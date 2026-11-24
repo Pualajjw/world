@@ -9,8 +9,9 @@
 import { spawn } from 'node:child_process'
 
 const [exe, ...args] = process.argv.slice(2)
+const diagnostic = process.env.WORLD_PBNPM_MERGE === '1' ? process.stdout : process.stderr
 if (!exe) {
-  process.stderr.write('pbnpm-run: 缺少 pbnpm.exe 路径\n')
+  diagnostic.write('pbnpm-run: 缺少 pbnpm.exe 路径\n')
   process.exit(2)
 }
 
@@ -20,15 +21,15 @@ const out = new TextDecoder('gbk')
 const err = new TextDecoder('gbk')
 
 child.stdout.on('data', chunk => process.stdout.write(out.decode(chunk, { stream: true })))
-child.stderr.on('data', chunk => process.stderr.write(err.decode(chunk, { stream: true })))
+child.stderr.on('data', chunk => diagnostic.write(err.decode(chunk, { stream: true })))
 child.on('error', cause => {
-  process.stderr.write(`pbnpm-run: 无法启动 pbnpm：${String(cause?.message || cause)}\n`)
+  diagnostic.write(`pbnpm-run: 无法启动 pbnpm：${String(cause?.message || cause)}\n`)
   process.exitCode = 127
 })
 child.on('close', code => {
   const rest = out.decode()
   if (rest) process.stdout.write(rest)
   const restErr = err.decode()
-  if (restErr) process.stderr.write(restErr)
+  if (restErr) diagnostic.write(restErr)
   process.exitCode = code ?? 1
 })

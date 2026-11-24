@@ -97,7 +97,7 @@ export async function checkPersonalization(browser, bundle) {
     assert.equal((await brain.get()).sessionId, 'session-1')
     assert.equal(await page.locator('.world-control-header strong').innerText(), '我在')
     assert.match(await page.locator('.world-control-session').innerText(), /归舟/, 'the assistant keeps its own name as a signature')
-    assert.equal(await page.locator('.world-assistant-pointer-label').innerText(), '归舟')
+    assert.match(await page.locator('.world-assistant-pointer-label').innerText(), /^归舟(?: · |$)/)
     // 交接只开门，不开一轮（0.2.72）：提示词在下一轮读，唤醒由生活线的闹钟负责。
     for (let tries = 0; tries < 10; tries++) await new Promise(resolve => setTimeout(resolve, 20))
     assert.equal(prompts.length, 0, 'a handoff starts no turn')
@@ -136,7 +136,7 @@ export async function checkPersonalization(browser, bundle) {
     await handoff.click()
     await page.waitForFunction(() => document.querySelector('[data-world-control-button]')?.getAttribute('aria-pressed') === 'true')
     const label = await page.locator('.world-assistant-pointer-label').innerText()
-    assert.equal(label, (await brain.get()).profile.name)
+    assert.equal(label.split(' · ')[0], (await brain.get()).profile.name)
     await page.locator('[data-world-assistant-toggle]').click()
     const collapsed = await page.locator('.world-control-card').boundingBox()
     assert.ok(collapsed.height < 100, `long names cannot stretch the collapsed header (got ${collapsed.height})`)

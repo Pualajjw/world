@@ -22,16 +22,16 @@ const env = { ...process.env, DSH_HOME: home, WORLD_MOBILE_HOST: '127.0.0.1', WO
 delete env.ELECTRON_RUN_AS_NODE; delete env.DSH_SOURCE
 const require = createRequire(join(root, '../workflow-studio/package.json'))
 const { chromium } = require('playwright-core')
-let browser, index = 0
+let browser, ownedServer, index = 0
 
 async function boot() {
   index++
-  const server = startProcess(cli, ['--profile', 'web', '--port', '0', '--no-open'],
+  const server = ownedServer = startProcess(cli, ['--profile', 'web', '--port', '0', '--no-open'],
     { cwd: run, env, logPath: join(run, `host-${index}.log`) })
   const address = await waitFor(server.ready, 60000, undefined, `DSH web startup #${index}`)
   return { server, address }
 }
-async function openQr(address) {
+async function openQr(address, enable = false) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, locale: 'zh-CN' })
   await dismissOnboarding(page)
   await page.goto(address, { waitUntil: 'domcontentloaded' })
@@ -42,6 +42,11 @@ async function openQr(address) {
   const packet = await (await pending).json()
   assert.equal(packet.result.ok, true, JSON.stringify(packet.result.error))
   await page.locator('.world-mobile-qr svg').waitFor({ timeout: 30000 })
+  if (enable) {
+    const saved=page.waitForResponse(r=>r.url().endsWith('/api/world-startup/set'))
+    await page.getByRole('checkbox',{name:'随 World 启动手机连接'}).check()
+    assert.equal((await (await saved).json()).result.value.state,'enabled')
+  }
   await page.close()
   return packet.result.value.url
 }
@@ -63,7 +68,7 @@ const pageStatus = async (origin, cookie) => {
 try {
   browser = await chromium.launch(browserLaunchOptions())
   const first = await boot()
-  const url1 = await openQr(first.address)
+  const url1 = await openQr(first.address,true)
   const cookie = await pair(url1)
   const before = await pageStatus(new URL(url1).origin, cookie)
   assert.equal(before.isWorld, true, 'the phone is inside world before the restart')
@@ -71,9 +76,15 @@ try {
   await first.server.stop()
 
   const second = await boot()
+  // Verify the listener and the original phone login before opening any desktop page.
+  let after
+  for (let i=0;i<100;i++) {
+    try { after=await pageStatus(new URL(url1).origin,cookie); if (after.isWorld) break } catch { /* still starting */ }
+    await new Promise(resolve=>setTimeout(resolve,100))
+  }
+  assert.equal(after?.isWorld,true,'the saved phone works without a desktop reopening the QR')
   const url2 = await openQr(second.address)
   assert.equal(url2, url1, 'the QR is byte-identical after a real DSH restart')
-  const after = await pageStatus(new URL(url2).origin, cookie)
   assert.equal(after.status, 200)
   assert.equal(after.isWorld, true, 'the old phone cookie still loads world after the restart')
   assert.equal(after.isPairPage, false, 'the phone was not sent back to the pairing page')
@@ -87,4 +98,4 @@ try {
   const log = await readFile(join(run, `host-${index}.log`), 'utf8').catch(() => '')
   console.error(log.slice(-6000).replace(/([?&]token=)[^\s"'<>]+/g, '$1[redacted]'))
   throw error
-} finally { await browser?.close() }
+} finally { await browser?.close(); await ownedServer?.stop() }

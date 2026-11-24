@@ -32,8 +32,12 @@ export async function checkWalkerPoses(browser, bundleText, shotsDir) {
     await page.addScriptTag({ content: bundleText })
     await page.waitForFunction(() => document.body.dataset.worldWindow === 'closed')
 
-    // 站到一片空地上，等它停稳：姿势只在站定时才归相位管
+    // 站到一片空地上，等它停稳：姿势只在站定时才归相位管。
+    // 指针事件只记位置，第一次 step 在下一帧才迈步——事件返回时 walking 还是初始的 off，
+    // 直接等 off 会在它出发前就返回，所以先等它真的抬腿（走不到 3.2px 时不会出现，等空即可）。
     await page.mouse.move(700, 760)
+    await page.waitForFunction(() => document.querySelector('.world-walker').dataset.walking === 'on', null, { timeout: 2000 })
+      .catch(() => {})
     await page.waitForFunction(() => document.querySelector('.world-walker').dataset.walking === 'off', null, { timeout: 12000 })
     await page.waitForTimeout(600)
 

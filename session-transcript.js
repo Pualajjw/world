@@ -7,26 +7,33 @@ const assistantId = data => `assistant:${data.turn}:${data.step}`
 /** A bounded public projection; reasoning, context prompts and tool payloads never enter it. */
 export function createSessionTranscript() {
   let messages = [], tools = [], attempt = null
+  let claimed = null
+  const ticket = turn => claimed && turn === claimed.turn ? { requestId: claimed.requestId } : {}
   const put = entry => {
     const existing = messages.findIndex(row => row.id === entry.id)
     const row = { ...entry, text: entry.text.slice(0, TEXT_LIMIT), truncated: entry.text.length > TEXT_LIMIT }
     messages = existing < 0 ? [...messages, row].slice(-LIMIT) : messages.map((item, index) => index === existing ? row : item)
   }
   return {
+    claim(turn, requestId) { claimed = Number.isSafeInteger(turn) && String(requestId || '').startsWith('world-taskbar-') ? { turn, requestId } : null },
     snapshot: () => ({ messages: structuredClone(messages), toolEvents: structuredClone(tools) }),
     event(event) {
       const data = event.data || {}, time = Number(event.time) || Date.now()
       if (event.type === 'user/message') {
         if (data.source?.kind && data.source.kind !== 'user') return false
         if (String(data.source?.rpcId || '').startsWith('world-workbench-')) return false
-        const text = textOf(data)
+        const text = String(data.source?.rpcId || '').startsWith('world-taskbar-') ? data.content?.[0]?.text : textOf(data)
         if (!text) return false
         put({ id: String(data.id || `user:${event.seq ?? time}`), role: 'user', text, time, streaming: false })
       } else if (event.type === 'assistant/message') {
         const id = assistantId(data), text = textOf(data.message)
+        const origin = attempt?.id === id ? attempt.origin : ticket(data.turn)
         if (attempt?.id === id) attempt = null
         if (!text) { messages = messages.filter(row => row.id !== id); return true }
-        put({ id, role: 'assistant', text, time, streaming: false })
+        put({ id, role: 'assistant', ...origin, text, time, streaming: false })
+      } else if (event.type === 'turn/end' && claimed?.turn === data.turn && claimed) {
+        if (!messages.some(row => row.requestId === claimed.requestId && row.role === 'assistant')) put({ id: `end:${claimed.requestId}`, role: 'assistant', ...ticket(data.turn), text: '这一轮没有收到文字答复，可展开对话查看。', time, streaming: false })
+        claimed = null
       } else if (event.type === 'tool/call') {
         tools = [...tools.filter(row => row.id !== data.callId), { id: data.callId,
           name: String(data.name || '工具').slice(0, 80), state: 'running', time }].slice(-LIMIT)
@@ -38,7 +45,7 @@ export function createSessionTranscript() {
     },
     stream(frame) {
       if (frame.type === 'start') {
-        attempt = { attemptId: frame.attemptId, id: assistantId(frame), parts: new Map(), time: Date.now(), nextIndex: 0 }
+        attempt = { attemptId: frame.attemptId, id: assistantId(frame), origin: ticket(frame.turn), parts: new Map(), time: Date.now(), nextIndex: 0 }
         return false
       }
       if (!attempt || frame.attemptId !== attempt.attemptId) return false
@@ -61,7 +68,7 @@ export function createSessionTranscript() {
         attempt.parts.set(chunk.index, String(chunk.block.text || '').slice(0, TEXT_LIMIT + 1))
       } else return false
       const text = [...attempt.parts.entries()].sort(([a], [b]) => a - b).map(([, value]) => value).join('\n')
-      put({ id: attempt.id, role: 'assistant', text, time: attempt.time, streaming: true })
+      put({ id: attempt.id, role: 'assistant', ...attempt.origin, text, time: attempt.time, streaming: true })
       return true
     },
   }

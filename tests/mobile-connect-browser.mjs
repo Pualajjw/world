@@ -19,9 +19,13 @@ try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
   const errors = [], calls = []
   page.on('pageerror', error => errors.push(error.message))
-  let selectedHost = '', configured = false, count = 2, token = 'a'.repeat(43)
+  let startupState = 'removed', selectedHost = '', configured = false, count = 2, token = 'a'.repeat(43)
   const hosts = [{ name: '以太网', address: '192.168.1.3' }, { name: 'Wi-Fi', address: '192.168.2.3' }]
   await page.exposeBinding('mobileRpc', (_source, method, payload) => {
+    if (method.startsWith('world-startup/')) {
+      assert.equal(payload.id,'mobile'); if (method === 'world-startup/set') startupState=payload.state
+      return {ok:true,value:{state:startupState}}
+    }
     calls.push({ method, payload })
     if (method === 'world-mobile/addresses') return { ok: true, value: { configured, selectedHost, addresses: hosts.slice(0, count) } }
     assert.ok(['world-mobile/open', 'world-mobile/reset'].includes(method))
@@ -60,7 +64,10 @@ try {
     buttonHeight: node.querySelector('.world-mobile-copy').getBoundingClientRect().height, gap: getComputedStyle(node).gap,
   }))
   assert.deepEqual(desktopLayout, { buttonHeight: 30, gap: '8px' })
-  await select.focus(); await page.keyboard.press('Tab')
+  const auto = page.getByRole('checkbox',{name:'随 World 启动手机连接'})
+  await select.focus(); await page.keyboard.press('Tab'); assert.ok(await auto.evaluate(n=>n===document.activeElement))
+  await auto.check(); await page.waitForFunction(()=>document.querySelector('.world-mobile-network input')?.checked)
+  await page.keyboard.press('Tab')
   assert.equal(await page.getByRole('button', { name: '重置链接' }).evaluate(node => node === document.activeElement), true)
   assert.equal(await page.getByText('二维码长期有效，重启 DSH 后仍可扫描。').count(), 1)
   assert.equal(await page.getByRole('button', { name: '重置链接' }).isDisabled(), false)
@@ -108,6 +115,7 @@ try {
   await page.evaluate(() => window.mount())
   await page.locator('.world-mobile-qr svg').waitFor()
   assert.equal(await select.inputValue(), '192.168.1.3', 'reopening uses the Host selection')
+  assert.equal(await auto.isChecked(),true); await auto.uncheck(); assert.equal(startupState,'disabled')
   await page.getByRole('button', { name: '关闭手机连接' }).click()
   configured = true; count = 1
   await page.evaluate(() => window.mount())

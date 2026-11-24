@@ -12,12 +12,13 @@ test('client registers one shell overlay and cleans up its stylesheet', async ()
   let definition
   const slots = [], registrations = [], appended = [], cleanups = []
   const document = {
+    documentElement: { style: {} },
     createElement: tag => ({ tag, dataset: {}, textContent: '', remove() { this.removed = true } }),
     head: { append: element => appended.push(element) },
   }
   runInNewContext(source, { window: { __ModuleLoader__: { load: value => { definition = value } } }, document, console })
   const client = definition.factory(name => {
-    if (name === 'react') return { createElement() {}, Component: class {} }
+    if (name === 'react') return { createElement() {}, createContext: () => ({}), memo: component => component, Component: class {} }
     if (name === 'react-dom') return { createPortal: children => children }
     assert.fail(`unexpected external module: ${name}`)
   })
@@ -28,7 +29,8 @@ test('client registers one shell overlay and cleans up its stylesheet', async ()
       register(options, component) { registrations.push({ options, component }); return () => {} },
     },
   })
-  assert.equal(Array.from(client.inject).join(','), 'slots,sessions,remote,remote.workspaceFiles,connection,layout')
+  assert.equal(Array.from(client.inject).join(','), 'slots,sessions,remote,remote.session,remote.workspaceFiles,connection,layout')
+  assert.ok(!slots.some(slot => slot.name === 'settings.section'), 'World settings do not contribute a native DSH settings section')
   assert.equal(slots.length, 4)
   assert.equal(slots[0].name, 'shell.overlay')
   assert.equal(slots[1].name, 'world.assistant.conversation')
@@ -98,12 +100,13 @@ test('plugin catalog mirrors whole-page panels into a world-owned keyed slot', a
   const source = await readFile(join(root, 'client.js'), 'utf8')
   let definition
   const document = {
+    documentElement: { style: {} },
     createElement: () => ({ dataset: {}, textContent: '', remove() {} }),
     head: { append() {} },
   }
   runInNewContext(source, { window: { __ModuleLoader__: { load: value => { definition = value } } }, document, console })
   const client = definition.factory(name => {
-    if (name === 'react') return { createElement() {}, Component: class {} }
+    if (name === 'react') return { createElement() {}, createContext: () => ({}), memo: component => component, Component: class {} }
     if (name === 'react-dom') return { createPortal: children => children }
     return {}
   })

@@ -22,6 +22,11 @@ export async function checkPhoneDesktop(browser, bundleText, shotsDirectory) {
     await page.screenshot({ path: join(shotsDirectory, `${name}.png`) })
   }
   const home = () => page.getByRole('button', { name: '返回桌面', exact: true }).tap()
+  /** 刷新会恢复上次的前台窗口（0.3.42）：前台有窗口时宿主面板盖住桌面，先把桌面拿回来。 */
+  const backToDesktopIfNeeded = async () => {
+    const back = page.getByRole('button', { name: '返回桌面', exact: true })
+    if (await back.isVisible().catch(() => false)) { await back.tap(); await page.waitForTimeout(120) }
+  }
   const switchTo = async id => {
     await page.getByRole('button', { name: '切换应用', exact: true }).tap()
     await page.locator(`[data-world-phone-window="${id}"]`).tap()
@@ -231,6 +236,28 @@ export async function checkPhoneDesktop(browser, bundleText, shotsDirectory) {
     await page.waitForTimeout(250)
     assertAligned(await gutterState(), '回到顶部')
     await shot('phone-360-vscode-wrap-top')
+    // 打字只重排变了的行：镜像层节点必须复用。整篇重建在 2000 行的文件上每键多 19ms 样式重算，
+    // 敲起来是顿的——这里用节点身份盯住「没有整篇重建」。
+    await editor.evaluate(node => {
+      for (const cell of node.querySelectorAll('.world-vscode-measure > div')) cell.__mark = true
+    })
+    await editor.locator('.world-vscode-textarea').evaluate(node => { node.focus(); node.setSelectionRange(0, 0) })
+    await page.keyboard.type('x')
+    await page.waitForTimeout(200)
+    const reused = await editor.evaluate(node => {
+      const cells = [...node.querySelectorAll('.world-vscode-measure > div')]
+      return { total: cells.length, kept: cells.filter(cell => cell.__mark).length }
+    })
+    assert.deepEqual(reused, { total: wrapped.heights.length, kept: wrapped.heights.length }, '改一行不重建整片镜像层')
+    await page.keyboard.press('Enter')
+    await page.waitForTimeout(250)
+    const grown = await editor.evaluate(node => {
+      const cells = [...node.querySelectorAll('.world-vscode-measure > div')]
+      return { total: cells.length, kept: cells.filter(cell => cell.__mark).length }
+    })
+    assert.equal(grown.total, wrapped.heights.length + 1, '回车加一行，镜像层跟着多一行')
+    assert.ok(grown.kept >= grown.total - 2, `只重建插入点附近的行（复用 ${grown.kept}/${grown.total}）`)
+    assertAligned(await gutterState(), '打字后')
     // 手机上的左边：活动栏整个收走（0px），只剩 26px 的窄行号槽，正文从窗口最左边开始
     assert.deepEqual(await editor.locator('.world-vscode-gutter').evaluate(node => ({
       width: Math.round(node.getBoundingClientRect().width), font: getComputedStyle(node).fontSize,
@@ -239,7 +266,8 @@ export async function checkPhoneDesktop(browser, bundleText, shotsDirectory) {
     const windowBox = await editor.boundingBox()
     const editorBox = await editor.locator('.world-vscode-editor').boundingBox()
     assert.ok(Math.abs(editorBox.x - windowBox.x) <= 1, '正文顶着窗口左边')
-    assert.equal(await editor.locator('.world-vscode-statusbar .world-vscode-status-wrap').textContent(), '换行 开')
+    assert.equal(await editor.locator('.world-vscode-statusbar .world-vscode-status-wrap').textContent(), '换行')
+    assert.equal(await editor.locator('.world-vscode-statusbar .world-vscode-status-wrap').evaluate(node => node.classList.contains('is-on')), true, '手机上默认开着')
     // 手机上「未保存」只占一个符号：整段文字会被挤成「未..」，而 tab 上本来就有圆点
     assert.equal(await editor.locator('.world-vscode-status-msg').textContent(), '●', '未保存用符号')
     assert.equal(await editor.locator('.world-vscode-status-msg').getAttribute('title'), '未保存')
@@ -343,6 +371,12 @@ export async function checkPhoneDesktop(browser, bundleText, shotsDirectory) {
       await page.setViewportSize({ width, height: 640 })
       const nav = await page.locator('.world-phone-nav').boundingBox()
       assert.ok(nav.x >= 0 && nav.x + nav.width <= width)
+      // 手机任务栏也要能插一句话：留言框挤在导航按钮和右侧按钮之间，不能被压成一条线。
+      const replyButton = await page.locator('.world-her-message.is-phone .world-her-reply').boundingBox()
+      const herBox = await page.locator('.world-her-message.is-phone .world-her-compose').boundingBox()
+      assert.deepEqual([replyButton.width, replyButton.height, herBox.x - replyButton.x - replyButton.width], [26, 26, 6])
+      assert.ok(herBox && herBox.width >= 90, `留言框在 ${width}px 下仍有可打字的宽度（实际 ${herBox?.width}）`)
+      assert.ok(replyButton.x >= nav.x + nav.width && herBox.x + herBox.width <= width, '回复按钮和留言框不压住导航按钮，也不出屏')
       assert.equal(await page.locator('.world-icons').evaluate(node => getComputedStyle(node).gridTemplateColumns.split(' ').length), 4)
     }
     // Dragging the outer window passes through small desktop widths before reaching its original size.
@@ -364,6 +398,7 @@ export async function checkPhoneDesktop(browser, bundleText, shotsDirectory) {
     await page.evaluate(installBrowserProbe)
     await page.addScriptTag({ content: bundleText })
     await page.waitForFunction(() => document.body.dataset.worldLayout === 'phone')
+    await backToDesktopIfNeeded()
     await page.locator('[data-world-icon-id="dsh"]').tap()
     await fullApp('#root')
     await page.setViewportSize({ width: 601, height: 640 })
@@ -393,6 +428,7 @@ export async function checkPhoneDesktop(browser, bundleText, shotsDirectory) {
     assert.ok(scroll.top > 0 && scroll.content > scroll.height, 'long icon grids scroll vertically')
     assert.equal(scroll.width, scroll.scrollWidth, 'the phone desktop never scrolls sideways')
     await page.locator('.world-icons').evaluate(node => { node.scrollTop = 0 })
+    await backToDesktopIfNeeded()
     await page.locator('[data-world-icon-id="dsh"]').tap()
     const webApp = await page.locator('#root').boundingBox()
     assert.equal(await page.locator('.world-desktop-titlebar').evaluate(node => node.getBoundingClientRect().height), 0)

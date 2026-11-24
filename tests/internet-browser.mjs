@@ -73,6 +73,8 @@ try {
   await win.getByRole('button', { name: '显示密钥', exact: true }).click()
   assert.equal(await win.getByLabel('网络密钥', { exact: true }).getAttribute('type'), 'text')
   await win.getByRole('button', { name: '隐藏密钥', exact: true }).click()
+  const autoStart = win.getByRole('checkbox', { name: '随 World 启动上网' })
+  assert.equal(await autoStart.isChecked(), false); await autoStart.check()
   holdSave = true
   await win.getByRole('button', { name: '保存配置', exact: true }).click()
   await win.getByRole('button', { name: '保存中…', exact: true }).waitFor()
@@ -81,6 +83,7 @@ try {
   releaseSave(); holdSave = false
   await win.getByRole('status').filter({ hasText: '配置已保存' }).waitFor()
   assert.equal(await win.getByLabel('节点地址', { exact: true }).inputValue(), 'udp://118.178.196.123:11010')
+  assert.equal((await service.call('info')).config.autoStart, true); assert.equal(starts.length, 0)
   connectionReady = false
   await tray.waitFor({ state: 'hidden' })
   await win.getByRole('button', { name: '启动上网', exact: true }).click()
@@ -114,7 +117,10 @@ try {
   assert.equal((await service.call('status')).running, true, 'closing the window keeps the connection alive')
   await tray.click()
   await win.getByRole('status').filter({ hasText: '运行中' }).waitFor()
-  assert.equal(starts.length, 1)
+  assert.equal(starts.length, 1); assert.equal(await autoStart.isChecked(), true)
+  await autoStart.uncheck(); await win.getByRole('button', {name:'保存配置',exact:true}).click()
+  await win.getByRole('status').filter({hasText:'配置已保存'}).waitFor()
+  assert.equal((await service.call('info')).config.autoStart, false); assert.equal((await service.call('status')).running,true)
   await win.getByRole('button', { name: '最小化', exact: true }).click()
   await page.waitForTimeout(200)
   const count = calls.filter(operation => operation === 'status').length

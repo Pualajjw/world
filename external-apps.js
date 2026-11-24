@@ -30,7 +30,7 @@ function Cap({ label, onClick, close, className, pressed, children }) {
 }
 
 /** 外部应用的独立窗口：复用 VSCode 窗口外观，内容是一个 iframe。 */
-export function ExternalAppWindow({
+export function ExternalAppWindow({ toolHistory,
   app, rect, state, zIndex, pinned = false, onTogglePin, onActivate, onClose, onMinimize, onToggleMaximize,
   onDragStart, onDragMove, onDragEnd, onResizeStart,
 }) {
@@ -48,6 +48,7 @@ export function ExternalAppWindow({
     'data-world-app-id': app.id, 'aria-label': app.name, 'aria-hidden': minimized,
     style, onPointerDown: onActivate,
   },
+  toolHistory,
   h('header', {
     className: 'world-vscode-titlebar',
     onPointerDown: onDragStart, onPointerMove: onDragMove, onPointerUp: onDragEnd, onPointerCancel: onDragEnd,

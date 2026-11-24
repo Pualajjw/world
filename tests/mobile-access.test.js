@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
+import { createWorldStartup } from '../world-startup.js'
+import { atomic } from './journal-fixture.mjs'
 import { createMobileAccess, createMobileCredential, mobileBindAddress, mobileNetworkAddresses } from '../mobile-access.js'
 
 async function fixture(t, options = {}, controls = {}) {
@@ -228,6 +230,33 @@ test('the chosen interface is remembered on disk for the next start', async t =>
   const second = await fixture(t, { dir, host: '', port: Number(new URL(first.origin).port) }, { interfaces: () => rows })
   t.after(async () => { await second.mobile.dispose() })
   assert.equal((await second.mobile.call('addresses', {})).selectedHost, '127.0.0.2')
+})
+test('a saved mobile startup opens the same QR without a client, and never falls back to another interface',async t=>{
+  const local='127.0.0.1', rows={lan:[{family:'IPv4',internal:false,address:local}]}
+  const first=await fixture(t,{host:''},{interfaces:()=>rows,host:local})
+  const port=Number(new URL(first.origin).port)
+  const cookie=await first.login()
+  const registry=mobile=>{
+    const reg=createWorldStartup({dir:first.dir,atomic})
+    reg.register('mobile',{name:'手机连接',initial:'removed',start:mobile.startSaved,validate:mobile.startupHost});return reg
+  }
+  await registry(first.mobile).call('set',{id:'mobile',state:'enabled'})
+  await first.mobile.dispose()
+  let web=null, available={}
+  const options={dir:first.dir,config:{port},webServer:()=>web,connection:{authenticatedUrl:s=>s+'?token=private-launch-token'},interfaces:()=>available}
+  const second=createMobileAccess(options), preferences=registry(second)
+  try {
+    const started=preferences.run('mobile');const ready=setTimeout(()=>{web={getOrigin:()=>first.upstreamOrigin};available=rows},50)
+    try {await started} finally {clearTimeout(ready)}
+    // No desktop page or manual open request. The existing paired phone is still logged in.
+    const phone=()=>fetch(first.origin,{headers:{cookie}}).then(r=>r.text())
+    assert.match(await phone(),/real world/)
+    await preferences.call('set',{id:'mobile',state:'removed'})
+    assert.match(await phone(),/real world/);assert.equal((await second.call('open',{})).url,first.opened.url)
+  } finally {await second.dispose()}
+  const changed=createMobileAccess({...options,startupWaitMs:0,interfaces:()=>({another:[{family:'IPv4',internal:false,address:'127.0.0.2'}]})})
+  await registry(changed).run('mobile');assert.equal((await registry(changed).call('get',{id:'mobile'})).state,'removed')
+  try {await assert.rejects(changed.startSaved(),/网卡/)} finally {await changed.dispose()}
 })
 test('an explicit configured address wins over the dropdown payload', async t => {
   const f = await fixture(t)

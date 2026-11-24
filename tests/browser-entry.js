@@ -12,10 +12,14 @@ const slotListeners = new Set()
 const pluginFixtures = new Map()
 let conversationFixture
 const source = 'const value = 1\n'
-const BIG_TEXT = Array.from({ length: 50000 }, (_, index) => `line ${index} ${'x'.repeat(20)}`).join('\n')
+// 0.85 MiB / 50000 行：纯文本也应只挂载可见视口。
+const BIG_TEXT = Array.from({ length: 50000 }, (_, index) => `line ${index} ${'x'.repeat(6)}`).join('\n')
 const calls = []
 const runJobs = new Map()
 const savedFiles = new Map([['/workspace/src/main.js', source]])
+// 版本号跟着 setFile 走：对话/外部工具改完文件，编辑器靠它判断要重读哪几个标签。
+const fileVersions = new Map()
+const versionOf = path => fileVersions.get(path) || 'v1'
 let mainSessionId = 'session-1'
 const mainSessionListeners = new Set()
 /** 会话列表夹具：VSCode 对话按 cwd 筛选；新建会真的往里加一行。 */
@@ -60,7 +64,7 @@ const sessions = {
   },
   async refreshProjections(id) { projectionRefreshes.push(id) },
 }
-const remote = { workspaceFiles: { async list(sessionId, path) {
+const remote = { session: { openWorkspacePath: request => window.__worldOpenWorkspacePath(request) }, workspaceFiles: { async list(sessionId, path) {
   return { ok: true, value: { entries: path.endsWith('/src') ? [
     { name: 'main.js', type: 'file', size: 17 },
     { name: 'big.txt', type: 'file', size: BIG_TEXT.length },
@@ -87,6 +91,7 @@ function cancellable(promise, signal) {
 
 const rpc = { async call(_base, method, payload, signal) {
   calls.push({ method, payload })
+  if (method === 'world-app-tools/catalog' && window.__worldToolCatalog) return { ok:true, value:await window.__worldToolCatalog() }
   if (method === 'world-internet/connection' && !window.__worldInternetCall)
     return { ok: true, value: { connected: false, ipv4: '', peerCount: 0 } }
   if (method.startsWith('world-internet/') && window.__worldInternetCall)
@@ -97,6 +102,8 @@ const rpc = { async call(_base, method, payload, signal) {
   }
   if (method.startsWith('world-storage/') && window.__worldStorageCall)
     return cancellable(window.__worldStorageCall(method.slice('world-storage/'.length), payload), signal)
+  if (method.startsWith('world-startup/') && window.__worldStartupCall)
+    return cancellable(window.__worldStartupCall(method.slice('world-startup/'.length), payload), signal)
   if (method.startsWith('world-processes/') && window.__worldProcessesCall)
     return cancellable(window.__worldProcessesCall(method.slice('world-processes/'.length), payload), signal)
   if (method.startsWith('world-journal/') && window.__worldJournalCall) return window.__worldJournalCall(method.slice('world-journal/'.length), payload)
@@ -111,6 +118,10 @@ const rpc = { async call(_base, method, payload, signal) {
   }
   if (method.startsWith('world-ssh/') && window.__worldSshCall) {
     return cancellable(window.__worldSshCall(method.slice('world-ssh/'.length), payload), signal)
+  }
+  if (method.startsWith('world-her-message/') && window.__worldHerMessage) {
+    try { return { ok: true, value: await window.__worldHerMessage(method.slice('world-her-message/'.length), payload) } }
+    catch (error) { return { ok: false, error: { message: error.message, code: error.code } } }
   }
   if (method.startsWith('world-power/') && window.__worldPowerCall) {
     try { return { ok: true, value: await window.__worldPowerCall(method.slice('world-power/'.length), payload) } }
@@ -134,11 +145,16 @@ const rpc = { async call(_base, method, payload, signal) {
     try { return { ok: true, value: await window.__worldLaunchShortcut(payload) } }
     catch (error) { return { ok: false, error: { message: error.message, code: error.code } } }
   }
+  if (method === 'world-vscode-source/open-zip' && window.__worldZipOpen) return window.__worldZipOpen(payload)
   if (method === 'world-vscode-source/probe') {
     const path = String(payload.path || '')
     const name = path.split('/').filter(Boolean).at(-1) || path
     const directory = !/\.[^/.]+$/u.test(name)
     return { ok: true, value: { path, type: directory ? 'directory' : 'file', name } }
+  }
+  if (method === 'world-vscode-source/versions') {
+    if (window.__worldSourceVersions) return window.__worldSourceVersions(payload)
+    return { ok: true, value: { versions: (payload.paths || []).filter(path => savedFiles.has(path)).map(path => ({ path, version: versionOf(path) })) } }
   }
   if (method === 'world-vscode-source/open') {
     if (window.__worldSourceOpen) return cancellable(window.__worldSourceOpen(payload), signal)
@@ -151,14 +167,15 @@ const rpc = { async call(_base, method, payload, signal) {
     if (payload.path.endsWith('build.bat')) {
       return { ok: true, value: { path: payload.path, source: '@echo off\r\necho hello from batch\r\n', version: 'v1', eol: 'CRLF', bom: false } }
     }
-    return { ok: true, value: { path: payload.path, source: savedFiles.get(payload.path) || '', version: 'v1', eol: 'LF', bom: false } }
+    return { ok: true, value: { path: payload.path, source: savedFiles.get(payload.path) || '', version: versionOf(payload.path), eol: 'LF', bom: false } }
   }
-  if (method === 'world-vscode-roots/scan' && window.__worldRootsCall) {
-    try { return { ok: true, value: await window.__worldRootsCall('scan', payload) } }
+  if (method.startsWith('world-vscode-pb/') && window.__worldPbAction) return { ok: true, value: await window.__worldPbAction(method.split('/').at(-1), payload) }
+  if (method.startsWith('world-vscode-roots/') && window.__worldRootsCall) {
+    try { return { ok: true, value: await window.__worldRootsCall(method.split('/').at(-1), payload) } }
     catch (error) { return { ok: false, error: { message: error.message, code: error.code } } }
   }
-  if (method === 'pbnpm-pbd-project/open' && window.__worldPbdCall) {
-    return window.__worldPbdCall('open', payload)
+  if (['pbnpm-pbd-project/open', 'pbnpm-pbd-project/application'].includes(method) && window.__worldPbdCall) {
+    return window.__worldPbdCall(method.split('/').at(-1), payload)
   }
   if (method === 'world-vscode-source/list' && window.__worldWorkspaceList) {
     const custom = await window.__worldWorkspaceList(payload)
@@ -183,6 +200,7 @@ const rpc = { async call(_base, method, payload, signal) {
   if (method === 'world-vscode-source/save') {
     if (window.__worldSourceSave) return window.__worldSourceSave(payload)
     savedFiles.set(payload.path, payload.source)
+    fileVersions.set(payload.path, 'v2')
     return { ok: true, value: { path: payload.path, source: payload.source, version: 'v2' } }
   }
   if (method === 'world-vscode-source/reveal') return { ok: true, value: { path: payload.path } }
@@ -190,6 +208,7 @@ const rpc = { async call(_base, method, payload, signal) {
   if (method === 'world-vscode-sessions/resolve')
     return { ok: true, value: { workspaceId: payload.root === '/workspace' ? 'ws-main' : '' } }
   if (method === 'world-vscode-search/find') {
+    if (window.__worldContentSearch) return cancellable(window.__worldContentSearch(payload), signal)
     const query = String(payload.query || '').toLowerCase()
     const files = [
       { path: 'src/main.js', matches: [{ line: 1, column: 6, text: 'const value = 2', ranges: [[6, 11]], prefix: false, suffix: false }] },
@@ -272,6 +291,10 @@ const gitCommits = [
   { hash: '1234567890123456789012345678901234567890', shortHash: '1234567', subject: '初始提交', body: '初始提交', author: 'World Tester', date: '2026-11-15T09:00:00+08:00' },
 ]
 function gitRpc(operation, payload) {
+  if (window.__worldGitCall) return window.__worldGitCall(operation, payload)
+  if (operation === 'commit-files') return { ok: true, value: { commit: payload.commit, parent: null, merge: false,
+    files: [{ path: 'src/main.js', from: '', status: 'M' }], truncated: false } }
+  if (operation === 'commit-diff') return gitRpc('diff', { ...payload, staged: true })
   if (operation === 'log') return window.__worldGitLog
     ? window.__worldGitLog(payload)
     : { ok: true, value: { commits: gitCommits.map(commit => ({ ...commit })), truncated: false } }
@@ -336,7 +359,7 @@ apply({
   // 只能在 DSH 窗口里打开的宿主页面（插件管理）走 layout.selectPanel，这里记下来给断言用。
   layout: { selectPanel: id => layoutCalls.push(id) },
   // 桌面宿主的原生选目录；浏览器测试里用它模拟「浏览…」按钮
-  get: name => name === 'remote.directoryPicker'
+  get: name => name === 'shortcuts' ? window.__worldShortcuts : name === 'remote.directoryPicker'
     ? { pick: async () => ({ ok: true, value: '/workspace/src' }) }
     : undefined,
   effect(effect) { const cleanup = effect(); if (cleanup) effects.push(cleanup) },
@@ -383,7 +406,7 @@ window.__worldTesting = {
   sessionRows,
   projectionRefreshes,
   renderPlugin(key, component) { pluginFixtures.set(key, component) },
-  setFile(path, source) { savedFiles.set(path, source) },
+  setFile(path, source) { savedFiles.set(path, source); fileVersions.set(path, `v${(Number(fileVersions.get(path)?.slice(1)) || 1) + 1}`) },
   switchMain(id) { mainSessionId = id; for (const listener of mainSessionListeners) listener(); publishSessions() },
   dispose() { root.unmount(); conversationFixture.dispose(); effects.forEach(cleanup => cleanup()) },
 }

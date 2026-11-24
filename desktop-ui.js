@@ -14,7 +14,7 @@ const intersect = (a, b) => ({ x: Math.max(a.x, b.x), y: Math.max(a.y, b.y),
   height: Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y)) })
 const parentOf = node => node.parentElement || node.getRootNode?.().host || node.ownerDocument?.defaultView?.frameElement || null
 
-function rootsFor(id) {
+export function rootsFor(id) {
   let root
   if (id === 'dsh') return [document.querySelector('.world-window-frame'), document.getElementById('root'),
     ...[...document.body.children].filter(node => node.id !== 'root' && !node.dataset.worldPortal && node.dataset.windowsMenu === undefined

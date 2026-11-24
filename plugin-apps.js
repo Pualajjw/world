@@ -104,12 +104,24 @@ class PageBoundary extends React.Component {
   }
 }
 
+// Focus, stacking and geometry belong to the window shell. Keep the host's slot
+// subtree mounted; its own state, context and registry subscriptions still update.
+const RegisteredPage = React.memo(function RegisteredPage({ pageKey, label, renderSlot }) {
+  if (typeof renderSlot !== 'function') return h('div', { className: 'world-plugin-placeholder' },
+    h('strong', null, label), h('span', null, '当前宿主未提供页面渲染通道。'))
+  return h(PageBoundary, { label }, renderSlot(PLUGIN_SLOT, {}, {
+    entryKey: pageKey,
+    fallback: h('div', { className: 'world-plugin-placeholder' },
+      h('strong', null, label), h('span', null, '插件页面尚未注册。')),
+  }))
+})
+
 function Cap({ label, title, onClick, children }) {
   return h('button', { className: `world-cap${label === '关闭' ? ' world-close' : ''}`, type: 'button', title, 'aria-label': title, onClick }, children)
 }
 
 /** One independent virtual window hosting a registered whole-page plugin. */
-export function PluginWindow({ app, win, active, renderSlot, children, zIndex, pinned = false, onTogglePin, onActivate, onMinimize, onToggleMaximize, onClose, onDragStart, onDragMove, onDragEnd, onResizeStart }) {
+export function PluginWindow({ toolHistory, app, win, active, renderSlot, children, zIndex, pinned = false, onTogglePin, onActivate, onMinimize, onToggleMaximize, onClose, onDragStart, onDragMove, onDragEnd, onResizeStart }) {
   const minimized = win.state === 'min'
   const maximized = win.state === 'max'
   const stateClass = minimized ? ' is-min' : maximized ? ' is-max' : ''
@@ -125,6 +137,7 @@ export function PluginWindow({ app, win, active, renderSlot, children, zIndex, p
     },
     onPointerDown: onActivate,
   },
+  toolHistory,
   h('header', {
     className: 'world-plugin-titlebar',
     onPointerDown: onDragStart, onPointerMove: onDragMove, onPointerUp: onDragEnd, onPointerCancel: onDragEnd,
@@ -145,15 +158,7 @@ export function PluginWindow({ app, win, active, renderSlot, children, zIndex, p
       h(Cap, { label: '关闭', title: '关闭', onClick: onClose },
         h('svg', { width: 10, height: 10, viewBox: '0 0 10 10', 'aria-hidden': true }, h('path', { d: 'M0 0l10 10M10 0L0 10', stroke: 'currentColor', strokeWidth: 1 }))))),
   h('div', { className: 'world-plugin-body' },
-    children !== undefined ? children : typeof renderSlot !== 'function'
-      ? h('div', { className: 'world-plugin-placeholder' },
-        h('strong', null, app.label),
-        h('span', null, '当前宿主未提供页面渲染通道。'))
-      : h(PageBoundary, { label: app.label }, renderSlot(PLUGIN_SLOT, {}, {
-        entryKey: app.key,
-        fallback: h('div', { className: 'world-plugin-placeholder' },
-          h('strong', null, app.label), h('span', null, '插件页面尚未注册。')),
-      }))),
+    children !== undefined ? children : h(RegisteredPage, { pageKey: app.key, label: app.label, renderSlot })),
   !minimized && !maximized
     ? RESIZE_EDGES.map(edge => h('div', {
       key: edge, className: `world-plugin-resize world-plugin-resize-${edge}`, 'aria-hidden': true,
