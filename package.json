@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-world",
-  "version": "0.3.62",
+  "version": "0.3.63",
   "private": true,
   "type": "module",
   "description": "Win11 风格 DSH 桌面，支持手机扫码访问同一后台和窄屏手机桌面，内置 VSCode、终端（含 SSH）、EasyTier 上网、局域网聊天、多标签浏览器、DSH 进程管理器、日记、待办、收纳盒和垃圾箱。",
@@ -199,7 +199,8 @@
     "MOBILE-ACCESS-DESIGN.md",
     "prototype/index.html",
     "prototype/shots/vscode-wide.png",
-    "prototype/shots/poses/pose-motion.gif",
+    "prototype/shots/pbt-srw-layout.png",
+    "prototype/shots/pbt-srw-script.png",
     "LICENSE",
     "cordis.patch.yml"
   ],

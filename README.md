@@ -42,11 +42,13 @@ world 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（
 
 ![浅色主题下的 world 桌面与内置 VSCode](prototype/shots/vscode-wide.png)
 
-<p align="center">
-  <img src="prototype/shots/poses/pose-motion.gif" width="680" alt="小机器人的四种姿势：思考等模型、执行工具、等你说话、先停一下" />
-</p>
+**SRW 窗口设计**：在示例工程 `text_pipeline.pbt` 中打开 `w_pipeline.srw`。选中画布上的「分析」按钮，右侧显示它的名称、位置和尺寸，左侧工程树高亮当前窗口文件。
 
-3D 桌面上，小机器人会走向鼠标与地面的交点；她等模型、执行工具、等你说话、先停一下的时候，各有一套姿势。
+![内置 VSCode 的 SRW 设计视图：工程树、四语言文本分析器窗口和按钮属性](prototype/shots/pbt-srw-layout.png)
+
+**Script 事件脚本**：双击同一个按钮，切到 `cb_1.clicked`。深色主题下可以分辨 PowerScript 的类型、控制流、函数、字符串和注释。
+
+![cb_1.clicked 的 Script 视图：带语法高亮的 PowerScript 事件代码](prototype/shots/pbt-srw-script.png)
 
 ## 功能
 

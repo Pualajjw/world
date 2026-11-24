@@ -4746,7 +4746,7 @@ export function VscodeWindow({ toolHistory, replaySearch,
                   onContextMenu: collectionMode || !root ? undefined : event => openFileMenu(event, root),
                 }, h(Twist, { open }), h(FolderIcon, { open }),
                 h('span', { className: 'world-vscode-root-name' }, collectionMode ? displayName.toUpperCase() : baseName(root))),
-                open && h(ExplorerRows, { treeRoot: root, collectionMode, tree, expanded, selected: active?.path, gitStates,
+                open && h(ExplorerRows, { treeRoot: root, collectionMode, tree, expanded, selected: designOwner?.path ?? active?.path, gitStates,
                   pbLibraries: root === rootPath ? pbLibraries : EMPTY_LIBRARIES,
                   application: root === rootPath ? pbProject?.application : null, actions: explorerActions }),
                 note && h('div', { className: 'world-vscode-file-note', role: 'status' }, note))
