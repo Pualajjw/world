@@ -38,7 +38,6 @@ try {
   await page.addScriptTag({ content: bundle.outputFiles[0].text })
   await page.waitForFunction(() => document.body.dataset.worldWindow === 'closed')
   await page.getByRole('button', { name: '开始', exact: true }).click()
-  await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-install').click()
   await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-open').click()
   const editor = page.locator('.world-vscode-window[data-world-vscode-key]')
   await editor.waitFor()
@@ -47,8 +46,22 @@ try {
   await editor.getByRole('button', { name: 'main.js', exact: true }).dblclick()
   const input = editor.getByRole('textbox', { name: '编辑 main.js', exact: true })
   await input.waitFor()
-  await input.focus()
-  await input.evaluate(node => node.setSelectionRange(6, 11))
+  // Use actual mouse positions (not setSelectionRange): drag backwards over `value`.
+  const atColumn = (row, offset) => row.evaluate((el, pos) => {
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), range = document.createRange()
+    for (let n; (n = walker.nextNode()); pos -= n.length) {
+      if (pos >= n.length) continue
+      range.setStart(n, pos); range.setEnd(n, pos + 1)
+      const rect = range.getBoundingClientRect()
+      return [rect.left + rect.width * .2, rect.top + rect.height / 2]
+    }
+    throw Error('Missing source column')
+  }, offset)
+  const drag = async (from, to) => {
+    await page.mouse.move(...from); await page.mouse.down(); await page.mouse.move(...to, { steps: 4 }); await page.mouse.up()
+  }
+  const row = editor.locator('.world-vscode-hl-line').first()
+  await drag(await atColumn(row, 11), await atColumn(row, 6))
   const taskbar = page.locator('[data-world-her-message] input').first()
   const replyButton = page.locator('.world-her-reply'), card = page.getByRole('complementary', { name: '她的答复' })
   const buttonRect = await replyButton.boundingBox(), formRect = await page.locator('.world-her-compose').boundingBox()
@@ -69,6 +82,9 @@ try {
   assert.equal(await card.count(), 0)
   const snapshot = JSON.parse(prompts[0].content[1].text.split('\n').slice(1).join('\n'))
   assert.equal(snapshot.view.text, 'value'); assert.equal(snapshot.view.from, 1)
+  assert.deepEqual([snapshot.view.line, snapshot.view.column, snapshot.view.selectionStartLine, snapshot.view.selectionStartColumn,
+    snapshot.view.selectionEndLine, snapshot.view.selectionEndColumn], [1, 7, 1, 7, 1, 12])
+  assert.equal(snapshot.view.cursorLineText, undefined, '有选区时不额外发送未选中的行内容')
   assert.equal(snapshot.view.path, '/workspace/src/main.js')
   assert.equal((await service.read({ reference: snapshot.reference, windowId: snapshot.active }, 'fixed')).text, 'value')
   const activity = messages => bridge.setActivity({ sessionId: 'fixed', messages, phase: 'responding' })
@@ -82,6 +98,13 @@ try {
   await replyButton.click()
   await card.getByText('这是一个变量名。').waitFor()
   assert.equal(await taskbar.evaluate(node => document.activeElement === node), true)
+  activity([{ role: 'assistant', text: '## 结论\n\n- **变量** `value`\n\n```js\nconst value = 1\n```\n<img src=x onerror=bad()> [不安全](javascript:bad)', requestId: prompts[0].requestId }])
+  await card.getByRole('heading', { name: '结论' }).waitFor()
+  assert.equal(await card.locator('li strong').innerText(), '变量')
+  assert.equal(await card.locator('li code').innerText(), 'value')
+  assert.equal((await card.locator('pre code').innerText()).trimEnd(), 'const value = 1')
+  assert.equal(await card.locator('img,a,script').count(), 0)
+  assert.match(await card.locator('.world-her-answer-head').innerText(), /光标 1:7 · 选区 1:7–1:12/)
   // 桌面卡片：520 宽、贴在任务栏上方、不出屏（手机见下面的整屏断言）。
   const cardBox = await card.boundingBox(), viewBox = page.viewportSize()
   const barBox = await page.locator('.world-taskbar').boundingBox()
@@ -92,7 +115,7 @@ try {
   // 长答复：卡片高度封在 64vh，正文自己滚，别把任务栏顶出屏。
   activity([{ role: 'assistant', text: '她写了一段很长的答复。'.repeat(120), requestId: prompts[0].requestId }])
   await card.getByText(/她写了一段很长的答复。她写了一段/).first().waitFor()
-  const tall = await card.boundingBox(), para = card.locator('p')
+  const tall = await card.boundingBox(), para = card.getByRole('status')
   assert.ok(tall.height <= viewBox.height * .64 + 1, `长答复卡在 64vh 以内（${Math.round(tall.height)}）`)
   assert.ok(await para.evaluate(node => node.scrollHeight > node.clientHeight), '长答复在卡片里滚动')
   assert.ok(tall.y + tall.height <= barBox.y + 1, '长答复也不压任务栏')
@@ -133,12 +156,13 @@ try {
   await page.waitForFunction(() => window.__worldTesting.conversation.retainCount('fixed') === 0)
   assert.deepEqual(await page.evaluate(() => window.__worldTesting.conversation.conflicts), [])
   await input.focus()
-  await input.evaluate(node => node.setSelectionRange(3, 3))
+  await page.mouse.click(...await atColumn(row, 3))
   await taskbar.click(); await taskbar.fill('没选中时呢'); await taskbar.press('Enter')
   await page.waitForFunction(() => window.__worldTesting.calls.filter(call => call.method === 'world-her-message/insert').length === 2)
   const second = await page.evaluate(() => window.__worldTesting.calls.filter(call => call.method === 'world-her-message/insert').at(-1).payload.context)
   assert.equal(second.view.kind, '可见代码'); assert.equal(second.view.column, 4); assert.match(second.view.text, /const value/)
   await input.focus()
+  assert.equal(second.view.cursorLineText, 'const value = 1'); assert.equal(second.view.selectionStartLine, undefined)
   await input.selectText()
   await input.evaluate(() => document.dispatchEvent(new Event('selectionchange')))
 
@@ -199,6 +223,25 @@ try {
   assert.equal(await page.locator('[data-fixture-composer]').count(), 1)
   await conversation.getByRole('button', { name: '关闭' }).click()
   assert.deepEqual(await page.evaluate(() => window.__worldTesting.conversation.conflicts), [])
+  // A CodeMirror document uses its own model/line coordinates, not the textarea's last caret.
+  await page.setViewportSize({ width: 1280, height: 860 })
+  await editor.getByRole('button', { name: 'big.txt', exact: true }).dblclick()
+  const lines = editor.locator('.world-vscode-large .cm-line')
+  await drag(await atColumn(lines.nth(2), 0), await atColumn(lines.nth(1), 5))
+  await taskbar.click(); await taskbar.fill('跨行选区'); await taskbar.press('Enter')
+  await page.locator('.world-her-message[data-world-her-message="ready"]').waitFor()
+  const cm = JSON.parse(prompts.at(-1).content[1].text.split('\n').slice(1).join('\n')).view
+  assert.equal(cm.path, '/workspace/src/big.txt'); assert.equal(cm.text, '1 xxxxxx\n')
+  assert.deepEqual([cm.line, cm.column, cm.selectionStartLine, cm.selectionStartColumn, cm.selectionEndLine, cm.selectionEndColumn], [2, 6, 2, 6, 3, 1])
+  // Scrolling without moving the caret must not make the first visible row the target.
+  await page.mouse.click(...await atColumn(lines.nth(1), 5))
+  await editor.locator('.world-vscode-large .cm-scroller').evaluate(n => { n.scrollTop = n.clientHeight * 3 })
+  await page.waitForFunction(() => { const n = document.querySelector('.world-vscode-large .cm-scroller'); return n.scrollTop >= n.clientHeight * 2 })
+  await taskbar.click(); await taskbar.fill('我指的是哪行？'); await taskbar.press('Enter')
+  await page.locator('.world-her-message[data-world-her-message="ready"]').waitFor()
+  const scrolled = JSON.parse(prompts.at(-1).content[1].text.split('\n').slice(1).join('\n')).view
+  assert.deepEqual([scrolled.kind, scrolled.line, scrolled.column, scrolled.cursorLineText], ['可见代码', 2, 6, 'line 1 xxxxxx'])
+  assert.ok(scrolled.from > 2); assert.match(scrolled.text, /line \d+ xxxxxx/)
   assert.deepEqual(errors, [])
   console.log(JSON.stringify({ result: 'passed', replyButton: [buttonRect.width, buttonRect.height], gap, quoted: quoted.length, shots }))
 } finally {

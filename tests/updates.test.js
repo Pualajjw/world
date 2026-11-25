@@ -155,7 +155,34 @@ test('simultaneous installs share the synchronous guard, failed installs retain 
   assert.equal((await f.service.call('check')).available, true)
 })
 
-test('older/equal versions, changed sources, expired candidates and wrong GitHub package cannot install', async t => {
+test('same version needs a confirmed, single-use reinstall plan; no downgrade or repeat before restart', async t => {
+  const f = fixture(t, { currentVersion: '0.2.150' })
+  f.bundles[0].version = '0.2.150'
+  f.bundles[0].source = 'git+https://github.com/Pualajjw/world.git#' + 'a'.repeat(40)
+  const checked = await f.service.call('check')
+  assert.equal(checked.available, false)
+  assert.equal(checked.reinstallable, true)
+  const confirm = { token: checked.token, confirmed: true }
+  await assert.rejects(f.service.call('install', confirm), /失效/u)
+  await assert.rejects(f.service.call('reinstall', { token: checked.token }), /失效/u)
+  f.bundles[0].version = '0.2.151'
+  await assert.rejects(f.service.call('reinstall', confirm), /状态已变化/u)
+  const older = await f.service.call('check')
+  assert.equal(older.reinstallable, false); assert.equal(older.token, null)
+  f.bundles[0].version = '0.2.150'
+  confirm.token = (await f.service.call('check')).token
+  assert.equal((await f.service.call('reinstall', confirm)).operation, 'reinstall')
+  assert.equal((await settled(f.service)).state, 'success')
+  const calls = f.calls.filter(call => call[0] === 'install')
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0][1], `https://github.com/Pualajjw/world/archive/${'a'.repeat(40)}.tar.gz`)
+  assert.deepEqual(calls[0][2].expected, { name: WORLD_PACKAGE, version: '0.2.150' })
+  await assert.rejects(f.service.call('reinstall', confirm), /失效/u)
+  const after = await f.service.call('check')
+  assert.equal(after.restartRequired, true); assert.equal(after.token, null)
+})
+
+test('older versions, changed sources, expired candidates and wrong GitHub package cannot install', async t => {
   let now = Date.now()
   const f = fixture(t, { now: () => now })
   const checked = await f.service.call('check')

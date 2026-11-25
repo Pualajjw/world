@@ -11,6 +11,11 @@ export async function checkStartSearch(browser, bundleText) {
   }
   const results = () => page.locator('[data-world-search-result]').evaluateAll(nodes => nodes.map(node => node.dataset.worldSearchResult))
   try {
+    let installedVersion = null, installs = 0
+    await page.exposeBinding('__worldPbnpmCall', (_, op, payload) => {
+      if (op === 'install') { assert.deepEqual(payload, { token: 'checked', confirmed: true }); installs++; installedVersion = '0.8.4' }
+      return { ok: true, value: { version: '0.8.4', installedVersion, source: '开发 pbpkg · 本地', token: 'checked' } }
+    })
     await page.exposeBinding('__worldDesktopCall', () => ({ ok: true }))
     await page.exposeBinding('__worldBrainCall', () => ({ sessionId: 'session-1', setupRequired: false }))
     await page.route('http://127.0.0.1/world-search-fixture', route => route.fulfill({ contentType: 'text/html; charset=utf-8',
@@ -106,6 +111,26 @@ export async function checkStartSearch(browser, bundleText) {
     assert.deepEqual(await page.evaluate(() => window.__worldTesting.layoutCalls), ['plugins'], 'the host panel is selected inside the DSH window')
     assert.equal(await page.locator('.world-start').evaluate(node => node.classList.contains('open')), false, 'choosing it closes the menu')
     assert.equal(await page.locator('[data-world-icon-id="plugins"]').count(), 0, 'it never becomes a desktop icon')
+
+    await openMenu()
+    const card = menu.locator('[data-world-plugin-card="pbnpm"]')
+    await card.getByText('pbnpm v0.8.4', { exact: true }).waitFor()
+    await card.click()
+    const guide = page.getByRole('alertdialog')
+    await guide.getByText(/开发 pbpkg · 本地安装 pbnpm v0.8.4/).waitFor()
+    await guide.getByRole('button', { name: '取消' }).click()
+    assert.equal(installs, 0)
+    await openMenu()
+    await search.fill('PBNPM')
+    assert.deepEqual(await results(), ['install:pbnpm'])
+    await search.press('Enter')
+    await guide.getByRole('button', { name: '确认安装' }).click()
+    await openMenu()
+    await card.getByText('重装', { exact: true }).waitFor()
+    await card.click()
+    await guide.getByRole('button', { name: '确认重装' }).click()
+    await guide.waitFor({ state: 'hidden' })
+    assert.equal(installs, 2)
 
     assert.deepEqual(errors, [])
     console.log('Start menu search passed: hidden desktop icons, name/id matching, empty result, Escape layering, Enter and arrow keys, host-panel entry for the plugin manager.')

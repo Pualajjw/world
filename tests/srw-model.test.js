@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { ChangeSet, Text } from '@codemirror/state'
 import { declarationBounds } from '../srw-declarations.js'
-import { scanSrw, parsePainter, pbX, pbY } from '../srw-model.js'
+import { findPainterMember, findMemberDefinition, scanSrw, parsePainter, pbX, pbY } from '../srw-model.js'
 import { createEdits, editBounds, openBody, setBody, designChanges, designText, acknowledgeEdits, editsDirty } from '../srw-edits.js'
 import { card } from './srw-fixture.js'
 function edit(session, bounds, text) {
@@ -240,4 +240,57 @@ test('SRU layout follows the root, not names, script contents or nonvisual field
   assert.equal((await read(`${child}\ntype label from statictext within thing\nend type`)).hasLayout, true)
   const fragment = '@other.srw.event open;\n//:set_attribute:width=100\n@end event\n@thing.sru.event constructor;\nreturn\n@end event'
   const f = await read(fragment); assert.equal(f.partial, true); assert.equal(f.hasLayout, false); assert.deepEqual(f.scripts.map(s => s.name), ['constructor'])
+})
+
+test('member definition lookup prefers the real implementation and ignores comments, other owners and calls', async () => {
+  const rows = ['forward','global type n_fp from nonvisualobject','end type','end forward',
+    'global type n_fp from nonvisualobject','end type','type prototypes',
+    'function long ExternalCall() library "driver.dll"','end prototypes','forward prototypes',
+    'public function long fp_captuteimage()','end prototypes','event constructor;',
+    'this.FP_CaptuteImage()', '/*','end event','public function long FP_CaptuteImage();','*/','end event',
+    'type variables','n_device other, device','end variables','public function long FP_CaptuteImage();return 1','end function',
+    'type nested from n_other within n_fp','end type','public function long other_fn();return 0','end function']
+  for (const text of [rows.join('\r\n'), Text.of(rows)]) {
+    for (const [name,line] of [['FP_CaptuteImage',23],['externalcall',8],['DEVICE',21],['nested',25]])
+      assert.deepEqual(await findMemberDefinition(text,'N_FP',name), {line,member:true})
+    assert.deepEqual(await findMemberDefinition(text,'n_fp','other_fn'), {line:5,member:false})
+  }
+})
+
+test('one-member target scan stops at the implementation and honours cancellation', async () => {
+  let visited = 0
+  const virtual = { *iterLines() {
+    yield 'global type n_fp from nonvisualobject'; yield 'end type'
+    yield 'public subroutine capture();'; visited++; yield 'end subroutine'
+  } }
+  assert.deepEqual(await findMemberDefinition(virtual,'n_fp','capture'), {line:3,member:true})
+  assert.equal(visited,0)
+  await assert.rejects(findMemberDefinition(virtual,'n_fp','capture',AbortSignal.abort()), {name:'AbortError'})
+})
+
+test('painter jump selects a script or embedded object from the parsed model without reading source', async () => {
+  const model = parse(card,'w_dk.srw'), session = {model, hasLayout:true, get text() { throw Error('unexpected source scan') }}
+  const signal = new AbortController().signal, clicked = model.objects.get('cb_1').scripts.find(s => s.name === 'clicked')
+  assert.deepEqual(await findPainterMember(session,'CB_1','Clicked',signal),
+    {view:'script',object:'cb_1',script:clicked.id,key:clicked.id,line:1})
+  assert.deepEqual(await findPainterMember(session,model.root.id,'CB_9',signal), {view:'layout',object:'cb_9'})
+  assert.deepEqual(await findPainterMember(session,model.root.id,'ids',signal), {view:'properties',object:'ids'})
+  await assert.rejects(findPainterMember(session,'cb_9','clicked',AbortSignal.abort()), {name:'AbortError'})
+})
+
+test('painter declaration rows match the joined pane, not physical file line numbers', async () => {
+  const text = ['global type n_fp from nonvisualobject','end type','type prototypes','function long one()',
+    'global function long skipped()', '// skipped in Global External', 'function long two()', '',
+    '/* function long wrong() */','function long Capture() library "fp.dll"','end prototypes',
+    'type variables','n_device dev, other','end variables'].join('\r\n')
+  const session = {text,model:parse(text,'n_fp.sru'),edits:createEdits()}, signal = new AbortController().signal
+  const resolve = member => findPainterMember(session,'n_fp',member,signal)
+  const hit = await resolve('capture'), bounds = declarationBounds(session.model,'localExternal',text)
+  assert.equal(hit.view,'variables'); assert.equal(hit.declare,'localExternal'); assert.equal(hit.line,5)
+  assert.match(bounds.original.line(hit.line).text,/Capture/)
+  assert.equal(await resolve('wrong'),null); assert.equal(await resolve('skipped'),null) // that pane would show the SRA
+  assert.equal((await resolve('OTHER')).declare,'instance')
+  const tr = ChangeSet.of({from:0,to:bounds.original.length,insert:'// changed draft\nfunction long renamed()'},bounds.original.length)
+  setBody(session,bounds,tr.apply(bounds.original),bounds.original,tr)
+  assert.equal((await resolve('renamed')).line,2); assert.equal(await resolve('Capture'),null)
 })

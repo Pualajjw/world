@@ -9,27 +9,27 @@ export async function checkUpdates(browser, bundleText, shotsDir) {
   const currentVersion = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version
   for (const source of ['github', 'pbpkg']) {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
-    let installed = 0, releaseInstall, failCheck = false, missingPackage = false, dropStatus = false, latestVersion = '9.0.0'
+    let installed = null, releaseInstall, failCheck = false, missingPackage = false, dropStatus = false, latestVersion = '9.0.0'
     const errors = [], calls = []
     const service = createWorldUpdates({ currentVersion, readVersion: async () => '0.2.2-rc.3',
       manager: { listBundles: async () => [
-        { name: WORLD_PACKAGE, installed: true, version: installed ? '9.0.0' : currentVersion },
+        { name: WORLD_PACKAGE, installed: true, version: installed || currentVersion },
         ...(source === 'pbpkg' ? [{ name: '@local/dsh-pbpkg', installed: true, enabled: true }] : []),
       ], inspect: async () => ({ status: 'accepted' }),
       installBundle: async (spec, options) => { calls.push({ spec, options }); return new Promise(resolve => {
-        releaseInstall = () => { installed++; resolve({ application: 'restart-required', version: '9.0.0' }) }
+        releaseInstall = () => { installed = options.expected.version; resolve({ application: 'restart-required', version: installed }) }
       }) } },
-      verifyArtifact: async () => ({ manifest: { name: WORLD_PACKAGE, version: latestVersion }, spec: 'file:C:/cache/update.tgz' }),
+      verifyArtifact: async artifact => ({ manifest: { name: WORLD_PACKAGE, version: latestVersion }, spec: artifact.spec }),
       pbpkg: async operation => {
         if (failCheck) throw new Error('更新源暂时不可用')
         if (missingPackage && operation === 'prepare') throw new Error("ENOENT: no such file or directory, realpath 'E:/plugins/world/dist/world-9.0.0-universal.tgz'")
         return operation === 'list'
         ? { rows: [{ filename: `world-${latestVersion}-universal.tgz`, path: `world/world-${latestVersion}-universal.tgz`, sha256: 'abc', sourceId: 'team' }], activeSourceId: 'team', sources: [{ id: 'team', name: '团队插件源' }] }
-        : { spec: 'file:C:/cache/update.tgz', sha256: 'abc', size: 10 } },
+        : { spec: `file:${fileURLToPath(import.meta.url)}`, sha256: 'abc', size: 10 } },
       fetchJson: async url => { if (failCheck) throw new Error('更新源暂时不可用'); return url.includes('/commits/')
         ? { sha: 'a'.repeat(40) } : { name: WORLD_PACKAGE, version: latestVersion, dsh: { bundle: { patch: './cordis.patch.yml' } } } },
     })
-    // The UI test uses GitHub for the installer transaction; the pbpkg case exercises check, errors and layout.
+    // GitHub exercises upgrade/recovery; pbpkg exercises same-version reinstallation.
     try {
       page.on('pageerror', error => errors.push(error.message))
       await page.exposeBinding('__worldDesktopCall', () => ({ ok: true }))
@@ -122,6 +122,25 @@ export async function checkUpdates(browser, bundleText, shotsDir) {
         await dialog.getByRole('button', { name: '检查更新', exact: true }).click()
         await dialog.getByRole('status').filter({ hasText: '当前已是最新版本。' }).waitFor()
         assert.equal(await dialog.getByRole('status').filter({ hasText: '请重启 DSH' }).count(), 0)
+        const reinstall = dialog.getByRole('button', { name: '重装 world', exact: true })
+        if (shotsDir) await page.screenshot({ path: join(shotsDir, 'updates-reinstall.png') })
+        await reinstall.click()
+        const prompt = page.getByRole('alertdialog', { name: '重装 world' })
+        await prompt.getByRole('button', { name: '取消' }).click()
+        assert.equal(calls.length, 0)
+        await reinstall.click()
+        await prompt.getByRole('button', { name: '确认重装' }).click()
+        while (!releaseInstall) await page.waitForTimeout(10)
+        assert.equal(await reinstall.isEnabled(), false)
+        releaseInstall()
+        await dialog.getByRole('status').filter({ hasText: '已安装，请重启 DSH' }).waitFor()
+        assert.equal(calls.length, 1)
+        assert.deepEqual(calls[0].options.expected, { name: WORLD_PACKAGE, version: currentVersion })
+        await dialog.getByRole('button', { name: '关闭', exact: true }).click()
+        await page.locator('[data-world-update-open]').click()
+        await dialog.getByText(`最新版本：v${currentVersion}`, { exact: true }).waitFor()
+        assert.equal(await reinstall.count(), 0)
+        await dialog.getByRole('status').filter({ hasText: '已安装，请重启 DSH' }).waitFor()
         latestVersion = '9.0.1'
         await dialog.getByRole('button', { name: '检查更新', exact: true }).click()
         await dialog.getByText('最新版本：v9.0.1', { exact: true }).waitFor()

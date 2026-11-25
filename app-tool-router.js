@@ -1,3 +1,4 @@
+import { SECRETARY, secretaryEnvelope } from './secretary.js'
 import { randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { bindable, installedOwner, DEFAULT_BINDINGS } from './app-bindings.js'
@@ -16,7 +17,7 @@ export const realPath = value => {
 
 /** No tool-body reimplementation or direct execute(): the owning app must request the
  * invocation, then DSH's original executor, permissions, sandbox and post-policy run. */
-export function createAppToolRouter({ brain, bridge, tools, agents, parentOf = () => undefined, warn = console.warn }) {
+export function createAppToolRouter({ brain, bridge, tools, agents, parentOf = () => undefined, canDelegate = () => false, warn = console.warn }) {
   const desktops = new Map(), tickets = new Map(), sequences = new Map(), deliveries = new Map()
   const ready = brain.get()
   let disposed = false, mask, maskedAgent, maskKey
@@ -24,6 +25,17 @@ export function createAppToolRouter({ brain, bridge, tools, agents, parentOf = (
   // The PTC transport is still real executable code. Keep its configured app/approval gate,
   // but give screen time to SDK calls rather than replaying the envelope as a shell command.
   const isProgram = exec => exec.name === 'run_code' && exec.parent === undefined
+  // This ticket authorizes a single delegation, never a desktop application call.
+  // DSH uses fresh, non-registered symbols. A call dropped before dispatch/result
+  // must not keep its token alive, and a cancelled parent cannot sponsor a child.
+  const secretaryTickets = new WeakMap()
+  function delegation(exec) {
+    if (disposed || !canDelegate(exec.agent) || exec.signal.aborted) return false
+    if (isProgram(exec)) return secretaryEnvelope(exec.arguments)
+    if (exec.name !== SECRETARY) return false
+    return exec.parent === undefined || secretaryTickets.get(exec.parent)?.aborted === false ||
+      matches(tickets.get(exec.parent), route(sessionOf(exec), 'run_code'))
+  }
   function route(id, name) {
     const live = grants(id)
     if (!id || live.length !== 1) return null
@@ -39,14 +51,14 @@ export function createAppToolRouter({ brain, bridge, tools, agents, parentOf = (
     const agent = agents.get(brain.peek().sessionId)
     // Include globals masked by our current grant; the settings page must be able to re-enable them.
     const names = [...tools.definitions(agent ? parentOf(agent) : undefined), ...(agent ? tools.definitions(agent) : [])].map(t => t.name)
-    return [...new Set([...names, 'run_code'])].filter(bindable).sort()
+    return [...new Set([...names, 'run_code'])].filter(name => name !== SECRETARY && bindable(name)).sort()
   }
   function syncMask(candidate) {
     if (disposed) return
     const id = brain.peek().sessionId, agent = id && (candidate?.id === id ? candidate : agents.get(id))
     if (!agent) return
     // restrict() targets inherited registrations. Own-scope tools also pass the live guard below.
-    const names = tools.definitions(parentOf(agent)).map(t => t.name).filter(name => route(id, name)).sort()
+    const names = tools.definitions(parentOf(agent)).map(t => t.name).filter(name => name === SECRETARY || route(id, name)).sort()
     const key = JSON.stringify(names)
     if (maskedAgent === agent && key === maskKey) return
     const previous = mask
@@ -66,6 +78,8 @@ export function createAppToolRouter({ brain, bridge, tools, agents, parentOf = (
     async prepare(exec, next) {
       await ready
       if (sessionOf(exec) !== brain.peek().sessionId || !sessionOf(exec)) return next()
+      if (delegation(exec)) { secretaryTickets.set(exec.token, exec.signal); return next() }
+      if (exec.name === SECRETARY) return { kind:'deny', reason:'秘书只接受固定助手的用户任务。' }
       const r = route(sessionOf(exec), exec.name)
       const parent = tickets.get(exec.parent)
       if (!r || (exec.parent !== undefined && !sameGrant(parent, r))) return { kind: 'deny', reason: denied }
@@ -75,11 +89,18 @@ export function createAppToolRouter({ brain, bridge, tools, agents, parentOf = (
       return next()
     },
     guard(exec) {
+      if (secretaryTickets.has(exec.token)) return delegation(exec) ? undefined : denied
       if (sessionOf(exec) && sessionOf(exec) === brain.peek().sessionId && !matches(tickets.get(exec.token), route(sessionOf(exec), exec.name))) return denied
     },
     async dispatch(exec, next) {
       const sessionId = sessionOf(exec)
       if (!sessionId || sessionId !== brain.peek().sessionId) return next()
+      if (secretaryTickets.has(exec.token)) {
+        try {
+          if (!delegation(exec)) throw new Error(denied)
+          return await next() // nested PTC calls need the parent ticket until the body settles
+        } finally { secretaryTickets.delete(exec.token) }
+      }
       const t = tickets.get(exec.token)
       if (!matches(t, route(sessionId, exec.name))) throw new Error(denied)
       const args = exec.arguments || {}, path = args.file_path ?? args.path
@@ -103,6 +124,7 @@ export function createAppToolRouter({ brain, bridge, tools, agents, parentOf = (
       return execution
     },
     result(exec, result) {
+      if (secretaryTickets.delete(exec.token)) return
       const t = tickets.get(exec.token)
       tickets.delete(exec.token)
       if (!t || disposed) return
@@ -123,7 +145,7 @@ export function createAppToolRouter({ brain, bridge, tools, agents, parentOf = (
     },
     describe(id) {
       const state = grants(id)
-      if (state.length !== 1) return '目前没有唯一授权的 World 桌面；可以对话，不要调用工具。'
+      if (state.length !== 1) return '目前没有唯一授权的 World 桌面；可以对话、为用户派秘书任务，不能操作桌面应用。'
       const names = new Set([...Object.keys(DEFAULT_BINDINGS), ...Object.keys(state[0][1].toolBindings || {})])
       const registered = new Set(catalog())
       return '每次工具调用都由对应应用执行；只使用本步实际提供的能力。当前绑定：' + [...names].filter(n => registered.has(n) && route(id,n)).map(n => `${n} → ${route(id,n).appId}`).join('，')

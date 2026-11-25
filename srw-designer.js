@@ -7,7 +7,7 @@ import { SrwCodeEditor } from './srw-code-editor.js'
 import { declarationBounds } from './srw-declarations.js'
 import { createEdits, editBounds } from './srw-edits.js'
 import { createSrwIndexLookup, srwPaintCandidates } from './srw-canvas-index.js'
-import { pbX, pbY, parsePainter } from './srw-model.js'
+import { pbX, pbY, findPainterMember, parsePainter } from './srw-model.js'
 
 const h = React.createElement
 export const srwViews = { layout: 'Layout', script: 'Script', events: 'Event List', functions: 'Function List', variables: 'Variables', properties: 'Properties', controls: 'Control List', nonvisual: 'Non-Visual Object List' }
@@ -432,10 +432,10 @@ function ObjectScriptHeader({ obj, current, choose }) {
       h('option', { value: 'events', disabled: !obj.scripts.some(isEvent) }, '(Events)')),
     h(ScriptMemberSelect, { obj, current, events, choose }))
 }
-function EditableRange({ session, range, label, active, onDirty, wrap }) {
+function EditableRange({ session, range, label, active, onDirty, wrap, jump }) {
   const bounds = editBounds(range, session.text)
-  if (bounds && !session.readOnly) return h(SrwCodeEditor, { session, bounds, script: range, label, active, wrap, inline: Boolean(range.inline), onDirty })
-  return h(React.Fragment, null, h(SrwCodeEditor, { session, bounds: { key: range.id || `vars:${range.start}`, start: range.start, end: range.end }, script: range, label, wrap, inline: Boolean(range.inline), readOnly: true, active: false }),
+  if (bounds && !session.readOnly) return h(SrwCodeEditor, { session, bounds, script: range, label, active, wrap, jump, inline: Boolean(range.inline), onDirty })
+  return h(React.Fragment, null, h(SrwCodeEditor, { session, bounds: { key: range.id || `vars:${range.start}`, start: range.start, end: range.end }, script: range, label, wrap, jump, inline: Boolean(range.inline), readOnly: true, active: false }),
     !session.readOnly && !bounds && note(errorMessage('此段缺少完整边界或包含混合指令，请切换回源代码编辑。')))
 }
 const declareKinds = [
@@ -493,7 +493,7 @@ function Declares({ session, model, state, change, activeId, parentId, onDirty, 
     : kind === 'localExternal' && !model.isApplication ? '当前对象的局部外部函数，来自 type prototypes 段。' : null
   return h(React.Fragment, null, nav,
     hint && h('p', { className: 'world-srw-declare-hint' }, hint),
-    bounds ? h(SrwCodeEditor, { key: kind, session, bounds, wrap, label: `编辑 ${label}`, active: !session.readOnly && !bounds.readOnly && activeId === `${parentId}:variables`,
+    bounds ? h(SrwCodeEditor, { key: kind, session, bounds, wrap, jump: activeId === `${parentId}:variables` && state.jumpCaret, label: `编辑 ${label}`, active: !session.readOnly && !bounds.readOnly && activeId === `${parentId}:variables`,
       readOnly: session.readOnly || bounds.readOnly, onDirty }) : model.isApplication && kind === 'localExternal' ? note('应用程序没有局部外部函数，请查看 Global External。') : note(errorMessage(`没有可安全编辑的 ${label} 源码段。`)),
     bounds?.readOnly && !session.readOnly && note(errorMessage('此段缺少完整边界，请切换回源代码编辑。')))
 }
@@ -576,7 +576,7 @@ function SrdDesigner({ parent, render, model }) {
   }
   return render(id => { const view = id.slice(parent.id.length + 1); return h(Frame, { key: id, view, state }, draw(view)) }, () => null)
 }
-function ObjectDesigner({ parent, openView, render, onDirty, activeId, model, wrap, applicationFor }) {
+function ObjectDesigner({ parent, openView, render, onDirty, activeId, model, wrap, applicationFor, memberJump, finishJump }) {
   const session = parent.srw, state = session.state
   const indexFor = React.useMemo(() => model?.objects.size > 200 ? createSrwIndexLookup(canvasBounds) : null, [model])
   const [, redraw] = React.useReducer(n => n + 1, 0)
@@ -587,6 +587,17 @@ function ObjectDesigner({ parent, openView, render, onDirty, activeId, model, wr
   const firstScript = o => (scriptOnly && !application && o.scripts.find(s => !isEvent(s))) || preferred(o)
   const current = obj && (obj.scripts.find(s => s.id === state.script) || firstScript(obj))
   const choose = (target, item = firstScript(target)) => change({ object: target.id, script: item?.id, selection: [target.id] })
+  React.useLayoutEffect(() => {
+    if (!memberJump || !model) return
+    const controller = new AbortController()
+    findPainterMember(session, memberJump.scope, memberJump.member, controller.signal).then(hit => {
+      if (controller.signal.aborted) return
+      if (hit) change({object:hit.object, script:hit.script, selection:[hit.object],
+        ...(hit.declare && {declare:hit.declare}), jumpCaret:hit.key ? {key:hit.key, line:hit.line} : null})
+      finishJump(hit?.view)
+    }).catch(error => { if (!controller.signal.aborted) finishJump(null, error) })
+    return () => controller.abort()
+  }, [memberJump, model, session])
   // Ctrl/Cmd 点击把控件加进选择集合；再点一次移出。主选中仍是最后点的那个。
   const toggle = target => {
     const list = state.selection?.length ? state.selection : [obj.id]
@@ -621,7 +632,7 @@ function ObjectDesigner({ parent, openView, render, onDirty, activeId, model, wr
       case 'script': return h(React.Fragment, null, scriptOnly ? h(ObjectScriptHeader, { obj, current, choose }) : h('nav', null,
         h(ScriptObjectSelect, { objects: model.objects, value: obj.id, onChange: e => choose(model.objects.get(e.target.value)) }),
         h(ScriptMemberSelect, { obj, current, choose })),
-        current ? h(EditableRange, { key: current.id, range: current, session, wrap, active: activeId === `${parent.id}:script`, label: `编辑 ${obj.name}.${current.name}`, onDirty }) : note('此对象没有已实现的事件或函数。'))
+        current ? h(EditableRange, { key: current.id, range: current, session, wrap, jump: activeId === `${parent.id}:script` && state.jumpCaret, active: activeId === `${parent.id}:script`, label: `编辑 ${obj.name}.${current.name}`, onDirty }) : note('此对象没有已实现的事件或函数。'))
     }
   }
   return render(id => { const view = id.slice(parent.id.length + 1); return h(Frame, { key: id, view, state }, draw(view)) },

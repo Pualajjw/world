@@ -1,5 +1,6 @@
 /** Static PB export reader. Scripts are source ranges, never evaluated or duplicated per view. */
 import { createMenuReader } from './srm-model.js'
+import { bindingCode, eachBinding } from './srw-bindings.js'
 import { scanSrd } from './srd-model.js'
 
 const ident = '[\\w$#-]+'
@@ -206,6 +207,100 @@ export function* scanSrw(text, filename) {
   return model
 }
 const blockEnds = { event: /^end\s+event\b/i, on: /^end\s+on\b/i, function: /^end\s+function\b/i, subroutine: /^end\s+subroutine\b/i }
+
+// Navigation is a one-member query, not a second painter model or a project-wide symbol index.
+// Walk the live target once (CodeMirror Text or a native source string), retaining just two line numbers.
+function* sourceLines(text, from = 0, to = text.length) {
+  if (from >= to) { yield ''; return }
+  do {
+    const end = text.indexOf('\n', from)
+    if (end < 0 || end >= to) { yield text.slice(from,to); return }
+    yield text.slice(from,end); from = end+1
+  } while (from < to)
+}
+
+// Reuse this painter's parsed objects and scripts. Only an unmatched name needs a walk of
+// its declaration pages; never materialize the full draft or a second index to find one row.
+export async function findPainterMember(session, scope, member, signal) {
+  signal.throwIfAborted()
+  const model = session.model, owner = model.objects.get(lower(scope)), name = lower(member)
+  if (!owner) return null
+  const script = owner.scripts.find(s => lower(s.name) === name)
+  if (script) return { view:'script', object:owner.id, script:script.id, key:script.id, line:1 }
+  const child = model.objects.get(name)
+  if (child?.within === owner.id) return { object:child.id, view:child.nonvisual || !session.hasLayout ? 'properties'
+    : lower(child.base) === 'datawindow' && lower(child.props.visible || '') === 'false' ? 'controls' : 'layout' }
+  if (session.isSrm) return null // The menu painter has no Variables page.
+  let visited = 0, until = performance.now()+5
+  for (const kind of ['localExternal','instance','shared','globalExternal','global']) {
+    if (!model.isApplication && kind.startsWith('global')) continue // These panes show the application's SRA, not this file.
+    const key = `declare:${kind}`, patch = session.edits.patches.get(key), ranges = model.declares[kind]
+    const owned = r => (r.owner || model.root?.id) === owner.id
+    if (patch ? (ranges.length ? !ranges.every(owned) : owner !== model.root) : !ranges.some(owned)) continue
+    let line = 0
+    // Original ranges are joined with one newline in the pane; a modified page is already one CM Text.
+    for (const range of patch ? [null] : ranges) {
+      const lex = {mode:''}, relevant = !range || owned(range)
+      for (const raw of patch ? patch.doc.iterLines() : sourceLines(session.text,range.start,range.end)) {
+        line++
+        if (!(++visited % 128) && performance.now() >= until) {
+          await new Promise(resolve => setTimeout(resolve,0)); signal.throwIfAborted(); until = performance.now()+5
+        }
+        if (!relevant) continue
+        const code = bindingCode(raw,lex).trim()
+        if (!lower(code).includes(name)) continue
+        let found = false
+        if (kind.endsWith('External')) found = lower(fnHeader.exec(code)?.[2] || '') === name
+        else for (const stmt of code.split(';')) eachBinding(stmt, id => { if (lower(id) === name) found = true })
+        if (found) return {view:'variables', object:owner.id, declare:kind, key, line}
+      }
+    }
+  }
+  return null
+}
+export async function findMemberDefinition(text, scope, member, signal) {
+  scope = lower(scope); member = lower(member)
+  let owner = scope, section = '', body = '', declaration, typeLine, line = 0, until = performance.now()+5
+  const lex = { mode:'' }
+  for (const raw of typeof text === 'string' ? sourceLines(text) : text.iterLines()) {
+    if (!(line++ % 128)) {
+      if (performance.now() >= until) { await new Promise(resolve => setTimeout(resolve,0)); until = performance.now()+5 }
+      signal?.throwIfAborted()
+    }
+    const code = bindingCode(raw, lex).trim()
+    if (!code) continue
+    const directive = /^@([\w$#-]+)\.sr\w\.(?:([\w$#-]+)\.)?(.+)$/i.exec(code)
+    const header = directive ? directive[3] : code
+    if (directive) { owner = lower(directive[2] || directive[1]); section = body = '' }
+    if (body) { if (blockEnds[body].test(header.replace(/^@end\b/i,'end'))) body = ''; continue }
+    if (section === 'forward') { if (/^end\s+forward$/i.test(header)) section = ''; continue }
+    if (/^end\s+(?:prototypes|type|variables)$/i.test(header)) { section = ''; continue }
+    if (/^forward$/i.test(header)) { section = 'forward'; continue }
+    if (/^(?:forward|type)\s+prototypes$/i.test(header)) { section = 'prototypes'; continue }
+    if (/^(?:global|type|shared)\s+variables$/i.test(header)) { section = 'variables'; continue }
+    const type = typeHeader.exec(header)
+    if (type) {
+      owner = lower(type[2]); section = 'type'
+      if (owner === scope) typeLine ??= line
+      if (owner === member && lower(type[4] || '') === scope) declaration = line // Prefer the type body to its field in the container.
+      continue
+    }
+    const fn = fnHeader.exec(header), ev = !fn && eventHeader.exec(header)
+    if (fn || ev) {
+      if (!section) body = fn ? lower(fn[1]) : 'event'
+      if (owner === scope && lower(fn ? fn[2] : ev[1]) === member) {
+        if (body) return { line, member:true }
+        declaration ??= line // Prefer an implementation to a forward or external prototype.
+      }
+    } else if (!section && /^on\s+/i.test(header)) body = 'on'
+    else if (!declaration && owner === scope && (section === 'variables' || section === 'type') && lower(header).includes(member)) {
+      eachBinding(header, name => { if (lower(name) === member) declaration = line })
+      const assigned = prop.exec(header)
+      if (assigned && lower(assigned[1]) === member) declaration ??= line
+    }
+  }
+  return {line:declaration || typeLine || 1, member:Boolean(declaration)}
+}
 
 // Keep the same cancellable, time-sliced indexing for the tab preset and for a regenerated source.
 function parseAsync(text, path, ready, scan = scanSrw) {

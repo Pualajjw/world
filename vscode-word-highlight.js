@@ -46,16 +46,17 @@ const inside = (r, e) => r && e.clientX >= r.left && e.clientX < r.right && e.cl
 const singleClick = e => e.button === 0 && e.detail === 1 && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey
 // Pointer positions are between characters. Check the glyph box so punctuation and
 // blank space past the end of a line do not resolve to the preceding identifier.
-export function viewWordAt(view, e, pbIdentifier = false, keyboard = false) {
+export function viewWordHit(view, e, pbIdentifier = false, keyboard = false) {
   const doc = view.state.doc, pos = keyboard ? view.state.selection.main.head : view.posAtCoords({x:e.clientX, y:e.clientY})
-  if (pos == null) return ''
+  if (pos == null) return null
   for (const i of [pos, pos - 1]) {
     if (i < 0 || i >= doc.length || (!keyboard && !inside(view.coordsForChar(i), e))) continue
     const a = Math.max(0, i - probe - 2), b = Math.min(doc.length, i + probe + 3)
-    const word = clickedWord(doc.sliceString(a, b), i - a, pbIdentifier ? pbWordChar : wordChar)
-    if (word || !keyboard) return word
+    const text = doc.sliceString(a, b), word = clickedWord(text, i - a, pbIdentifier ? pbWordChar : wordChar)
+    if (word) return { word, pos:i, member:pbIdentifier && !word.includes('.') && /\.[ \t]*[\p{ID_Continue}$#-]*$/u.test(text.slice(0, i - a)) }
+    if (!keyboard) break
   }
-  return ''
+  return null
 }
 const pick = StateEffect.define(), mark = Decoration.mark({ class: 'world-vscode-word-hit' })
 const cmWords = pb => ViewPlugin.fromClass(class {
@@ -82,7 +83,7 @@ const cmWords = pb => ViewPlugin.fromClass(class {
   }
 }, { decorations: p => p.decorations, eventHandlers: { mouseup(e, view) {
   if (!singleClick(e) || !view.state.selection.main.empty) return false
-  const word = viewWordAt(view, e)
+  const word = viewWordHit(view, e)?.word || ''
   if (word !== this.word) view.dispatch({effects: pick.of(word)})
   return false
 } } })

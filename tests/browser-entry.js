@@ -96,6 +96,10 @@ const rpc = { async call(_base, method, payload, signal) {
     return { ok: true, value: { connected: false, ipv4: '', peerCount: 0 } }
   if (method.startsWith('world-internet/') && window.__worldInternetCall)
     return cancellable(window.__worldInternetCall(method.slice('world-internet/'.length), payload), signal)
+  if (method.startsWith('world-pbnpm/')) {
+    if (window.__worldPbnpmCall) return cancellable(window.__worldPbnpmCall(method.slice('world-pbnpm/'.length), payload), signal)
+    return { ok: true, value: { version: '0.8.4', installedVersion: null, source: '开发 pbpkg' } }
+  }
   if (method.startsWith('world-update/')) {
     if (window.__worldUpdateCall) return cancellable(window.__worldUpdateCall(method.slice('world-update/'.length), payload), signal)
     return { ok: true, value: { currentVersion: '0.2.145', dshVersion: '0.2.2-rc.3', source: 'github', canInstall: false, job: { state: 'idle' } } }

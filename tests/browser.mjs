@@ -115,7 +115,7 @@ try {
   assert.equal(await page.locator('.world-wall').evaluate(node => getComputedStyle(node).color), 'rgb(23, 35, 60)')
   await themeStyle.evaluate(node => node.remove())
 
-  assert.equal(await page.locator('.world-desktop-icon').count(), 4)
+  assert.equal(await page.locator('.world-desktop-icon').count(), 5)
   assert.equal(await page.locator('.world-taskbar-center button').count(), 3)
   assert.equal(await page.getByRole('button', { name: '查看她的回复' }).isDisabled(), true)
   assert.equal(await page.locator('.world-depth-toggle').count(), 1)
@@ -174,7 +174,7 @@ try {
   assert.equal(await page.locator('.world-wallpaper-panel').count(), 0, 'right-click no longer jumps straight into the panel')
   await desktopMenu.locator('[data-role="refresh"]').click()
   await page.locator('.world-toast').filter({ hasText: '桌面已刷新' }).waitFor()
-  assert.equal(await page.locator('.world-desktop-icon').count(), 4, 'a refresh keeps the icons where they belong')
+  assert.equal(await page.locator('.world-desktop-icon').count(), 5, 'a refresh keeps the icons where they belong')
   await page.locator('.world-wall').click({ button: 'right', position: { x: 700, y: 320 } })
   await page.locator('.world-context-menu.is-desktop [data-role="personalize"]').click()
   await page.locator('.world-wallpaper-panel').waitFor()
@@ -393,7 +393,7 @@ try {
 
   await page.getByRole('button', { name: '开始' }).click()
   assert.equal(await page.locator('.world-start').evaluate(element => element.classList.contains('open')), true)
-  await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-install').click()
+  assert.equal(await page.locator('[data-world-app-card="vscode"] .world-app-open').isVisible(), true)
   assert.equal(await page.locator('.world-desktop-icon').count(), 5)
   const vscodeIcon = page.getByRole('button', { name: 'Visual Studio Code' })
   await vscodeIcon.dblclick({ force: true })

@@ -22,7 +22,7 @@ import {
   setPaneRatio, splitWithTab, tabGroupOf, visibleTabs as visibleTabIds,
 } from './vscode-layout.js'
 import { findInScript, scriptContext } from './srw-code-editor.js'
-import { parsePainter } from './srw-model.js'
+import { findMemberDefinition, parsePainter } from './srw-model.js'
 import { taskbarSource } from './taskbar-source.js'
 import { useWindowCache } from './window-cache.js'
 import { SrwDesigner, defaultSrwPanels, packSrwLayout, saveSrwLayout, srwPreset, srwViews, useSrwLifetime } from './srw-designer.js'
@@ -1546,6 +1546,8 @@ export function VscodeWindow({ toolHistory, replaySearch,
   const fileMenuRef = React.useRef(null)
   const [tabMenu, setTabMenu] = React.useState(null)
   const tabMenuRef = React.useRef(null)
+  const menuLookup = tabMenu?.lookup
+  React.useEffect(() => () => menuLookup?.abort(), [menuLookup])
   /** 批处理运行面板：jobId 来自宿主终端服务，offset 是已经读到的字节位置。 */
   const [batchRun, setBatchRun] = React.useState(null)
   const [batchStarting, setBatchStarting] = React.useState(false)
@@ -1752,6 +1754,8 @@ export function VscodeWindow({ toolHistory, replaySearch,
 
   React.useEffect(() => { onDirtyChange(dirty) }, [dirty, onDirtyChange])
 
+  // 外部重读会在原标签内替换 textarea；视口测量必须跟着实际输入框，而不是只跟标签 ID。
+  const sourceInputKey = active?.document ? `${active.id}:${active.path}:${active.reload || 0}` : null
   React.useLayoutEffect(() => {
     const node = textareaRef.current
     if (!node || splitMode) return
@@ -1768,7 +1772,7 @@ export function VscodeWindow({ toolHistory, replaySearch,
     }
     window.addEventListener('resize', update)
     return () => window.removeEventListener('resize', update)
-  }, [active?.id, Boolean(active?.document), splitMode])
+  }, [sourceInputKey, splitMode])
 
   /**
    * 折行以后「第 n 行 = n × 行高」不再成立：一行折成几行只有排版引擎知道。
@@ -2107,9 +2111,13 @@ export function VscodeWindow({ toolHistory, replaySearch,
     }
     if (existing || inFlight) {
       const id = existing?.id || inFlight.id
+      if (mode === 'design' && existing?.document && !existing.openAsDesign && !inFlight) {
+        if (savingRef.current) { setError('请等待保存完成后再打开设计视图。'); return }
+        openDesign(existing) // Preserve the live draft, including large/virtual source editors.
+      }
       if (pin || mode === 'source') {
         setTabs(current => current.map(tab => tab.id === id
-          ? { ...tab, pinned: tab.pinned || pin, openAsDesign: tab.openAsDesign && mode !== 'source' } : tab))
+          ? { ...tab, pinned: tab.pinned || pin, openAsDesign: mode === 'design' || (tab.openAsDesign && mode !== 'source') } : tab))
         // 设计组的 owner 标签被定住时，父标签也要一起定住（否则单击打开建出的组还是预览态）
         if (pin) pinDesignOwner(existing)
       }
@@ -2759,14 +2767,28 @@ export function VscodeWindow({ toolHistory, replaySearch,
     return menu
   }
 
+  const memberLinks = async (script, parent, signal) => {
+    const binding = await script.resolve(signal)
+    signal.throwIfAborted()
+    if (binding?.type) {
+      const {matches, objectNote} = await objectIndex.find(binding.type)
+      const targets = matches.filter(path => /\.sr[uwams]$/i.test(path))
+      if (targets.length || !binding.local) return {matches:targets, scope:binding.type,
+        objectNote:objectNote || (!targets.length && `工程中未找到对象 ${binding.type}。`)}
+    }
+    return binding?.local ? {matches:[relativeToRoot(parent.srw.path)], scope:binding.local, objectNote:''}
+      : {matches:[], objectNote:'未能从当前脚本的声明确定对象类型。'}
+  }
+
   const openDesignMenu = (event, parent) => {
     if (event.defaultPrevented) return
     const script = pbProject && !collectionMode && withinFolder(normalizePath(parent.srw.path), rootPath) && scriptContext(event)
     if (script) {
-      const found = objectIndex.find(script.word.toLowerCase())
+      const lookup = script.resolve ? new AbortController() : null
+      const found = lookup ? memberLinks(script, parent, lookup.signal) : objectIndex.find(script.word.toLowerCase())
       const loading = found instanceof Promise
       if (loading || found.matches.length || found.objectNote) {
-        const menu = openTabMenu(event, parent.id, { script, objectIndex,
+        const menu = openTabMenu(event, parent.id, { script, objectIndex, lookup,
           ...(loading ? { objectNote: '正在查找工程对象…' } : found) })
         // A slow first lookup must never reopen a dismissed menu or replace a newer word.
         if (loading) found.then(result => setTabMenu(current => current === menu ? { ...menu, ...result } : current))
@@ -3659,8 +3681,35 @@ export function VscodeWindow({ toolHistory, replaySearch,
   const revealHitRef = React.useRef(revealHit)
   React.useLayoutEffect(() => { revealHitRef.current = revealHit })
 
+  // A slow painter parse must not bring back a jump after the user leaves its target.
   React.useEffect(() => {
-    if (!reveal || !active?.document || active.path !== reveal.path) return
+    if (reveal?.design && activeId !== reveal.tab && designOwner?.id !== reveal.tab) setReveal(null)
+  }, [reveal, activeId, designOwner?.id])
+  const finishPainterJump = (parent, view, error) => {
+    if (error) { setReveal(null); setError(error.message); return }
+    if (view) { setReveal(null); openDesignView(parent, view); return }
+    // No painter surface owns this definition (e.g. a forward-only prototype).
+    // Use the existing source reveal on this same draft, without reading the file again.
+    if (savingRef.current) { setReveal(null); setError('请等待保存完成后再切回源码。'); return }
+    restoreSource(designOwner)
+    setReveal(current => current === reveal ? {...current, design:false} : current)
+  }
+
+  // Resolve against the opened draft (including a virtual editor), not a second RPC/export.
+  React.useEffect(() => {
+    if (!reveal?.member || reveal.design || active?.path !== reveal.path || !active.document) return
+    const viewer = largeHandles.current.get(active.id), source = viewer?.doc() ?? tabText(active)
+    const controller = new AbortController()
+    findMemberDefinition(source, reveal.scope, reveal.member, controller.signal).then(hit => {
+      if (controller.signal.aborted || (viewer && viewer.doc() !== source)) return
+      if (!hit.member) flashNotice(`未找到 ${reveal.member} 的定义，已打开 ${reveal.scope}。`)
+      setReveal(current => current === reveal ? {...current, member:null, line:hit.line, column:0} : current)
+    }).catch(error => { if (!controller.signal.aborted) setError(error.message) })
+    return () => controller.abort()
+  }, [reveal, active?.path, active?.id, active?.document, active?.draft])
+
+  React.useEffect(() => {
+    if (!reveal || reveal.member || !active?.document || active.path !== reveal.path) return
     if (revealedSeq.current === reveal.nonce) return
     const viewer = largeHandles.current.get(active.id)
     if (viewer) { revealedSeq.current = reveal.nonce; viewer.reveal(reveal.line, reveal.column); return }
@@ -3700,10 +3749,20 @@ export function VscodeWindow({ toolHistory, replaySearch,
     taskbarSource(focused) {
       if (minimized || pickerOpenRef.current) return null
       const shell = shellRef.current
-      const code = focused?.closest?.('.cm-content, textarea.world-vscode-textarea')
-      const node = code && shell.contains(code) ? code : active?.kind === 'srw-view' ? null
-        : codeView(active) ? shell.querySelector('.world-vscode-pane.is-active .world-vscode-large .cm-content') : textareaRef.current
-      return taskbarSource(node, designOwner?.path || active?.path, activeDirty, node?.worldLineTops?.length ? node.worldLineTops : tops)
+      if (!shell) return null
+      const selector = 'textarea.world-vscode-textarea, .world-vscode-large .cm-content, .world-srw-code-input .cm-content'
+      const code = focused?.closest?.(selector)
+      // Read metadata and selection from the SAME pane, including nested painter tabs.
+      const focusedCode = code?.closest('.world-vscode-window[data-world-vscode-key]') === shell ? code : null
+      const strip = focusedCode ? focusedCode.closest('.world-vscode-pane')?.querySelector(':scope > .world-vscode-tabs')
+        : active && shell.querySelector(`.world-vscode-tabs[data-world-active="${CSS.escape(active.id)}"]`)
+      const pane = strip?.closest('.world-vscode-pane'), tab = tabs.find(item => item.id === strip?.dataset.worldActive)
+      if (!tab || (tab.kind && tab.kind !== 'srw-view')) return null
+      const node = focusedCode || pane.querySelector(selector)
+      if (!node || node.closest('.world-vscode-pane') !== pane) return null
+      const owner = tab.kind === 'srw-view' ? tabs.find(item => item.designKey === owners.get(tab.id)) : null
+      const source = saveOwner(tab, owner)
+      return taskbarSource(node, source?.path, isDirty(source), node.worldLineTops || (tab === active ? tops : null))
     },
     focus() {
       const shell = shellRef.current
@@ -4830,7 +4889,9 @@ export function VscodeWindow({ toolHistory, replaySearch,
             // 双击分隔条：根层回到「按当前宽度算出的默认比例」，用户自己拖出来的子层回 50:50
             onReset: path => changeLayout(id, layout => setPaneRatio(layout, path, path.length ? .5 : designLayout().ratio)),
           }), id === findParent?.id ? findBar : null)
-          if (parent.srw) return h(SrwDesigner, { key: id, parent, wrap, applicationFor, activeId: isActive && !minimized ? activeId : null, render: panes, onDirty: () => designDirtyChanged(parent.srw), openView: view => openDesignView(parent, view) })
+          if (parent.srw) return h(SrwDesigner, { key: id, parent, wrap, applicationFor,
+            memberJump: reveal?.design && reveal.tab === designOwner?.id && designOwner?.designKey === id ? reveal : null,
+            finishJump: (view, error) => finishPainterJump(parent, view, error), activeId: isActive && !minimized ? activeId : null, render: panes, onDirty: () => designDirtyChanged(parent.srw), openView: view => openDesignView(parent, view) })
           // 组里最后一个文件被设计视图接管后会留下一个空组：说清楚它还在、怎么用，别点开一片空白。
           return h(React.Fragment, null, panes(), memberIds(parent.layout).length ? null : h('div', { className: 'world-vscode-pane-empty' },
             h('p', null, '这个分组里没有标签了'),
@@ -4958,7 +5019,7 @@ export function VscodeWindow({ toolHistory, replaySearch,
             }, highlightRows))
             : null,
           h('textarea', {
-            key: `${active.id}:${active.path}:${active.reload || 0}`, ref: textareaRef, 'data-source-tab': active.id,
+            key: sourceInputKey, ref: textareaRef, 'data-source-tab': active.id,
             className: `world-vscode-textarea${highlightReady && highlighted ? ' is-highlight' : ''}${wrap ? ' is-wrap' : ''}`,
             'aria-label': `编辑 ${baseName(active.path)}`,
             readOnly: isLocked(active),
@@ -5206,8 +5267,15 @@ export function VscodeWindow({ toolHistory, replaySearch,
   ]),
   tabMenu.objectNote && h('div', { className: 'world-context-note' }, tabMenu.objectNote),
   tabMenu.matches?.map(path => h('button', { key: path, type: 'button', role: 'menuitem', title: path, style: { overflowWrap: 'anywhere' },
-    onClick: () => { setTabMenu(null); void openFile(joinPath(rootPath, path), true) },
-  }, `打开 ${baseName(path).replace(/\.[^.]+$/, '')}${tabMenu.matches.length > 1 ? `（${path}）` : ''}`))) : null,
+    onClick: async () => {
+      setTabMenu(null)
+      const target = joinPath(rootPath, path)
+      if (!tabMenu.scope) { void openFile(target, true); return }
+      const design = painterPath(target)
+      const opened = await openFile(target, true, undefined, undefined, design ? 'design' : 'source')
+      if (opened) setReveal({path:target, tab:opened.id, design, scope:tabMenu.scope, member:tabMenu.script.word, nonce:++revealSeq.current})
+    },
+  }, `打开 ${tabMenu.scope ? `${tabMenu.scope}.${tabMenu.script.word}` : baseName(path).replace(/\.[^.]+$/, '')}${tabMenu.matches.length > 1 ? `（${path}）` : ''}`))) : null,
   // 菜单留在窗口里：portal 到 body 会被 world 的 inert 逻辑锁住（host 窗口关闭时），
   // 也会被窗口的 stacking context 压在下面；fixed 定位本身不受 overflow 裁剪。
   fileMenu ? h('div', {

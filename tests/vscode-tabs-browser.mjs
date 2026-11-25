@@ -27,11 +27,29 @@ try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 860 }, deviceScaleFactor: 1 })
   const errors = []
   page.on('pageerror', error => errors.push(error.message))
-  await page.setContent(html)
-  await page.addScriptTag({ content: bundle.outputFiles[0].text })
-  await page.waitForFunction(() => document.body.dataset.worldWindow === 'closed')
+  const url = 'http://127.0.0.1/world-vscode-default'
+  await page.route(url, route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: html }))
+  const boot = async () => {
+    await page.goto(url); await page.addScriptTag({ content: bundle.outputFiles[0].text })
+    await page.waitForFunction(() => document.body.dataset.worldWindow === 'closed')
+  }
+  await boot()
+  const icon = page.locator('[data-world-icon-id="vscode"]'), card = page.locator('[data-world-app-card="vscode"]')
+  await icon.waitFor()
   await page.getByRole('button', { name: '开始' }).click()
-  await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-install').click()
+  await card.locator('.world-app-open').waitFor(); await card.hover()
+  await page.screenshot({ path: join(shots, 'default-installed.png') })
+  // 升级已保存的旧配置：只补 VSCode，不恢复已经卸载的浏览器和终端。
+  await page.evaluate(() => {
+    localStorage.setItem('dsh.world.apps', '["lanchat"]'); localStorage.removeItem('dsh.world.vscode.migrated')
+  })
+  await boot(); await icon.waitFor()
+  assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('dsh.world.apps')).sort()), ['lanchat', 'vscode'])
+  await page.getByRole('button', { name: '开始' }).click(); await card.locator('.world-app-uninstall').click()
+  await boot(); assert.equal(await icon.count(), 0)
+  await page.getByRole('button', { name: '开始' }).click(); await card.locator('.world-app-install').click()
+  await icon.waitFor(); await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: '开始' }).click()
   await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-open').click()
   const editor = page.locator('.world-vscode-window[data-world-vscode-key]')
   await editor.waitFor()

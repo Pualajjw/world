@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-world",
-  "version": "0.3.63",
+  "version": "0.3.66",
   "private": true,
   "type": "module",
   "description": "Win11 风格 DSH 桌面，支持手机扫码访问同一后台和窄屏手机桌面，内置 VSCode、终端（含 SSH）、EasyTier 上网、局域网聊天、多标签浏览器、DSH 进程管理器、日记、待办、收纳盒和垃圾箱。",
@@ -38,6 +38,8 @@
     "test:ports": "node tests/process-ports-browser.mjs",
     "test:internet": "node tests/internet-browser.mjs",
     "test:internet:runtime": "node tests/internet-runtime.mjs",
+    "test:secretary:runtime": "node tests/secretary-runtime.mjs && node tests/secretary-runtime.mjs --ptc",
+    "test:pbnpm:runtime": "node tests/pbnpm-runtime.mjs",
     "test:updates": "node tests/updates-browser.mjs",
     "test:updates:runtime": "node tests/updates-runtime.mjs",
     "test:app-tools": "node tests/app-tools-browser.mjs",
@@ -50,6 +52,8 @@
   "files": [
     "index.js",
     "updates.js",
+    "pbnpm-installer.js",
+    "pbnpm-entry.js",
     "update-panel.js",
     "client.js",
     "vscode-app.js",
@@ -71,6 +75,7 @@
     "srm-model.js",
     "srw-code-editor.js",
     "srw-completion.js",
+    "srw-bindings.js",
     "srw-control-api.json",
     "srw-edits.js",
     "srw-declarations.js",
@@ -143,6 +148,7 @@
     "desktop-ui-protocol.js",
     "desktop-brain.js",
     "her-message.js",
+    "secretary.js",
     "taskbar-source.js",
     "assistant-activity.js",
     "assistant-pointer.js",
@@ -211,6 +217,7 @@
   "peerDependencies": {
     "@deepseek-ai/dsh-atomic-write": "*",
     "@deepseek-ai/dsh-fs": "*",
+    "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-sandbox": "*",
     "@deepseek-ai/dsh-scope": "*"
   },
@@ -219,6 +226,9 @@
       "optional": true
     },
     "@deepseek-ai/dsh-atomic-write": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
       "optional": true
     },
     "@deepseek-ai/dsh-fs": {
@@ -250,6 +260,7 @@
     "@codemirror/search": "6.7.2",
     "@codemirror/state": "6.5.2",
     "@codemirror/view": "6.38.6",
-    "@zip.js/zip.js": "2.25.0"
+    "@zip.js/zip.js": "2.25.0",
+    "markdown-it": "14.2.0"
   }
 }

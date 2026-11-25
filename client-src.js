@@ -3,6 +3,7 @@ import { createAppPlayback } from './app-playback.js'
 import { ToolSettings, readToolSettings, subscribeToolSettings } from './app-tool-settings.js'
 import { AppToolHistory, toolHeadline } from './app-tool-history.js'
 import React from 'react'
+import MarkdownIt from 'markdown-it'
 import { createPortal } from 'react-dom'
 import { readDesktopSession, saveDesktopSession } from './desktop-session.js'
 import { useWindowCache } from './window-cache.js'
@@ -41,6 +42,7 @@ import { FileLinkGlyph, HolderGlyph, HolderPage, RenameDialog } from './holder-a
 import { openNativeSettings } from './native-settings.js'
 import { HOST_PANELS, openHostPanel } from './host-panels.js'
 import { version as WORLD_VERSION } from './package.json'
+import { usePbnpmEntry } from './pbnpm-entry.js'
 import { WorldVersion } from './update-panel.js'
 import { PHONE_BREAKPOINT, isPhoneViewport, fitSavedDesktopRect } from './responsive.js'
 import { WINDOW_Z_BASE, dropWindows, orderByPin, raiseWindow, topWindow } from './window-stack.js'
@@ -63,12 +65,26 @@ import {
 export const inject = ['slots', 'sessions', 'remote', 'remote.session', 'remote.workspaceFiles', 'connection', 'layout']
 
 const h = React.createElement
+// Assistant text is untrusted: no raw HTML, automatic image requests or app-local links.
+const replyMarkdown = new MarkdownIt({ html: false }).disable('image')
+replyMarkdown.validateLink = url => /^https?:\/\//i.test(url)
+replyMarkdown.renderer.rules.link_open = (tokens, index, options, env, renderer) => {
+  tokens[index].attrSet('target', '_blank')
+  tokens[index].attrSet('rel', 'noopener noreferrer')
+  return renderer.renderToken(tokens, index, options)
+}
+const HerReplyBody = React.memo(function HerReplyBody({ text }) {
+  return text ? h('div', { className: 'world-her-answer-body', role: 'status', dangerouslySetInnerHTML: { __html: replyMarkdown.render(text) } })
+    : h('p', { className: 'world-her-answer-body', role: 'status' }, '已送给她，等待答复…')
+})
 const STORAGE_KEY = 'dsh.world.window.position'
 const APPS_STORAGE_KEY = 'dsh.world.apps'
 const VSCODE_STORAGE_KEY = 'dsh.world.vscode.window'
 const LANCHAT_STORAGE_KEY = 'dsh.world.lanchat.window'
 const BROWSER_STORAGE_KEY = 'dsh.world.browser.window'
 const TERMINAL_STORAGE_KEY = 'dsh.world.terminal.window'
+const VSCODE_MIGRATION_KEY = 'dsh.world.vscode.migrated'
+const DEFAULT_INSTALLED_APPS = ['vscode', 'browser', 'terminal']
 const BROWSER_MIGRATION_KEY = 'dsh.world.browser.migrated'
 const TERMINAL_MIGRATION_KEY = 'dsh.world.terminal.migrated'
 // 0.2.95 起默认是平面桌面（原来的「普通桌面」），这个键只在你亲手打开过 3D 时才是 'on'。
@@ -112,15 +128,18 @@ function currentMainSession(sessions) {
 }
 
 /**
- * 浏览器和终端像 Win11 自带的应用：默认已安装、允许卸载。
- * 老配置里没有终端，所以迁移只补一次——卸载过的人不会下次打开又被装回来。
+ * VSCode、浏览器和终端默认已安装、允许卸载。每个应用只迁移一次，之后尊重卸载选择。
  */
 function readInstalledApps() {
   try {
     const raw = window.localStorage.getItem(APPS_STORAGE_KEY)
-    if (raw === null) return new Set(['browser', 'terminal'])
-    const value = JSON.parse(raw || '[]')
+    const value = raw === null ? DEFAULT_INSTALLED_APPS : JSON.parse(raw || '[]')
     const apps = Array.isArray(value) ? new Set(value.filter(id => KNOWN_APPS.includes(id))) : new Set()
+    if (!window.localStorage.getItem(VSCODE_MIGRATION_KEY)) {
+      apps.add('vscode')
+      saveInstalledApps(apps)
+      window.localStorage.setItem(VSCODE_MIGRATION_KEY, '1')
+    }
     if (!window.localStorage.getItem(BROWSER_MIGRATION_KEY)) {
       apps.add('browser')
       saveInstalledApps(apps)
@@ -132,7 +151,7 @@ function readInstalledApps() {
       window.localStorage.setItem(TERMINAL_MIGRATION_KEY, '1')
     }
     return apps
-  } catch { return new Set(['browser', 'terminal']) }
+  } catch { return new Set(DEFAULT_INSTALLED_APPS) }
 }
 
 function saveInstalledApps(apps) {
@@ -721,10 +740,11 @@ function HerMessageBox({ phone, onInsert, capture, activity, onOpenConversation 
     disabled: !text.trim(), onMouseDown: event => event.preventDefault(),
   }, h(SendGlyph, { size: 14 }))), previewOpen && ticket && h('aside', { id: previewId, className: 'world-her-answer', 'aria-label': '她的答复' },
       h('div', { className: 'world-her-answer-head' },
-        h('strong', null, [ticket.name, ticket.view?.path, ticket.view?.label, ticket.view?.from && `第 ${ticket.view.from}–${ticket.view.to} 行`, ticket.view?.dirty && '未保存'].filter(Boolean).join(' · ') || '任务栏留言'),
+        h('strong', null, [ticket.name, ticket.view?.path, ticket.view?.label, ticket.view?.line && `光标 ${ticket.view.line}:${ticket.view.column}`,
+          ticket.view?.selectionStartLine && `选区 ${ticket.view.selectionStartLine}:${ticket.view.selectionStartColumn}–${ticket.view.selectionEndLine}:${ticket.view.selectionEndColumn}`, ticket.view?.dirty && '未保存'].filter(Boolean).join(' · ') || '任务栏留言'),
         h('button', { type: 'button', className: 'world-her-close', 'aria-label': '关闭答复', title: '关闭答复',
           onClick: () => { setPreviewOpen(false); replyButton.current?.focus() } }, '×')),
-      h('p', { role: 'status' }, answer?.text || '已送给她，等待答复…'),
+      h(HerReplyBody, { text: answer?.text }),
       h('div', { className: 'world-her-answer-actions' },
         ticket.back && h('button', { type: 'button', onClick: () => { setPreviewOpen(false); ticket.back() } }, '回到代码'),
         h('button', { type: 'button', onClick: () => { setPreviewOpen(false); onOpenConversation(ticket.sessionId) } }, '展开对话'),
@@ -3462,7 +3482,8 @@ function DesktopLayer({ sessions, remote, rpc: hostRpc, renderSlot, SessionProvi
     { key: 'power:restart', label: '重启', note: '重新打开 DSH 主程序', hint: '电源',
       icon: () => h(PowerGlyph, { size: 20 }), open: () => { void requestPower('restart') } },
   ]
-  const searchCatalog = [
+  const pbnpmInstall = usePbnpmEntry(rpc, startOpen, showNotice, showError)
+  const searchCatalog = [{ ...pbnpmInstall, hint: '插件', icon: PluginsGlyph },
     ...globalThis.__WORLD_MOBILE_ACCESS__ ? [] : [{ key: 'mobile', label: '手机连接', note: '扫码打开 world', hint: '应用',
       icon: () => h(MobileGlyph, { size: 22 }), open: () => { setStartOpen(false); setMobileOpen(true) } }],
     ...powerRows,
@@ -3758,6 +3779,11 @@ function DesktopLayer({ sessions, remote, rpc: hostRpc, renderSlot, SessionProvi
         h('section', { className: 'world-start-group' },
           h('div', { className: 'world-start-group-title' }, '插件',
             pluginApps.length ? h('span', null, `${pluginApps.length} 个整页插件`) : null),
+          h('button', { type: 'button', className: 'world-plugin-card', 'data-world-plugin-card': 'pbnpm',
+            disabled: pbnpmInstall.busy, onClick: pbnpmInstall.open },
+            h('span', { className: 'world-plugin-card-icon' }, h(PluginsGlyph, { size: 22 })),
+            h('span', { className: 'world-plugin-card-info' }, h('strong', null, pbnpmInstall.label), h('span', null, pbnpmInstall.note)),
+            h('span', { className: 'world-plugin-card-action' }, pbnpmInstall.action)),
           pluginApps.length === 0
             ? h('div', { className: 'world-start-empty' }, '未检测到注册整页的插件')
             : pluginApps.map(app => {

@@ -43,7 +43,7 @@ export function UpdatePanel({ rpc, version, onInfo, onClose }) {
     let state = initial
     while (!signal.aborted) {
       if (alive.current) setJob(state)
-      if (state.state === 'idle' && state.installedVersion === initial.version) {
+      if (state.state === 'idle' && initial.operation !== 'reinstall' && state.installedVersion === initial.version) {
         setJob({ state: 'success', version: initial.version })
         setDetails(value => ({ ...value, installedVersion: initial.version }))
         return
@@ -83,14 +83,16 @@ export function UpdatePanel({ rpc, version, onInfo, onClose }) {
     if (!signal.aborted) { setChecked(result); setDetails(result); setJob(null); onInfo?.(result) }
   })
   React.useEffect(() => { void check() }, [])
-  const install = () => run(async signal => {
-    const confirmed = await worldConfirm({ title: '升级 world', confirmLabel: '确认升级',
-      message: `从 ${checked.sourceName} 将 world ${version} 升级到 ${checked.latestVersion}？`,
+  const install = operation => run(async signal => {
+    const reinstall = operation === 'reinstall', verb = reinstall ? '重装' : '升级'
+    const confirmed = await worldConfirm({ title: `${verb} world`, confirmLabel: `确认${verb}`,
+      message: reinstall ? `从 ${checked.sourceName} 重新安装当前版本 world ${checked.latestVersion}？`
+        : `从 ${checked.sourceName} 将 world ${version} 升级到 ${checked.latestVersion}？`,
       detail: '安装完成后需要重启 DSH。' })
     if (!confirmed || signal.aborted) return
     // On a lost response, retrying a check first recovers this host-owned job instead of installing twice.
-    setJob({ state: 'installing', message: '正在提交升级请求…' })
-    const started = await call(rpc, 'install', { token: checked.token, confirmed: true }, signal)
+    setJob({ state: 'installing', message: `正在提交${verb}请求…` })
+    const started = await call(rpc, operation, { token: checked.token, confirmed: true }, signal)
     await watch(signal, started)
   })
   const keyDown = event => {
@@ -103,7 +105,8 @@ export function UpdatePanel({ rpc, version, onInfo, onClose }) {
     }
   }
   const installedVersion = details?.installedVersion
-  const restartRequired = installedVersion && installedVersion !== version
+  const restartRequired = details?.restartRequired || (installedVersion && installedVersion !== version) ||
+    (job?.operation === 'reinstall' && job.state === 'success')
   const canUpgrade = checked?.available && checked.latestVersion !== installedVersion
   return h('div', { className: 'world-workbench-setup world-update-panel', 'data-world-update': true,
     onPointerDown: event => { if (event.target === event.currentTarget) close.current() } },
@@ -122,5 +125,7 @@ export function UpdatePanel({ rpc, version, onInfo, onClose }) {
     h('div', { className: 'world-workbench-setup-actions' },
       h('button', { type: 'button', onClick: () => close.current() }, '关闭'),
       h('button', { type: 'button', disabled: busy, onClick: check }, error ? '重试' : '检查更新'),
-      canUpgrade && h('button', { type: 'button', className: 'is-primary', disabled: busy || job?.state === 'installing' || !details?.canInstall, onClick: install }, '升级 world'))))
+      (canUpgrade || (checked?.reinstallable && !restartRequired)) && h('button', { type: 'button', className: 'is-primary',
+        disabled: busy || Boolean(error) || job?.state === 'installing' || !details?.canInstall,
+        onClick: () => install(canUpgrade ? 'install' : 'reinstall') }, canUpgrade ? '升级 world' : '重装 world'))))
 }

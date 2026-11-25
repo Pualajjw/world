@@ -8,7 +8,7 @@
 还有一位有自己的时间、记忆和日记的助手，和你共用这张桌子。</p>
 
 <p>
-  <a href="./CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.3.62-2f81f7?style=flat-square" alt="version" /></a>
+  <a href="./CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.3.66-2f81f7?style=flat-square" alt="version" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square" alt="license" /></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-8b949e?style=flat-square" alt="platform" />
   <img src="https://img.shields.io/badge/DeepSeek%20Harness-plugin-a371f7?style=flat-square" alt="DeepSeek Harness plugin" />
@@ -131,7 +131,7 @@ set "HTTP_PROXY=%HTTPS_PROXY%"
 用本机构建出来的 `dist/world-<版本>-universal.tgz`：
 
 ```bat
-dsh plugin --profile desktop add file:E:\path\to\world-0.3.62-universal.tgz
+dsh plugin --profile desktop add file:E:\path\to\world-0.3.66-universal.tgz
 ```
 
 ### 通过 pbpkg 源安装
@@ -148,8 +148,8 @@ dsh plugin --profile desktop add file:E:\path\to\world-0.3.62-universal.tgz
 
 1. **打开桌面**：双击桌面上的 DeepSeek Harness 图标，DSH 原界面进入一扇虚拟窗口；再双击图标或点任务栏可以还原。
 2. **摆窗口**：拖标题栏移动；甩到顶边最大化，甩到左 / 右边缘占半屏；点任务栏上已在前台的按钮会收回窗口。
-3. **开始菜单**：搜索框直接打字，能搜应用、文件和插件；「设置」「插件」会先把 DSH 窗口立起来，再切到宿主的原生面板。
-4. **装应用**：开始菜单里的 VSCode、局域网聊天按需安装；浏览器、终端默认已装（也可以卸载）。装好后桌面出现图标，VSCode 还能同时开多个窗口。
+3. **开始菜单**：搜索框直接打字，能搜应用、文件和插件；「设置」「插件」会打开对应的 DSH 原生面板。在下方「插件」分组点 **pbnpm**（也可搜索），未安装时显示可安装版本，已安装时显示本机版本并提供「重装」。已禁用的插件会标为「已禁用」，重装后仍保持禁用。优先用本地 pbpkg 开发源，没有可用包时直连 Gitee；确认框显示实际来源和目标版本。
+4. **装应用**：VSCode、浏览器和终端默认已安装，可以卸载；局域网聊天按需安装。装好后桌面出现图标，VSCode 还能同时开多个窗口。
 5. **桌面本身**：右键壁纸可以「个性化 / 刷新」，右下角 `3D` 切换景深；图标可以拖动、合并成收纳盒；把 Windows 文件拖进桌面只记录路径，不复制文件。
 6. **手机连接**：开始菜单 →「手机连接」→ 选网卡 → 手机扫码。手机和电脑共用同一个 DSH 后台，窗口布局与未保存草稿各自独立。
 7. **交给她**：点任务栏右侧「交给助手」，允许固定助手使用已绑定的应用工具；点「换你来」可收回授权，但不会停止已经启动的命令。详见 [docs/life.md](docs/life.md)。
@@ -157,7 +157,7 @@ dsh plugin --profile desktop add file:E:\path\to\world-0.3.62-universal.tgz
 
 ## 与模型协作
 
-打开**开始菜单 → World 设置 → 助手使用电脑**，可以查看每个 DSH 工具交给哪个应用。比如，先安装内置 VSCode，保留 `read → VSCode` 的默认绑定，再点任务栏「交给助手」，请她读取工作区里的文件。工具仍须通过 DSH 原有的审批与沙箱；未绑定或所属应用未安装时，固定助手不能调用它。
+打开**开始菜单 → World 设置 → 助手使用电脑**，可以查看每个 DSH 工具交给哪个应用。比如，保留 `read → VSCode` 的默认绑定，再点任务栏「交给助手」，请她读取工作区里的文件。工具仍须通过 DSH 原有的审批与沙箱；未绑定或所属应用未安装时，固定助手不能调用它。
 
 | 默认所属应用 | 工具示例 |
 | --- | --- |

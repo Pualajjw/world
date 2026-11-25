@@ -226,3 +226,41 @@ test('bundled PB signatures match src/types without a workspace lookup at runtim
     for(const kind of ['properties','functions','events']) assert.deepEqual(api[kind],Object.fromEntries(Object.entries(source[kind]).map(([k,v])=>[k,v[0] || k])))
   }
 })
+
+test('member navigation resolves the clicked receiver in draft scope, without changing completion or using the caret', async () => {
+  const f = fixture('readonly n_param fp', 'n_instance fp')
+  async function resolve(f, source, word='FP_CaptuteImage') {
+    f.invalidate(1)
+    const state = EditorState.create({doc:source, extensions:EditorState.readOnly.of(true)})
+    return f.resolveMember({state, pos:source.lastIndexOf(word) + 3}, word)
+  }
+  assert.deepEqual(await resolve(f,'fp.FP_CaptuteImage()'), {type:'n_param'})
+  assert.deepEqual(await resolve(f,'N_LOCAL other, fp; FP . FP_CaptuteImage()'), {type:'n_local'})
+  assert.equal(await resolve(f,'string fp[2]\nfp.FP_CaptuteImage()'),null) // array shadows the parameter
+  for (const doc of ['// fp.FP_CaptuteImage()', '/*\nfp.FP_CaptuteImage()', 'x = "fp.FP_CaptuteImage()"'])
+    assert.equal(await resolve(f,doc),null)
+  const instance = fixture('', 'n_old fp'), call = 'fp.FP_CaptuteImage()'
+  assert.deepEqual(await resolve(instance,call), {type:'n_old'})
+  const {patches} = instance.session.edits
+  patches.set('declare:instance',{doc:Text.of(['n_new fp'])})
+  assert.deepEqual(await resolve(instance,call), {type:'n_new'})
+  patches.set('declare:instance',{doc:Text.empty}); patches.set('declare:shared',{doc:Text.of(['n_shared fp'])})
+  patches.set('declare:global',{doc:Text.of(['n_global fp'])})
+  assert.deepEqual(await resolve(instance,call), {type:'n_shared'})
+  patches.delete('declare:shared'); assert.deepEqual(await resolve(instance,call), {type:'n_global'})
+})
+
+test('member navigation reuses completion checkpoints in a 32K-line script', async () => {
+  const f = fixture(''), rows = 32087, lines = Array(rows).fill('// no declarations')
+  lines[0] = 'n_device fp'; lines.push('fp.FP_CaptuteImage()')
+  const doc = Text.of(lines), state = EditorState.create({doc}), orig = Text.prototype.iterLines
+  let read = 0
+  Text.prototype.iterLines = function*(...args) { for (const line of orig.apply(this,args)) { if (this === doc) read++; yield line } }
+  try {
+    const pos = doc.line(doc.lines).from + 5
+    await f.source(new CompletionContext(state,pos,true))
+    assert.equal(read,rows); read = 0
+    assert.deepEqual(await f.resolveMember({state,pos},'FP_CaptuteImage'), {type:'n_device'})
+    assert.equal(read,0)
+  } finally { Text.prototype.iterLines = orig }
+})

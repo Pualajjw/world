@@ -29,7 +29,6 @@ try {
     await page.addScriptTag({ content: bundle.outputFiles[0].text })
     await page.waitForFunction(() => document.body.dataset.worldWindow === 'closed')
     await page.getByRole('button', { name: '开始' }).click()
-    await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-install').click()
     await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-open').click()
     await page.locator('.world-vscode-window').waitFor()
     await page.waitForTimeout(400)

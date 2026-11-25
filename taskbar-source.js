@@ -29,7 +29,13 @@ export function taskbarSource(node, path, dirty, tops) {
   const head = selection?.head ?? (area.selectionDirection === 'backward' ? start : end)
   const lineAt = pos => doc ? doc.lineAt(pos).number : lineNumber(value, pos)
   const slice = (from, to) => doc ? doc.sliceString(from, to) : value.slice(from, to)
-  const line = lineAt(head), lineStart = doc ? doc.lineAt(head).from : (head ? value.lastIndexOf('\n', head - 1) + 1 : 0)
+  const startOfLine = pos => doc ? doc.lineAt(pos).from : (pos ? value.lastIndexOf('\n', pos - 1) + 1 : 0)
+  const line = lineAt(head), lineStart = startOfLine(head)
+  const newline = doc ? doc.lineAt(head).to : value.indexOf('\n', head)
+  const lineEnd = newline < 0 ? value.length : newline
+  // A scrolled viewport need not contain the caret. Keep its logical line separately;
+  // on a very long line, quote around the actual insertion point rather than column 1.
+  const cursorFrom = Math.max(lineStart, Math.min(head - LIMIT / 2, lineEnd - LIMIT))
   let from = start, to = end
   const style = area && getComputedStyle(area), rowHeight = style && parseFloat(style.lineHeight)
   if (from === to && doc) {
@@ -45,6 +51,10 @@ export function taskbarSource(node, path, dirty, tops) {
   }
   const text = slice(from, Math.min(to, from + LIMIT)), label = node.closest('[data-srw-view]') ? node.getAttribute('aria-label') : ''
   const context = { path, label, dirty, line, column: head - lineStart + 1, from: lineAt(from),
+    ...(start === end
+      ? { cursorLineText: slice(cursorFrom, Math.min(lineEnd, cursorFrom + LIMIT)), cursorLineFromColumn: cursorFrom - lineStart + 1 }
+      : { selectionStartLine: lineAt(start), selectionStartColumn: start - startOfLine(start) + 1,
+        selectionEndLine: lineAt(end), selectionEndColumn: end - startOfLine(end) + 1 }),
     to: lineAt(from + Math.max(0, text.length - 1)), kind: start === end ? '可见代码' : '选区', text, truncated: to - from > LIMIT }
   return { context, focus: () => { if (node.isConnected && node.clientHeight) node.focus({ preventScroll: true }) }, mark() {
     const parent = view?.dom || area.parentElement

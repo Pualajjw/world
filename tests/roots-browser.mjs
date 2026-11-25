@@ -71,7 +71,7 @@ export async function checkPluginRoots(browser, bundleText) {
         indexReads.push(root)
         if (indexReads.length === 1) await firstIndex
         return { libraries: root === PBT_ROOT ? [['tj.pbl', ['W_HOME.srw', 'w_home.srs', 'w_home2.sru']],
-          ['utils.pbl', ['w_home.srs']]] : [['tj.exe.pbd', [['w_home.srf', 'w_home.fun'], ['w_home.srw', 'w_home.win']]]], skipped: [] }
+          ['utils.pbl', ['w_home.srs', 'n_fp.sru', 'FP_CaptuteImage.srf']]] : [['tj.exe.pbd', [['w_home.srf', 'w_home.fun'], ['w_home.srw', 'w_home.win'], ['n_fp.sru', 'n_fp.udo']]]], skipped: [] }
       }
       const p = scan.projects.find(p => p.root === root)
       return {...scan, currentProject: p && {...p, libraryNames: p.kind === 'exe' ? ['tj.exe.pbd'] : ['tj.pbl', 'utils.pbl']}}
@@ -160,7 +160,8 @@ export async function checkPluginRoots(browser, bundleText) {
         saved.set(path, value); return {ok:true,value}
       }
       window.__worldSourceOpen = async ({path}) => ({ok:true,value:saved.get(path) || {path, source: path.endsWith('.sra')
-      ? 'global type startup from application\nstring appname = "startup"\nend type\nglobal variables\nstring gs_app\n// second declaration\nlong gl_count\nend variables\ntype prototypes\nfunction long AppTick() library "clock.dll"\nsubroutine AppReset() library "clock.dll"\nend prototypes\nevent open;\nopen(w_home)\n' + (path.includes('tj.exe.pbd/') ? '// W_HOME.WIN\n// w_home.srf\n' : '') + 'end event'
+      ? 'global type startup from application\nstring appname = "startup"\nend type\nglobal variables\nstring gs_app\n// second declaration\nlong gl_count\nend variables\ntype prototypes\nfunction long AppTick() library "clock.dll"\nsubroutine AppReset() library "clock.dll"\nend prototypes\nevent open;\nopen(w_home)\n' + (path.includes('tj.exe.pbd/') ? '// W_HOME.WIN\n// w_home.srf\nn_fp fp\nfp.FP_CaptuteImage()\nfp.DriverCall()\nfp.DeclaredOnly()\n' : '') + 'end event'
+      : path.endsWith('n_fp.sru') ? 'global type n_fp from nonvisualobject\nend type\ntype prototypes\nfunction long first_external() library "fp.dll"\nfunction long DriverCall() library "fp.dll"\nend prototypes\nforward prototypes\npublic function long DeclaredOnly()\npublic function long fp_captuteimage()\nend prototypes\npublic function long first_script();return 0\nend function\npublic function long fp_captuteimage();return 1\nend function'
       : path.endsWith('.sru') ? 'global type u_service from nonvisualobject\nend type'
       : path.endsWith('.srw') ? 'global type w from window\nend type\nglobal variables\ninteger gi_window\nend variables\ntype prototypes\nglobal function long WindowGlobal() library "clock.dll"\nfunction long WindowTick() library "clock.dll"\nend prototypes' : '', version:'v1',eol:'LF',encoding:'UTF-8',readOnly:path.includes('tj.exe.pbd/')}}) })
     const checkApp = async lib => {
@@ -187,6 +188,55 @@ export async function checkPluginRoots(browser, bundleText) {
       }, word)
       await page.mouse.click(...point, { button: 'right' })
     }
+    const checkMember = async (target) => {
+      const reads = () => page.evaluate(() => window.__worldTesting.calls.filter(c => c.method === 'world-vscode-source/open').length)
+      const before = await reads()
+      await rightClickScript('CaptuteImage', 'fp.FP_CaptuteImage()') // inside the member, not the insertion caret
+      const link = page.getByRole('menuitem', {name:'打开 n_fp.FP_CaptuteImage',exact:true})
+      await link.waitFor()
+      assert.equal(await link.getAttribute('title'), target)
+      assert.equal(await reads(), before, 'showing member links must not read target sources')
+      await link.click()
+      const box = page.getByLabel('编辑 n_fp.fp_captuteimage', {exact:true})
+      await box.waitFor(); assert.match(await box.innerText(), /return 1/)
+      assert.equal(await reads(), before + 1, 'only the selected source is read once')
+      const readOnly = target.includes('.pbd/')
+      const original = await box.innerText()
+      if (!readOnly) await box.fill('// unsaved in painter')
+      await app.click()
+      await rightClickScript('DriverCall', 'fp.DriverCall()')
+      await page.getByRole('menuitem', {name:'打开 n_fp.DriverCall',exact:true}).click()
+      const external = page.getByLabel('编辑 Local External Functions', {exact:true}); await external.waitFor()
+      await page.waitForFunction(() => window.getSelection()?.anchorNode?.parentElement.closest('.cm-line')?.textContent.includes('DriverCall'))
+      if (!readOnly) {
+        const originalDecl = await external.innerText()
+        await external.fill('// extra declaration line\n' + originalDecl)
+        await app.click(); await rightClickScript('DriverCall', 'fp.DriverCall()')
+        await page.getByRole('menuitem', {name:'打开 n_fp.DriverCall',exact:true}).click()
+        await external.waitFor()
+        await page.waitForFunction(() => window.getSelection()?.anchorNode?.parentElement.closest('.cm-line')?.textContent.includes('DriverCall'))
+        await external.fill(originalDecl)
+      }
+      await app.click(); await rightClickScript('CaptuteImage', 'fp.FP_CaptuteImage()'); await link.click(); await box.waitFor()
+      if (!readOnly) { assert.equal(await box.innerText(), '// unsaved in painter'); await box.fill(original) }
+      assert.equal(await reads(), before + 1, 'reuses the open painter and preserves declaration/script drafts')
+      // A forward-only declaration has no painter page; reveal it on the original source as before.
+      await app.click(); await rightClickScript('DeclaredOnly', 'fp.DeclaredOnly()')
+      await page.getByRole('menuitem',{name:'打开 n_fp.DeclaredOnly',exact:true}).click()
+      await page.waitForFunction(() => {
+        const el = document.activeElement
+        return el.matches('textarea.world-vscode-textarea') && el.value.slice(el.selectionStart).startsWith('public function long DeclaredOnly()')
+      })
+      if (!readOnly) {
+        const source = page.locator('.world-vscode-textarea:focus'), saved = await source.inputValue()
+        await source.fill(saved.replace('return 1','return 77')); await app.click()
+        await rightClickScript('CaptuteImage','fp.FP_CaptuteImage()'); await link.click(); await box.waitFor()
+        assert.match(await box.innerText(),/return 77/, 'promote an existing source tab using its unsaved text')
+        assert.equal(await reads(), before + 1)
+        await btn('返回源码').click(); await page.locator('.world-vscode-textarea:visible').last().fill(saved)
+      }
+      await app.click()
+    }
     const objectMenu = async () => {
       await rightClickScript('w_home')
       await page.getByRole('menuitem', {name:/^打开 w_home/i}).first().waitFor()
@@ -211,6 +261,9 @@ export async function checkPluginRoots(browser, bundleText) {
     await app.click()
     if (process.env.WORLD_SRA_SHOT) await page.locator('.world-vscode-window').screenshot({ path: process.env.WORLD_SRA_SHOT })
     const script = page.locator('[data-srw-view=script] .cm-content')
+    await script.fill('n_fp fp\nfp.FP_CaptuteImage()\nfp.DriverCall()\nfp.DeclaredOnly()')
+    await checkMember('utils.pbl/n_fp.sru')
+    assert.deepEqual(indexReads, [PBT_ROOT])
     await script.fill('open(w_changed)')
     await btn('tj.pbl').click()
     await btn('应用程序').click(); await btn('startup.sra').click()
@@ -288,6 +341,13 @@ export async function checkPluginRoots(browser, bundleText) {
     assert.deepEqual(await activeFiles.allTextContents(), ['w_order.srw'], 'Layout selects its SRW in the PBT explorer')
     await openVars(); await variables.waitFor()
     assert.deepEqual(await activeFiles.allTextContents(), ['w_order.srw'], 'switching design views keeps the owning file selected')
+    const rowBackground = () => btn('w_order.srw').evaluate(row => getComputedStyle(row).backgroundColor)
+    assert.equal(await rowBackground(), 'rgb(194, 223, 255)', 'light theme keeps a blue file row after focus leaves the tree')
+    await page.evaluate(() => document.body.setAttribute('data-ds-dark-theme', ''))
+    await page.waitForFunction(() => document.body.dataset.worldTheme === 'dark')
+    assert.equal(await rowBackground(), 'rgb(9, 71, 113)', 'dark theme keeps its own blue file row')
+    await page.evaluate(() => document.body.removeAttribute('data-ds-dark-theme'))
+    await page.waitForFunction(() => document.body.dataset.worldTheme === 'light')
     assert.equal(await btn('其他').count(), 0)
     await btn('全局函数').click()
     await btn('f_order.srf').click()
@@ -326,6 +386,7 @@ export async function checkPluginRoots(browser, bundleText) {
     await page.waitForFunction(() => [...document.querySelectorAll('.world-vscode-file-name')].some(node => node.textContent === 'tj.exe.pbd'))
 
     await checkApp(EXE_ROOT + '/tj.exe.pbd')
+    await checkMember('tj.exe.pbd/n_fp.sru')
     const exeMenu = await objectMenu()
     assert.deepEqual((await exeMenu.allTextContents()).slice(-2), ['打开 w_home（tj.exe.pbd/w_home.srf）', '打开 w_home（tj.exe.pbd/w_home.srw）'])
     assert.ok((await exeMenu.allTextContents()).includes('切换回源代码'), 'read-only scripts retain their design menu')

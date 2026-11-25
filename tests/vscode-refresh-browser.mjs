@@ -53,7 +53,6 @@ try {
   await page.addScriptTag({ content: bundle.outputFiles[0].text })
   await page.waitForFunction(() => document.body.dataset.worldWindow === 'closed')
   await page.getByRole('button', { name: '开始', exact: true }).click()
-  await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-install').click()
   await page.locator('.world-app-card[data-world-app-card="vscode"] .world-app-open').click()
   const editor = page.locator('.world-vscode-window[data-world-vscode-key]')
   await editor.waitFor()
@@ -67,6 +66,39 @@ try {
   await page.evaluate(() => window.__touch('main.js', 'const value = 42\n'))
   await page.waitForFunction(() => document.querySelector('[aria-label="编辑 main.js"]')?.value === 'const value = 42\n', null, { timeout: 8000 })
   assert.equal(await editor.locator('.world-vscode-tab.is-stale').count(), 0, '无草稿时自动重读，不留提示')
+
+  // 同一路径的外部重读会替换 textarea。扩大窗口并滚到中间，行号必须覆盖新正文的整屏。
+  const updated = Array.from({ length: 240 }, (_, i) => `// line ${i + 1}`).join('\n')
+  const gutter = editor.locator('.world-vscode-row-number')
+  await page.evaluate(source => window.__touch('main.js', source), updated)
+  await page.waitForFunction(source => document.querySelector('[aria-label="编辑 main.js"]')?.value === source, updated, { timeout: 8000 })
+  await editor.getByRole('button', { name: '最大化 Visual Studio Code' }).click()
+  await page.setViewportSize({ width: 1280, height: 1200 })
+  const visible = await input.evaluate(async node => {
+    const height = parseFloat(getComputedStyle(node).lineHeight)
+    node.scrollTop = 80 * height
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    return { first: 1 + Math.floor(node.scrollTop / height), last: Math.floor((node.scrollTop + node.clientHeight) / height) }
+  })
+  const numbers = (await gutter.allTextContents()).map(Number)
+  for (let n = visible.first; n <= visible.last; n++) assert.ok(numbers.includes(n), `外部更新后可见第 ${n} 行没有行号：${numbers[0]}–${numbers.at(-1)}`)
+  const maxOffset = await input.evaluate(node => {
+    const style = getComputedStyle(node), top = node.getBoundingClientRect().top + parseFloat(style.paddingTop)
+    return Math.max(...Array.from(node.parentElement.querySelectorAll('.world-vscode-row-number'), number => {
+      const expected = top + (Number(number.textContent) - 1) * parseFloat(style.lineHeight) - node.scrollTop
+      return Math.abs(number.getBoundingClientRect().top - expected)
+    }))
+  })
+  assert.ok(maxOffset <= 1, `行号和正文错位 ${maxOffset}px`)
+  console.log('外部重读后可见行', visible, '行号最大偏差(px)', maxOffset)
+  await editor.screenshot({ path: join(shots, 'external-refresh-lines.png') })
+  await page.evaluate(() => window.__touch('main.js', 'one\ntwo\nthree'))
+  await page.waitForFunction(() => document.querySelector('[aria-label="编辑 main.js"]')?.value === 'one\ntwo\nthree', null, { timeout: 8000 })
+  assert.deepEqual(await gutter.allTextContents(), ['1', '2', '3'])
+  await input.focus(); await input.press('Control+End')
+  await editor.getByTitle('光标位置：行 3, 列 6', { exact: true }).waitFor()
+  await page.setViewportSize({ width: 1280, height: 860 })
+  await editor.getByRole('button', { name: '还原 Visual Studio Code' }).click()
 
   // 有草稿：不覆盖，只打 stale，并给状态栏重载入口
   await input.fill('const draft = 7\n')

@@ -23,9 +23,10 @@ const fail = (message, code = 'WORLD_HER_MESSAGE') => { throw Object.assign(new 
 function publicView(raw) {
   if (!raw || typeof raw !== 'object') return null
   const view = {}
-  for (const [key, limit] of [['path', 1024], ['label', 160], ['kind', 64], ['text', 4000]])
+  for (const [key, limit] of [['path', 1024], ['label', 160], ['kind', 64], ['text', 4000], ['cursorLineText', 4000]])
     if (typeof raw[key] === 'string') view[key] = raw[key].slice(0, limit)
-  for (const key of ['line', 'column', 'from', 'to']) if (Number.isSafeInteger(raw[key]) && raw[key] > 0) view[key] = raw[key]
+  for (const key of ['line', 'column', 'from', 'to', 'cursorLineFromColumn',
+    'selectionStartLine', 'selectionStartColumn', 'selectionEndLine', 'selectionEndColumn']) if (Number.isSafeInteger(raw[key]) && raw[key] > 0) view[key] = raw[key]
   return { ...view, dirty: raw.dirty === true, truncated: raw.truncated === true }
 }
 

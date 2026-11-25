@@ -1,6 +1,7 @@
 import { autocompletion, closeCompletion, insertCompletionText, pickedCompletion, startCompletion } from '@codemirror/autocomplete'
 import { EditorState, Prec } from '@codemirror/state'
 import { EditorView, tooltips } from '@codemirror/view'
+import { bindingCode as codeLine, eachBinding, splitList } from './srw-bindings.js'
 import { PB_CONTROL, PB_KEYWORD, PB_TYPES } from './highlight.js'
 // Offline member signatures from the repository's src/types/{window,commandbutton,statictext,datawindow}.json.
 import controlApi from './srw-control-api.json' with {type:'json'}
@@ -9,8 +10,6 @@ import controlApi from './srw-control-api.json' with {type:'json'}
 // body. Immutable model members may be shared across scripts; draft locals must not be.
 const word = '[\\p{L}_$][\\p{L}\\p{N}_$#-]*', tail = new RegExp(`(${word})$`, 'u')
 const ident = /^[\p{L}\p{N}_$#-]*$/u
-const decl = new RegExp(`^\\s*(?:(?:ref|readonly|constant|public|protected|private)\\s+)*(${word})(?:\\s*\\{\\d+\\})?\\s+(.+)$`, 'iu')
-const binding = new RegExp(`^\\s*(${word})((?:\\s*\\[[^\\]]*\\])*)\\s*(?:=.*)?$`, 'u')
 const limit = 64, step = 128
 function applyName(view, option, from, to) {
   // Completing in the middle of Message|Box replaces the identifier, not its arguments.
@@ -27,51 +26,12 @@ function builtins() {
     ...[...PB_CONTROL,...PB_KEYWORD].map(s => item(s,'keyword','关键字')),
   ])
 }
-// Split declarators, not initializers/array dimensions containing commas. String
-// contents have already been masked, so a quoted comma cannot invent a variable.
-function splitList(code) {
-  let depth = 0, start = 0, result = []
-  for (let i = 0; i < code.length; i++) {
-    const c = code[i]
-    if (c === '(' || c === '[') depth++
-    else if (c === ')' || c === ']') depth--
-    else if (c === ',' && !depth) { result.push(code.slice(start,i)); start = i+1 }
-  }
-  result.push(code.slice(start)); return result
-}
 function declarations(code, kind, out) {
-  const m = decl.exec(code)
-  if (!m) return
-  const type = m[1].toLowerCase()
-  if (PB_CONTROL.has(type) || PB_KEYWORD.has(type)) return
-  const knownReceiver = (kind === '局部变量' || kind === '参数' || kind === '实例变量') && Object.hasOwn(controlApi,type)
-  for (const part of splitList(m[2])) {
-    const bound = binding.exec(part)
-    if (!bound) continue
-    const opt = item(bound[1],'variable',`${kind} · ${m[1]}`, 8)
-    if (knownReceiver && !bound[2]) opt.receiverType = type // An unindexed array isn't a control.
-    out.set(bound[1].toLowerCase(),opt)
-  }
-}
-// Mode crosses physical newlines, except for //. Only mask comments/strings, never
-// tokenize or copy the full CodeMirror document. An unfinished literal also vetoes UI.
-function codeLine(text, lex) {
-  if (!lex.mode && !/[/'"]/.test(text)) return text
-  let code = '', start = 0
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i], next = text[i+1]
-    if (lex.mode === '/*') {
-      if (c === '*' && next === '/') { lex.mode = ''; start = ++i + 1 }
-    } else if (lex.mode) {
-      if (c === '~') i++
-      else if (c === lex.mode) { lex.mode = ''; start = i+1 }
-    } else if (c === '/' && next === '/') { lex.comment = true; return code + text.slice(start,i) }
-    else if ((c === '/' && next === '*') || c === '"' || c === "'") {
-      code += text.slice(start,i) + ' '; lex.mode = c === '/' ? '/*' : c
-      if (c === '/') i++
-    }
-  }
-  return code + (lex.mode ? '' : text.slice(start))
+  eachBinding(code, (name, spelling, type, array) => {
+    const opt = item(name,'variable',`${kind} · ${spelling}`, 8)
+    if (!array) opt.receiverType = type // An unindexed array isn't an object receiver.
+    out.set(name.toLowerCase(),opt)
+  })
 }
 function scanDeclLine(code, kind, names) {
   if (!code) return
@@ -201,12 +161,12 @@ export function createScriptSource(session, script) {
     chunks.length = Math.min(chunks.length, Math.floor((line-1)/step))
     if (cursorPrefix && line < cursorPrefix.line) cursorPrefix = null
   }
-  async function source(ctx) {
+  async function lookup(ctx, member) {
     const {state, pos, explicit} = ctx
-    if (state.readOnly || !state.selection.main.empty || ctx.view?.compositionStarted) return null
+    if (!member && (state.readOnly || !state.selection.main.empty || ctx.view?.compositionStarted)) return null
     const line = state.doc.lineAt(pos), before = line.text.slice(0,pos-line.from), typed = tail.exec(before.slice(-256))?.[0] || ''
     const head = before.slice(0,before.length-typed.length), dotted = /\.\s*$/.test(head)
-    if (!explicit && !dotted && typed.length < 2) return null
+    if (member ? !dotted : !explicit && !dotted && typed.length < 2) return null
     const {root, objects} = session.model, parent = owner?.within ? objects.get(owner.within) : null
     let receiver = owner, namedReceiver, variable
     if (dotted) {
@@ -219,7 +179,7 @@ export function createScriptSource(session, script) {
       } else namedReceiver = name
     }
     if (typed && /[\p{L}\p{N}_$#]/u.test(head.slice(-1))) return null
-    ctx.addEventListener('abort', () => {}, {onDocChange:true})
+    if (!member) ctx.addEventListener('abort', () => {}, {onDocChange:true})
     const block = Math.floor((line.number-1)/step)
     // Build only completed chunks before the cursor. An edit discards the changed
     // suffix. A cold jump to a far line yields to input and is cancellable on edit.
@@ -263,7 +223,18 @@ export function createScriptSource(session, script) {
       // Known controls keep their model-specific members. Only unresolved receivers
       // need one exact lookup in the full (uncapped) Instance declaration index.
       if (!variable && !receiver) variable = exactName(await scopePage(session,'instance',ctx),namedReceiver)
-      if (!variable?.receiverType && !receiver) return null // Unsupported variables still shadow named controls.
+      if (member && !variable && !receiver) variable = exactName(await scopePage(session,'shared',ctx),namedReceiver) ||
+        exactName(await scopePage(session,'global',ctx),namedReceiver)
+      if (!member && !Object.hasOwn(controlApi,variable?.receiverType) && !receiver) return null
+    }
+    if (member) {
+      if (interrupted(ctx)) return null
+      if (variable) return variable.receiverType ? {type:variable.receiverType} : null
+      if (!receiver) return null
+      // Embedded objects may override a member locally. Otherwise prefer their declared base.
+      const local = receiver === root || receiver.scripts.some(s => s.name.toLowerCase() === member) ||
+        receiver.declaredMembers?.some(s => s.name.toLowerCase() === member)
+      return {local:receiver.id, type:local ? null : receiver.base.toLowerCase()}
     }
     if (!dotted) {
       if (inline?.size) lists.push(sort([...inline.values()]))
@@ -284,10 +255,9 @@ export function createScriptSource(session, script) {
       const lower = text.toLowerCase(); return ident.test(text) && lower.startsWith(prefix) && !complete?.has(lower)
     } : undefined }
   }
-  return {source, invalidate}
+  return {source: ctx => lookup(ctx, null), resolveMember: (ctx, member) => lookup(ctx, member.toLowerCase()), invalidate}
 }
-export function scriptCompletion(session, script, paneGroup) {
-  const {source, invalidate} = createScriptSource(session,script)
+export function scriptCompletion({source, invalidate}, paneGroup) {
   return [EditorState.phrases.of({Completions:'代码提示'}),
     // Sibling panes are isolated stacking contexts. Portal inside this design group,
     // not inside the clipped Script pane or outside the DSH window's focus boundary.

@@ -1,10 +1,10 @@
 import React from 'react'
-import { Annotation, Compartment, EditorState, Transaction } from '@codemirror/state'
+import { Annotation, Compartment, Facet, EditorState, Transaction } from '@codemirror/state'
 import { EditorView, keymap, lineNumbers } from '@codemirror/view'
 import { closeSearchPanel, findNext, findPrevious, openSearchPanel } from '@codemirror/search'
 import { history, historyKeymap, indentWithTab, standardKeymap, undo, redo, undoDepth, redoDepth, selectAll } from '@codemirror/commands'
-import { scriptCompletion } from './srw-completion.js'
-import { clickWordHighlight, viewWordAt } from './vscode-word-highlight.js'
+import { createScriptSource, scriptCompletion } from './srw-completion.js'
+import { clickWordHighlight, viewWordHit } from './vscode-word-highlight.js'
 import { folding, captureFolds, applyFolds, exposeGutterActions } from './vscode-folding.js'
 import { viewportHighlight } from './vscode-viewport-highlight.js'
 import { openBody, editsDirty, setBody } from './srw-edits.js'
@@ -38,8 +38,10 @@ export function scriptContext(event) {
   const dom = event.target.closest('[data-srw-view="script"] .cm-content')
   const view = dom && EditorView.findFromDOM(dom)
   if (!view) return null
-  const word = viewWordAt(view, event, true, event.button !== 2 && !event.ctrlKey)
-  if (!word) return null
+  const hit = viewWordHit(view, event, true, event.button !== 2 && !event.ctrlKey)
+  if (!hit) return null
+  const {word, pos} = hit, state = view.state
+  const resolve = hit.member && state.facet(memberResolver)
   const selected = !view.state.selection.main.empty
   const clipboard = cmd => { if (!document.execCommand(cmd)) throw Error('无法访问剪贴板，请使用键盘快捷键。') }
   const paste = async () => {
@@ -54,13 +56,14 @@ export function scriptContext(event) {
     ['剪切', selected, () => clipboard('cut')], ['复制', selected, () => clipboard('copy')],
     ['粘贴', true, paste], ['全选', true, selectAll],
   ]
-  return { word, actions, run(fn) { view.focus(); return fn(view) } }
+  return { word, actions, resolve: resolve && (signal => resolve({state, pos, view, get aborted() { return signal.aborted }}, word)), run(fn) { view.focus(); return fn(view) } }
 }
+const memberResolver = Facet.define({ combine: values => values[0] })
 const singleLine = [EditorView.clipboardInputFilter.of(text => text.replace(/[\r\n]+/g, ' ')),
   EditorState.changeFilter.of(tr => !tr.docChanged || tr.newDoc.lines === 1)]
 
 /** The same editable DOM paints the tokens, selection, IME composition and caret. */
-export function SrwCodeEditor({ session, bounds, label, inline, active, onDirty, script, wrap = false, readOnly = false }) {
+export function SrwCodeEditor({ session, bounds, label, inline, active, onDirty, script, jump, wrap = false, readOnly = false }) {
   const host = React.useRef(null), editor = React.useRef(null), latest = React.useRef(null)
   latest.current = { bounds, onDirty, wrap }
   const release = React.useCallback(() => { const view = editor.current; editor.current = null; view?.destroy() }, [])
@@ -77,12 +80,15 @@ export function SrwCodeEditor({ session, bounds, label, inline, active, onDirty,
     if (!marks) positions.set(session, marks = new Map())
     const saved = marks.get(bounds.key)
     const selection = saved && { anchor: Math.min(saved.anchor, doc.length), head: Math.min(saved.head, doc.length) }
+    let symbols // Read-only Script views need no declaration state until the first member lookup.
+    const getSymbols = () => symbols ||= createScriptSource(session, script)
     const view = new EditorView({ parent: host.current, scrollTo: saved?.scroll, state: EditorState.create({
       doc, selection,
       extensions: [numberedGutter, script ? [scriptSearch, scriptFolding] : [], wrapping.of(latest.current.wrap ? EditorView.lineWrapping : []),
         viewportHighlight('powerbuilder'), clickWordHighlight('powerbuilder'), EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly),
-        readOnly ? [] : [history(), keys, script ? scriptCompletion(session, script, host.current.closest('.world-srw-panes')) : []],
-        inline ? singleLine : [], EditorView.contentAttributes.of({ 'aria-label': label, 'aria-multiline': String(!inline), 'aria-readonly': String(readOnly), ...(script && readOnly ? { tabindex: '0' } : {}), spellcheck: 'false' }),
+        script ? memberResolver.of((ctx, member) => getSymbols().resolveMember(ctx, member)) : [],
+        readOnly ? [] : [history(), keys, script ? scriptCompletion(getSymbols(), host.current.closest('.world-srw-panes')) : []],
+        inline ? singleLine : [], EditorView.contentAttributes.of({ 'aria-label': label, 'aria-multiline': String(!inline), 'aria-readonly': String(readOnly), ...(readOnly ? { tabindex: script ? '0' : '-1' } : {}), spellcheck: 'false' }),
         EditorView.updateListener.of(update => {
           if (!update.docChanged || readOnly || update.transactions.some(tr => tr.annotation(mirrored))) return
           const wasDirty = editsDirty(session.edits)
@@ -115,5 +121,13 @@ export function SrwCodeEditor({ session, bounds, label, inline, active, onDirty,
     }
   }, [wrap])
   React.useLayoutEffect(() => { if (active) editor.current?.focus() }, [active, session, bounds.key])
+  React.useLayoutEffect(() => {
+    const view = editor.current
+    if (!jump || jump !== session.state.jumpCaret || jump.key !== bounds.key || !view) return
+    session.state.jumpCaret = null // Do not replay this jump on tab switch or steal a restored selection.
+    const pos = view.state.doc.line(Math.min(jump.line, view.state.doc.lines)).from
+    view.dispatch({selection:{anchor:pos}, effects:EditorView.scrollIntoView(pos,{y:'center'})})
+    view.focus()
+  }, [session, bounds.key, jump])
   return React.createElement('div', { ref: host, className: 'world-srw-code-input', 'data-inline': String(Boolean(inline)) })
 }
